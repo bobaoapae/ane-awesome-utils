@@ -1,0 +1,5 @@
+*.DS_Store
+*.swc
+/aneBuild/**/*.swc
+/aneBuild/**/*.aar
+/aneBuild/**/*.swf
