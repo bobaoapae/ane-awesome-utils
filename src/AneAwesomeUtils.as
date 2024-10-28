@@ -63,7 +63,7 @@ public class AneAwesomeUtils {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
-        return _extContext.call("uuid") as String;
+        return _extContext.call("awesomeUtils_uuid") as String;
     }
 
     private function getWebSocket(id:String):AneWebSocket {
@@ -77,7 +77,7 @@ public class AneAwesomeUtils {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
-        var id:String = uuid();
+        var id:String = _extContext.call("awesomeUtils_createWebSocket") as String;
         var ws:AneWebSocket = new AneWebSocket(id);
         _websockets[id] = ws;
         return ws;
