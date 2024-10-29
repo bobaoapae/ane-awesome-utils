@@ -178,12 +178,12 @@ public class AneAwesomeUtils {
     private function handleUrlLoaderEvent(param1:StatusEvent):void {
         var codeSplit:Array = param1.code.split(";");
         var dataSplit:Array = param1.level.split(";");
-        var loaderId:String = codeSplit[0];
+        var loaderId:String = codeSplit[1];
         var loader:Object = _loaders[loaderId];
         if (!loader) {
             return;
         }
-        switch (codeSplit[1]) {
+        switch (codeSplit[0]) {
             case "progress": {
                 if (loader.onProgress) {
                     loader.onProgress(dataSplit[0]);
@@ -218,9 +218,9 @@ public class AneAwesomeUtils {
     private function handleWebSocketEvent(param1:StatusEvent):void {
         var codeSplit:Array = param1.code.split(";");
         var dataSplit:Array = param1.level.split(";");
-        var webSocketId:String = codeSplit[0];
+        var webSocketId:String = codeSplit[1];
         var ws:AneWebSocket = getWebSocket(webSocketId);
-        switch (codeSplit[1]) {
+        switch (codeSplit[0]) {
             case "connected":
                 ws.dispatchEvent(new Event("connect"));
                 break;

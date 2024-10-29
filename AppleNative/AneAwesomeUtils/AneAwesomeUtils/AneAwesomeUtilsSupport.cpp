@@ -12,7 +12,7 @@ typedef void* NSWindow; // don't need this..
 #include "log.hpp"
 
 static bool alreadyInitialized = false;
-static FRENamedFunction* exportedFunctions = new FRENamedFunction[7];
+static FRENamedFunction* exportedFunctions = new FRENamedFunction[9];
 static std::unordered_map<std::string, WebSocketClient*> wsClientMap;
 static std::mutex wsClientMapMutex;
 static std::unordered_map<std::string, std::vector<uint8_t>> loaderResultMap;
@@ -114,9 +114,9 @@ static void writeLogCallback(const char *message) {
 static FREObject awesomeUtils_initialize(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("initialize called");
     auto initResult = csharpLibrary_awesomeUtils_initialize(
-                                                            NULL,
-                                                            NULL,
-                                                            NULL,
+                                                            (void*)&urlLoaderSuccessCallBack,
+                                                            (void*)&urlLoaderProgressCallBack,
+                                                            (void*)&urlLoaderErrorCallBack,
                                                             (void*)&webSocketConnectCallBack,
                                                             (void*)&webSocketErrorCallBack,
                                                             (void*)&webSocketDataCallBack,
@@ -397,9 +397,13 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[5].function = awesomeUtils_addStaticHost;
         exportedFunctions[6].name = (const uint8_t*)"awesomeUtils_removeStaticHost";
         exportedFunctions[6].function = awesomeUtils_removeStaticHost;
+        exportedFunctions[7].name = (const uint8_t*)"awesomeUtils_loadUrl";
+        exportedFunctions[7].function = awesomeUtils_loadUrl;
+        exportedFunctions[8].name = (const uint8_t*)"awesomeUtils_getLoaderResult";
+        exportedFunctions[8].function = awesomeUtils_getLoaderResult;
         context = ctx;
     }
-    if (numFunctionsToSet) *numFunctionsToSet = 7;
+    if (numFunctionsToSet) *numFunctionsToSet = 9;
     if (functionsToSet) *functionsToSet = exportedFunctions;
 }
 
