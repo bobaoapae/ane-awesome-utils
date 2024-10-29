@@ -1,0 +1,537 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		57B755842CD02C190000FE66 /* Adobe AIR.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 57B755832CD02C190000FE66 /* Adobe AIR.framework */; };
+		57B755882CD02C390000FE66 /* AwesomeAneUtils.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 57B755872CD02C390000FE66 /* AwesomeAneUtils.dylib */; };
+		57B755892CD02C390000FE66 /* AwesomeAneUtils.dylib in Embed Libraries */ = {isa = PBXBuildFile; fileRef = 57B755872CD02C390000FE66 /* AwesomeAneUtils.dylib */; };
+		57B7558C2CD02C5A0000FE66 /* AwesomeAneUtils.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 57B7558B2CD02C4F0000FE66 /* AwesomeAneUtils.a */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		57B755722CD02AFF0000FE66 /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "include/$(PRODUCT_NAME)";
+			dstSubfolderSpec = 16;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57B7558A2CD02C390000FE66 /* Embed Libraries */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				57B755892CD02C390000FE66 /* AwesomeAneUtils.dylib in Embed Libraries */,
+			);
+			name = "Embed Libraries";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		57B755652CD02ADE0000FE66 /* AneAwesomeUtils.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = AneAwesomeUtils.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		57B755742CD02AFF0000FE66 /* libAneAwesomeUtils-IOS.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libAneAwesomeUtils-IOS.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		57B755832CD02C190000FE66 /* Adobe AIR.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = "Adobe AIR.framework"; path = "../../../../AirSdks/AIRSDK_51.1.2/runtimes/air/mac/Adobe AIR.framework"; sourceTree = "<group>"; };
+		57B755872CD02C390000FE66 /* AwesomeAneUtils.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = AwesomeAneUtils.dylib; path = "../../CSharpLibrary/AwesomeAneUtils/AwesomeAneUtils/bin/Release/net9.0/macos-universal/AwesomeAneUtils.dylib"; sourceTree = "<group>"; };
+		57B7558B2CD02C4F0000FE66 /* AwesomeAneUtils.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = AwesomeAneUtils.a; path = "../../CSharpLibrary/AwesomeAneUtils/AwesomeAneUtils/bin/Release/net9.0/ios-universal/AwesomeAneUtils.a"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		57B7556A2CD02ADE0000FE66 /* Exceptions for "AneAwesomeUtils" folder in "AneAwesomeUtils" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			publicHeaders = (
+				AneAwesomeUtils.h,
+			);
+			target = 57B755642CD02ADE0000FE66 /* AneAwesomeUtils */;
+		};
+		57B755922CD02D360000FE66 /* Exceptions for "AneAwesomeUtils" folder in "AneAwesomeUtils-IOS" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AneAwesomeUtilsSupport.cpp,
+				log.cpp,
+				WebSocketClient.cpp,
+			);
+			target = 57B755732CD02AFF0000FE66 /* AneAwesomeUtils-IOS */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+		57B7557A2CD02AFF0000FE66 /* Exceptions for "AneAwesomeUtils-IOS" folder in "Copy Files" phase from "AneAwesomeUtils-IOS" target */ = {
+			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+			buildPhase = 57B755722CD02AFF0000FE66 /* CopyFiles */;
+			membershipExceptions = (
+				AneAwesomeUtils_IOS.h,
+			);
+		};
+/* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		57B755672CD02ADE0000FE66 /* AneAwesomeUtils */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				57B7556A2CD02ADE0000FE66 /* Exceptions for "AneAwesomeUtils" folder in "AneAwesomeUtils" target */,
+				57B755922CD02D360000FE66 /* Exceptions for "AneAwesomeUtils" folder in "AneAwesomeUtils-IOS" target */,
+			);
+			path = AneAwesomeUtils;
+			sourceTree = "<group>";
+		};
+		57B755752CD02AFF0000FE66 /* AneAwesomeUtils-IOS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				57B7557A2CD02AFF0000FE66 /* Exceptions for "AneAwesomeUtils-IOS" folder in "Copy Files" phase from "AneAwesomeUtils-IOS" target */,
+			);
+			path = "AneAwesomeUtils-IOS";
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		57B755622CD02ADE0000FE66 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				57B755842CD02C190000FE66 /* Adobe AIR.framework in Frameworks */,
+				57B755882CD02C390000FE66 /* AwesomeAneUtils.dylib in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57B755712CD02AFF0000FE66 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				57B7558C2CD02C5A0000FE66 /* AwesomeAneUtils.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		57B7555B2CD02ADE0000FE66 = {
+			isa = PBXGroup;
+			children = (
+				57B755672CD02ADE0000FE66 /* AneAwesomeUtils */,
+				57B755752CD02AFF0000FE66 /* AneAwesomeUtils-IOS */,
+				57B755822CD02C190000FE66 /* Frameworks */,
+				57B755662CD02ADE0000FE66 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		57B755662CD02ADE0000FE66 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				57B755652CD02ADE0000FE66 /* AneAwesomeUtils.framework */,
+				57B755742CD02AFF0000FE66 /* libAneAwesomeUtils-IOS.a */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		57B755822CD02C190000FE66 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				57B7558B2CD02C4F0000FE66 /* AwesomeAneUtils.a */,
+				57B755872CD02C390000FE66 /* AwesomeAneUtils.dylib */,
+				57B755832CD02C190000FE66 /* Adobe AIR.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		57B755602CD02ADE0000FE66 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		57B755642CD02ADE0000FE66 /* AneAwesomeUtils */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 57B7556B2CD02ADE0000FE66 /* Build configuration list for PBXNativeTarget "AneAwesomeUtils" */;
+			buildPhases = (
+				57B755602CD02ADE0000FE66 /* Headers */,
+				57B755612CD02ADE0000FE66 /* Sources */,
+				57B755622CD02ADE0000FE66 /* Frameworks */,
+				57B755632CD02ADE0000FE66 /* Resources */,
+				57B7558A2CD02C390000FE66 /* Embed Libraries */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				57B755672CD02ADE0000FE66 /* AneAwesomeUtils */,
+			);
+			name = AneAwesomeUtils;
+			packageProductDependencies = (
+			);
+			productName = AneAwesomeUtils;
+			productReference = 57B755652CD02ADE0000FE66 /* AneAwesomeUtils.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		57B755732CD02AFF0000FE66 /* AneAwesomeUtils-IOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 57B7557B2CD02AFF0000FE66 /* Build configuration list for PBXNativeTarget "AneAwesomeUtils-IOS" */;
+			buildPhases = (
+				57B755702CD02AFF0000FE66 /* Sources */,
+				57B755712CD02AFF0000FE66 /* Frameworks */,
+				57B755722CD02AFF0000FE66 /* CopyFiles */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				57B755752CD02AFF0000FE66 /* AneAwesomeUtils-IOS */,
+			);
+			name = "AneAwesomeUtils-IOS";
+			packageProductDependencies = (
+			);
+			productName = "AneAwesomeUtils-IOS";
+			productReference = 57B755742CD02AFF0000FE66 /* libAneAwesomeUtils-IOS.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		57B7555C2CD02ADE0000FE66 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					57B755642CD02ADE0000FE66 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					57B755732CD02AFF0000FE66 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = 57B7555F2CD02ADE0000FE66 /* Build configuration list for PBXProject "AneAwesomeUtils" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 57B7555B2CD02ADE0000FE66;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 57B755662CD02ADE0000FE66 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				57B755642CD02ADE0000FE66 /* AneAwesomeUtils */,
+				57B755732CD02AFF0000FE66 /* AneAwesomeUtils-IOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		57B755632CD02ADE0000FE66 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		57B755612CD02ADE0000FE66 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		57B755702CD02AFF0000FE66 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		57B7556C2CD02ADE0000FE66 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Developer ID Application: SURFTANK LTDA (QZPLNQ7VA7)";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = QZPLNQ7VA7;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 10.13;
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				OTHER_CODE_SIGN_FLAGS = "--options=runtime --timestamp";
+				PRODUCT_BUNDLE_IDENTIFIER = br.com.redesurftank.AneAwesomeUtils;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		57B7556D2CD02ADE0000FE66 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Developer ID Application: SURFTANK LTDA (QZPLNQ7VA7)";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = "";
+				"DEVELOPMENT_TEAM[sdk=macosx*]" = QZPLNQ7VA7;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 10.13;
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				OTHER_CODE_SIGN_FLAGS = "--options=runtime --timestamp";
+				PRODUCT_BUNDLE_IDENTIFIER = br.com.redesurftank.AneAwesomeUtils;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+		57B7556E2CD02ADE0000FE66 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				FRAMEWORK_SEARCH_PATHS = /Users/joaovitorborges/AirSdks/AIRSDK_51.1.2/runtimes/air/mac;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				HEADER_SEARCH_PATHS = /Users/joaovitorborges/AirSdks/AIRSDK_51.1.2/include;
+				LIBRARY_SEARCH_PATHS = /Users/joaovitorborges/AirSdks/AIRSDK_51.1.2/lib;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Debug;
+		};
+		57B7556F2CD02ADE0000FE66 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				FRAMEWORK_SEARCH_PATHS = /Users/joaovitorborges/AirSdks/AIRSDK_51.1.2/runtimes/air/mac;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				HEADER_SEARCH_PATHS = /Users/joaovitorborges/AirSdks/AIRSDK_51.1.2/include;
+				LIBRARY_SEARCH_PATHS = /Users/joaovitorborges/AirSdks/AIRSDK_51.1.2/lib;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Release;
+		};
+		57B7557C2CD02AFF0000FE66 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = QZPLNQ7VA7;
+				IPHONEOS_DEPLOYMENT_TARGET = 12.2;
+				OTHER_LDFLAGS = "-ObjC";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		57B7557D2CD02AFF0000FE66 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = QZPLNQ7VA7;
+				IPHONEOS_DEPLOYMENT_TARGET = 12.2;
+				OTHER_LDFLAGS = "-ObjC";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		57B7555F2CD02ADE0000FE66 /* Build configuration list for PBXProject "AneAwesomeUtils" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				57B7556E2CD02ADE0000FE66 /* Debug */,
+				57B7556F2CD02ADE0000FE66 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		57B7556B2CD02ADE0000FE66 /* Build configuration list for PBXNativeTarget "AneAwesomeUtils" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				57B7556C2CD02ADE0000FE66 /* Debug */,
+				57B7556D2CD02ADE0000FE66 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		57B7557B2CD02AFF0000FE66 /* Build configuration list for PBXNativeTarget "AneAwesomeUtils-IOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				57B7557C2CD02AFF0000FE66 /* Debug */,
+				57B7557D2CD02AFF0000FE66 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 57B7555C2CD02ADE0000FE66 /* Project object */;
+}

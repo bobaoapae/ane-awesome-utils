@@ -59,13 +59,6 @@ public class AneAwesomeUtils {
         return result;
     }
 
-    public function uuid():String {
-        if (!_successInit) {
-            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
-        }
-        return _extContext.call("awesomeUtils_uuid") as String;
-    }
-
     private function getWebSocket(id:String):AneWebSocket {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
@@ -158,8 +151,10 @@ public class AneAwesomeUtils {
     }
 
     private function onStatusEvent(param1:StatusEvent):void {
-        var dataSplit:Array = param1.level.split(";");
+        var dataSplit:Array = param1.code.split(";");
         var type:String = dataSplit[0];
+        var restCode:String = param1.code.substr(type.length + 1);
+        param1 = new StatusEvent("status", false, false, restCode, param1.level);
         switch (type) {
             case "url-loader":
                 handleUrlLoaderEvent(param1);
@@ -173,22 +168,23 @@ public class AneAwesomeUtils {
     }
 
     private function handleUrlLoaderEvent(param1:StatusEvent):void {
+        var codeSplit:Array = param1.code.split(";");
         var dataSplit:Array = param1.level.split(";");
-        var loaderId:String = dataSplit[1];
+        var loaderId:String = codeSplit[0];
         var loader:Object = _loaders[loaderId];
         if (!loader) {
             return;
         }
-        switch (param1.code) {
+        switch (codeSplit[1]) {
             case "progress": {
                 if (loader.onProgress) {
-                    loader.onProgress(dataSplit[2]);
+                    loader.onProgress(dataSplit[0]);
                 }
                 break;
             }
             case "error": {
                 if (loader.onError) {
-                    loader.onError(new Error(dataSplit[2]));
+                    loader.onError(new Error(dataSplit[0]));
                 }
                 delete _loaders[loaderId];
                 break;
@@ -212,9 +208,11 @@ public class AneAwesomeUtils {
     }
 
     private function handleWebSocketEvent(param1:StatusEvent):void {
+        var codeSplit:Array = param1.code.split(";");
         var dataSplit:Array = param1.level.split(";");
-        var ws:AneWebSocket = getWebSocket(dataSplit[1]);
-        switch (param1.code) {
+        var webSocketId:String = codeSplit[0];
+        var ws:AneWebSocket = getWebSocket(webSocketId);
+        switch (codeSplit[1]) {
             case "connected":
                 ws.dispatchEvent(new Event("connect"));
                 break;
@@ -226,8 +224,7 @@ public class AneAwesomeUtils {
                 ws.dispatchEvent(new WebSocketEvent("websocketData", WebSocket.fmtBINARY, bytes));
                 break;
             case "disconnected":
-                var parameters:Array = param1.level.split(";");
-                ws.closeReason = int(parameters[0]);
+                ws.closeReason = int(dataSplit[0]);
                 ws.dispatchEvent(new Event("close"));
                 break;
             case "error":
