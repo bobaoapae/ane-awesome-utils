@@ -53,9 +53,17 @@ public class AneAwesomeUtils {
         _loaders = new Dictionary();
     }
 
+    public function get successInit():Boolean {
+        return _successInit;
+    }
+
     public function initialize():Boolean {
-        var result:Boolean = _extContext.call("awesomeUtils_initialize") as Boolean;
-        _successInit = result;
+        try {
+            var result:Boolean = _extContext.call("awesomeUtils_initialize") as Boolean;
+            _successInit = result;
+        } catch (e:Error) {
+            trace("Error initializing ANE: " + e.message + " " + e.getStackTrace());
+        }
         return result;
     }
 
