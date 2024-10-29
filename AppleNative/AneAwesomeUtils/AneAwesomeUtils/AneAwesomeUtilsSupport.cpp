@@ -12,7 +12,7 @@ typedef void* NSWindow; // don't need this..
 #include "log.hpp"
 
 static bool alreadyInitialized = false;
-static FRENamedFunction* exportedFunctions = new FRENamedFunction[9];
+static FRENamedFunction* exportedFunctions = new FRENamedFunction[10];
 static std::unordered_map<std::string, WebSocketClient*> wsClientMap;
 static std::mutex wsClientMapMutex;
 static std::unordered_map<std::string, std::vector<uint8_t>> loaderResultMap;
@@ -217,11 +217,11 @@ static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcDat
         //TODO: Implement string message
     } else if (objectType == FRE_TYPE_BYTEARRAY) {
         FREByteArray byteArray;
-        FREAcquireByteArray(argv[1], &byteArray);
+        FREAcquireByteArray(argv[2], &byteArray);
 
         wsClient->sendMessage(byteArray.bytes, static_cast<int>(byteArray.length));
 
-        FREReleaseByteArray(argv[1]);
+        FREReleaseByteArray(argv[2]);
     }
 
 
@@ -401,9 +401,11 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[7].function = awesomeUtils_loadUrl;
         exportedFunctions[8].name = (const uint8_t*)"awesomeUtils_getLoaderResult";
         exportedFunctions[8].function = awesomeUtils_getLoaderResult;
+        exportedFunctions[9].name = (const uint8_t*)"awesomeUtils_getWebSocketByteArrayMessage";
+        exportedFunctions[9].function = awesomeUtils_getWebSocketByteArrayMessage;
         context = ctx;
     }
-    if (numFunctionsToSet) *numFunctionsToSet = 9;
+    if (numFunctionsToSet) *numFunctionsToSet = 10;
     if (functionsToSet) *functionsToSet = exportedFunctions;
 }
 

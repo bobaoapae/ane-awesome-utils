@@ -62,8 +62,8 @@ public static class ExportFunctions
         try
         {
             _urlLoaderSuccessCallBackDelegate = Marshal.GetDelegateForFunctionPointer<UrlLoaderSuccessCallBackDelegate>(urlLoaderSuccessCallBack);
-            _urlLoaderProgressCallBackDelegate = Marshal.GetDelegateForFunctionPointer<UrlLoaderProgressCallBackDelegate>(urlLoaderFailureCallBack);
-            _urlLoaderFailureCallBackDelegate = Marshal.GetDelegateForFunctionPointer<UrlLoaderFailureCallBackDelegate>(urlLoaderProgressCallBack);
+            _urlLoaderProgressCallBackDelegate = Marshal.GetDelegateForFunctionPointer<UrlLoaderProgressCallBackDelegate>(urlLoaderProgressCallBack);
+            _urlLoaderFailureCallBackDelegate = Marshal.GetDelegateForFunctionPointer<UrlLoaderFailureCallBackDelegate>(urlLoaderFailureCallBack);
             _webSocketConnectCallBackDelegate = Marshal.GetDelegateForFunctionPointer<WebSocketConnectCallBackDelegate>(webSocketConnectCallBack);
             _webSocketErrorCallBackDelegate = Marshal.GetDelegateForFunctionPointer<WebSocketErrorCallBackDelegate>(webSocketErrorCallBack);
             _webSocketDataCallBackDelegate = Marshal.GetDelegateForFunctionPointer<WebSocketDataCallBackDelegate>(webSocketDataCallBack);
@@ -191,11 +191,14 @@ public static class ExportFunctions
             {
                 _webSocketErrorWrapper(guidString, errorCode, error);
                 Marshal.FreeCoTaskMem(stringPtr);
+                if (WebSocketClients.TryRemove(guid, out var removed))
+                    removed.Dispose();
             },
             _writeLogWrapper);
 
         if (!WebSocketClients.TryAdd(guid, webSocketClient))
         {
+            webSocketClient.Dispose();
             Marshal.FreeCoTaskMem(stringPtr);
             return IntPtr.Zero;
         }

@@ -225,7 +225,7 @@ public class AneAwesomeUtils {
                 ws.dispatchEvent(new Event("connect"));
                 break;
             case "nextMessage":
-                var bytes:ByteArray = _extContext.call("awesomeUtils_getWebSocketByteArrayMessage") as ByteArray;
+                var bytes:ByteArray = _extContext.call("awesomeUtils_getWebSocketByteArrayMessage", webSocketId) as ByteArray;
                 if (!bytes)
                     break;
                 bytes.position = 0;

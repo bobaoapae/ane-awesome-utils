@@ -290,6 +290,7 @@ public class WebSocketClient : IDisposable
 
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
+                        _onLog?.Invoke("Connection closed by the server.");
                         await DisconnectAsync((int)result.CloseStatus.GetValueOrDefault()); // Get the close code from the client
                         return;
                     }
