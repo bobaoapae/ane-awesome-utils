@@ -4,10 +4,19 @@
     <linkerOptions>
         <option>-ObjC</option>
         <option>-ios_version_min 12.2</option>
-        <option>-rpath @loader_path/Frameworks</option>
-        <option>Frameworks/WebSocketANE_IOS_Wrapper.framework/Frameworks/WebSocketClientNativeLibrary.dylib</option>
+        <option>-rpath @loader_path/NativeCsharp</option>
+        <option>-framework GSS</option>
+        <option>-licucore</option>
     </linkerOptions>
     <packagedDependencies>
-        <packagedDependency>WebSocketANE_IOS_Wrapper.framework</packagedDependency>
+        <packagedDependency>NativeCsharp/libbootstrapperdll.o</packagedDependency>
+        <packagedDependency>NativeCsharp/libRuntime.WorkstationGC.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libeventpipe-disabled.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libstandalonegc-disabled.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libSystem.Native.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libSystem.Globalization.Native.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libSystem.IO.Compression.Native.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libSystem.Net.Security.Native.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libSystem.Security.Cryptography.Native.Apple.a</packagedDependency>
     </packagedDependencies>
 </platform>

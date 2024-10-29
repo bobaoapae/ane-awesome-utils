@@ -2,15 +2,9 @@
     <id>br.com.redesurftank.aneawesomeutils</id>
     <versionNumber>1</versionNumber>
     <platforms>
-        <platform name="Android-ARM">
-            <applicationDeployment>
-                <nativeLibrary>classes.jar</nativeLibrary>
-                <initializer>br.com.redesurftank.AneAwesomeUtils.AneAwesomeUtilsExtension</initializer>
-            </applicationDeployment>
-        </platform>
         <platform name="Windows-x86">
             <applicationDeployment>
-                <nativeLibrary>AneAwesomeUtils.dll</nativeLibrary>
+                <nativeLibrary>AneAwesomeUtilsWindows.dll</nativeLibrary>
                 <initializer>InitExtension</initializer>
                 <finalizer>DestroyExtension</finalizer>
             </applicationDeployment>
@@ -24,7 +18,7 @@
         </platform>
         <platform name="iPhone-ARM">
             <applicationDeployment>
-                <nativeLibrary>libAneAwesomeUtils.a</nativeLibrary>
+                <nativeLibrary>libAneAwesomeUtils-IOS.a</nativeLibrary>
                 <initializer>InitExtension</initializer>
                 <finalizer>DestroyExtension</finalizer>
             </applicationDeployment>
