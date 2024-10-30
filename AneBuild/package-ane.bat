@@ -2,7 +2,7 @@
 REM Set the path to the 7z.exe file
 set PATH=%PATH%;"C:\Program Files\7-Zip\"
 
-REM Copy the Android AAR and extract classes.jar and JNI libs
+copy ..\AndroidNative\app\build\outputs\aar\app-debug.aar .\android
 copy ..\out\production\ane-awesome-utils\ane-awesome-utils.swc library.swc
 
 REM Extract SWF from SWC for all platforms
@@ -16,4 +16,4 @@ REM Clean up temp directory
 rmdir /S /Q temp
 
 REM Package the ANE
-adt -package -target ane br.com.redesurftank.aneawesomeutils.ane extension.xml -swc library.swc -platform default -C default . -platform Windows-x86 -C windows-32 . -platform MacOS-x86-64 -C macos . -platform iPhone-ARM -platformoptions platformIOS.xml -C ios .
+adt -package -target ane br.com.redesurftank.aneawesomeutils.ane extension.xml -swc library.swc -platform default -C default . -platform Windows-x86 -C windows-32 . -platform MacOS-x86-64 -C macos . -platform iPhone-ARM -platformoptions platformIOS.xml -C ios . -platform Android -platformoptions platformAndroid.xml -C android .
