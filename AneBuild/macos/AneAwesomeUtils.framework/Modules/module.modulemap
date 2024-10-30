@@ -1,0 +1,6 @@
+framework module AneAwesomeUtils {
+  umbrella header "AneAwesomeUtils.h"
+  export *
+
+  module * { export * }
+}
