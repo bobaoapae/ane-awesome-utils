@@ -5,16 +5,12 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Net.Security;
 using System.Net.Sockets;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using AwesomeAneUtils;
-using DnsClient;
 
-namespace UrlLoaderNativeLibrary;
+namespace AwesomeAneUtils;
 
 public static class HappyEyeballsHttp
 {
