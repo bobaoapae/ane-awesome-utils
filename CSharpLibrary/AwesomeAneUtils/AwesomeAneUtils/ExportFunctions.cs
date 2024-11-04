@@ -1,8 +1,12 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
+using System.Net.NetworkInformation;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace AwesomeAneUtils;
@@ -333,6 +337,35 @@ public static class ExportFunctions
 
             var randomId = LoaderManager.Instance.StartLoad(url, method, variablesDictionary, headersDictionary);
             return Marshal.StringToCoTaskMemAnsi(randomId);
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_deviceUniqueId", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr get_deviceUniqueId()
+    {
+        try
+        {
+            var macAddresses = NetworkInterface.GetAllNetworkInterfaces()
+                .Where(nic => nic.OperationalStatus == OperationalStatus.Up &&
+                              nic.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                .Select(nic => nic.GetPhysicalAddress().ToString())
+                .OrderBy(mac => mac) // Order the MAC addresses
+                .ToList();
+
+            // Concatenate ordered MAC addresses into a single string
+            var concatenatedMacs = string.Join("", macAddresses);
+
+            // Compute SHA256 hash
+            var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(concatenatedMacs));
+
+            // Convert hash to hexadecimal string
+            var hashString = Convert.ToHexStringLower(hashBytes);
+
+            return Marshal.StringToHGlobalAnsi(hashString);
         }
         catch
         {

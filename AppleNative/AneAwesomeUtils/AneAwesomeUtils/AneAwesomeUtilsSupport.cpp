@@ -10,9 +10,13 @@
 typedef void* NSWindow; // don't need this..
 #include <FlashRuntimeExtensions.h>  // Adobe AIR runtime includes
 #include "log.hpp"
+#include <TargetConditionals.h> // Ensure TARGET_OS_IOS is defined
+#if TARGET_OS_IOS
+#include "DeviceUtils.h"
+#endif
 
 static bool alreadyInitialized = false;
-static FRENamedFunction* exportedFunctions = new FRENamedFunction[10];
+static FRENamedFunction* exportedFunctions = new FRENamedFunction[11];
 static std::unordered_map<std::string, WebSocketClient*> wsClientMap;
 static std::mutex wsClientMapMutex;
 static std::unordered_map<std::string, std::vector<uint8_t>> loaderResultMap;
@@ -374,6 +378,28 @@ static FREObject awesomeUtils_removeStaticHost(FREContext ctx, void *funcData, u
     return nullptr;
 }
 
+static FREObject awesomeUtils_getDeviceUniqueId(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+#if TARGET_OS_IOS
+    const char* uniqueIdCString = getDeviceUniqueId();
+    
+    FREObject freUniqueId;
+    FRENewObjectFromUTF8((uint32_t)strlen(uniqueIdCString) + 1, (const uint8_t*)uniqueIdCString, &freUniqueId);
+    return freUniqueId;
+#else
+    char *result = csharpLibrary_awesomeUtils_deviceUniqueId();
+    
+    if (!result) {
+        writeLog("deviceUniqueId returned null");
+        return nullptr;
+    }
+
+    FREObject resultStr;
+    FRENewObjectFromUTF8(strlen(result), (const uint8_t *)result, &resultStr);
+    free(result);
+    return resultStr;
+#endif
+}
+
 static void AneAwesomeUtilsSupportInitializer(
         void* extData,
         const uint8_t* ctxType,
@@ -403,9 +429,11 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[8].function = awesomeUtils_getLoaderResult;
         exportedFunctions[9].name = (const uint8_t*)"awesomeUtils_getWebSocketByteArrayMessage";
         exportedFunctions[9].function = awesomeUtils_getWebSocketByteArrayMessage;
+        exportedFunctions[10].name = (const uint8_t*)"awesomeUtils_getDeviceUniqueId";
+        exportedFunctions[10].function = awesomeUtils_getDeviceUniqueId;
         context = ctx;
     }
-    if (numFunctionsToSet) *numFunctionsToSet = 10;
+    if (numFunctionsToSet) *numFunctionsToSet = 11;
     if (functionsToSet) *functionsToSet = exportedFunctions;
 }
 
