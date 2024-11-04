@@ -2,6 +2,12 @@
     <id>br.com.redesurftank.aneawesomeutils</id>
     <versionNumber>1</versionNumber>
     <platforms>
+        <platform name="Android">
+            <applicationDeployment>
+                <nativeLibrary>app-debug.aar</nativeLibrary>
+                <initializer>br.com.redesurftank.aneawesomeutils.AneAwesomeUtilsExtension</initializer>
+            </applicationDeployment>
+        </platform>
         <platform name="Windows-x86">
             <applicationDeployment>
                 <nativeLibrary>AneAwesomeUtilsWindows.dll</nativeLibrary>
