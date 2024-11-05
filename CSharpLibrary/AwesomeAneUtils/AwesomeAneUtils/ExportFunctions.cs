@@ -187,7 +187,6 @@ public static class ExportFunctions
         var stringPtr = Marshal.StringToCoTaskMemAnsi(guidString);
 
         var webSocketClient = new WebSocketClient(
-            guid,
             () => { _webSocketConnectWrapper(guidString); },
             (data) => { _webSocketDataWrapper(guidString, data.Array); },
             (errorCode, error) =>

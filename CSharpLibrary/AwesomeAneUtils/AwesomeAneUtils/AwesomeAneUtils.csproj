@@ -8,6 +8,12 @@
     <PropertyGroup Condition="'$(Configuration)' == 'Release'">
         <RuntimeIdentifier>win-x86</RuntimeIdentifier>
         <PublishAot>true</PublishAot>
+        <StripSymbols>false</StripSymbols>
+        <DebugSymbols>true</DebugSymbols>
+        <DebugType>full</DebugType>
+        <NativeDebugSymbols>true</NativeDebugSymbols>
+        <Optimize>true</Optimize>
+        <OptimizationPreference>size</OptimizationPreference>
     </PropertyGroup>
 
     <ItemGroup>

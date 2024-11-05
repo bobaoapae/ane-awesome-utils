@@ -27,15 +27,12 @@ public class WebSocketClient : IDisposable
     private readonly Action<int, string> _onIoError;
     private readonly Action<string> _onLog;
 
-    private Guid _guid;
     private ClientWebSocket _activeWebSocket;
-    private bool _disposed = false;
-    
-    public Guid Guid => _guid;
+    private bool _disposed;
+    private bool _isDisconnectCalled;
 
-    public WebSocketClient(Guid guid, Action onConnect, Action<ArraySegment<byte>> onReceived, Action<int, string> onIoError, Action<string> onLog)
+    public WebSocketClient(Action onConnect, Action<ArraySegment<byte>> onReceived, Action<int, string> onIoError, Action<string> onLog)
     {
-        _guid = guid;
         _onConnect = onConnect;
         _onReceived = onReceived;
         _onIoError = onIoError;
@@ -47,7 +44,7 @@ public class WebSocketClient : IDisposable
         _ = Task.Run(async () => await ConnectAsync(uri));
     }
 
-    public async Task ConnectAsync(string uri)
+    private async Task ConnectAsync(string uri)
     {
         _cancellationTokenSource = new CancellationTokenSource();
 
@@ -322,14 +319,16 @@ public class WebSocketClient : IDisposable
 
     public void Disconnect(int closeReason)
     {
+        _isDisconnectCalled = true;
         _ = Task.Run(async () => await DisconnectAsync(closeReason));
     }
 
     private async Task DisconnectAsync(int closeReason, string reason = "Closing connection gracefully.")
     {
+        if(!_isDisconnectCalled)
+            _onIoError?.Invoke(closeReason, reason);
         if (_activeWebSocket is { State: WebSocketState.Open or WebSocketState.CloseReceived })
         {
-            _onIoError?.Invoke(closeReason, reason);
             try
             {
                 await _activeWebSocket.CloseAsync((WebSocketCloseStatus)closeReason, $"Closing with reason {closeReason}", CancellationToken.None);
