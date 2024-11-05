@@ -12,7 +12,7 @@
 #include "log.h"
 
 static bool alreadyInitialized = false;
-static FRENamedFunction* exportedFunctions = new FRENamedFunction[10];
+static FRENamedFunction* exportedFunctions = new FRENamedFunction[11];
 static std::unordered_map<std::string, WebSocketClient*> wsClientMap;
 static std::mutex wsClientMapMutex;
 static std::unordered_map<std::string, std::vector<uint8_t>> loaderResultMap;
@@ -60,7 +60,7 @@ static void __cdecl webSocketDataCallBack(char* guid, const uint8_t *data, int l
     writeLog("dataCallback called");
     
     WebSocketClient* wsClient = getWebSocketClient(guid);
-    
+
     if(wsClient == nullptr){
         writeLog("wsClient not found");
         return;
@@ -82,6 +82,7 @@ static void __cdecl webSocketErrorCallBack(char* guid, int closeCode, const char
     writeLog(closeCodeReason.c_str());
 
     dispatchWebSocketEvent(guid, "disconnected", closeCodeReason.c_str());
+    removeWebSocketClient(guid);
 }
 
 static void __cdecl urlLoaderSuccessCallBack(const char *id, uint8_t *result, int32_t length) {
@@ -374,6 +375,14 @@ static FREObject awesomeUtils_removeStaticHost(FREContext ctx, void *funcData, u
     return nullptr;
 }
 
+static FREObject awesomeUtils_getDeviceUniqueId(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("getDeviceId called");
+    auto id = csharpLibrary_awesomeUtils_deviceUniqueId();
+    FREObject resultStr;
+    FRENewObjectFromUTF8(strlen(id), reinterpret_cast<const uint8_t *>(id), &resultStr);
+    return resultStr;
+}
+
 static void AneAwesomeUtilsSupportInitializer(
         void* extData,
         const uint8_t* ctxType,
@@ -403,9 +412,11 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[8].function = awesomeUtils_getLoaderResult;
         exportedFunctions[9].name = (const uint8_t*)"awesomeUtils_getWebSocketByteArrayMessage";
         exportedFunctions[9].function = awesomeUtils_getWebSocketByteArrayMessage;
+        exportedFunctions[10].name = (const uint8_t*)"awesomeUtils_getDeviceUniqueId";
+        exportedFunctions[10].function = awesomeUtils_getDeviceUniqueId;
         context = ctx;
     }
-    if (numFunctionsToSet) *numFunctionsToSet = 10;
+    if (numFunctionsToSet) *numFunctionsToSet = 11;
     if (functionsToSet) *functionsToSet = exportedFunctions;
 }
 

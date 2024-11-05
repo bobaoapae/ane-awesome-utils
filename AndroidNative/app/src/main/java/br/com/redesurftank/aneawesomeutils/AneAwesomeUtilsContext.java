@@ -2,6 +2,8 @@ package br.com.redesurftank.aneawesomeutils;
 
 import static br.com.redesurftank.aneawesomeutils.AneAwesomeUtilsExtension.TAG;
 
+import android.content.ContentResolver;
+import android.provider.Settings;
 import android.util.JsonReader;
 
 import androidx.annotation.NonNull;
@@ -59,6 +61,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(LoadUrl.KEY, new LoadUrl());
         functionMap.put(GetLoaderResult.KEY, new GetLoaderResult());
         functionMap.put(GetWebSocketByteArrayMessage.KEY, new GetWebSocketByteArrayMessage());
+        functionMap.put(GetDeviceUniqueId.KEY, new GetDeviceUniqueId());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -442,6 +445,23 @@ public class AneAwesomeUtilsContext extends FREContext {
                 }
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error getting web socket message", e);
+            }
+            return null;
+        }
+    }
+
+    public static class GetDeviceUniqueId implements FREFunction {
+        public static final String KEY = "awesomeUtils_getDeviceUniqueId";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_getDeviceUniqueId");
+            try {
+                ContentResolver contentResolver = context.getActivity().getContentResolver();
+                String androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID);
+                return FREObject.newObject(androidId);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error getting device unique id", e);
             }
             return null;
         }

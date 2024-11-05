@@ -121,6 +121,22 @@ char* __cdecl csharpLibrary_awesomeUtils_uuid() {
     return result;
 }
 
+char* __cdecl csharpLibrary_awesomeUtils_deviceUniqueId() {
+    writeLog("deviceUniqueId called");
+    using DeviceUniqueIdFunction = char *(__cdecl *)();
+    auto func = reinterpret_cast<DeviceUniqueIdFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_deviceUniqueId"));
+
+    if (!func) {
+        writeLog("Could not load deviceUniqueId function");
+        return nullptr;
+    }
+
+    char *result = func();
+    writeLog("deviceUniqueId result: ");
+    writeLog(result);
+    return result;
+}
+
 char* __cdecl csharpLibrary_awesomeUtils_loadUrl(const char* url, const char* method, const char* variables, const char* headers) {
     writeLog("loadUrl called");
     using LoadUrlFunction = char *(__cdecl *)(const char *, const char *, const char *, const char *);

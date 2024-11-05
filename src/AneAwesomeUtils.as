@@ -158,6 +158,13 @@ public class AneAwesomeUtils {
         _loaders[loaderId] = {onResult: onResult, onError: onError, onProgress: onProgress};
     }
 
+    public function getDeviceUniqueId():String {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        return _extContext.call("awesomeUtils_getDeviceUniqueId") as String;
+    }
+
     private function onStatusEvent(param1:StatusEvent):void {
         var dataSplit:Array = param1.code.split(";");
         var type:String = dataSplit[0];
