@@ -14,13 +14,14 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		57B755722CD02AFF0000FE66 /* CopyFiles */ = {
+		57B755722CD02AFF0000FE66 /* Copy Files */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
 			dstPath = "include/$(PRODUCT_NAME)";
 			dstSubfolderSpec = 16;
 			files = (
 			);
+			name = "Copy Files";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		57B7558A2CD02C390000FE66 /* Embed Libraries */ = {
@@ -67,7 +68,7 @@
 /* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
 		57B7557A2CD02AFF0000FE66 /* Exceptions for "AneAwesomeUtils-IOS" folder in "Copy Files" phase from "AneAwesomeUtils-IOS" target */ = {
 			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
-			buildPhase = 57B755722CD02AFF0000FE66 /* CopyFiles */;
+			buildPhase = 57B755722CD02AFF0000FE66 /* Copy Files */;
 			membershipExceptions = (
 				AneAwesomeUtils_IOS.h,
 			);
@@ -187,7 +188,7 @@
 			buildPhases = (
 				57B755702CD02AFF0000FE66 /* Sources */,
 				57B755712CD02AFF0000FE66 /* Frameworks */,
-				57B755722CD02AFF0000FE66 /* CopyFiles */,
+				57B755722CD02AFF0000FE66 /* Copy Files */,
 			);
 			buildRules = (
 			);
@@ -210,7 +211,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastUpgradeCheck = 1600;
+				LastUpgradeCheck = 1610;
 				TargetAttributes = {
 					57B755642CD02ADE0000FE66 = {
 						CreatedOnToolsVersion = 16.0;
@@ -275,6 +276,7 @@
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEFINES_MODULE = YES;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = QZPLNQ7VA7;
@@ -310,6 +312,7 @@
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEFINES_MODULE = YES;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = QZPLNQ7VA7;
@@ -373,6 +376,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -440,6 +444,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -468,10 +473,17 @@
 		57B7557C2CD02AFF0000FE66 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = NO;
 				CODE_SIGN_STYLE = Automatic;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = QZPLNQ7VA7;
+				GCC_OPTIMIZATION_LEVEL = s;
 				IPHONEOS_DEPLOYMENT_TARGET = 12.2;
-				OTHER_LDFLAGS = "-ObjC";
+				OTHER_CFLAGS = "";
+				OTHER_LDFLAGS = (
+					"-ObjC",
+					"-Wl,--require-defined,NativeAOT_StaticInitialization",
+				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -486,10 +498,15 @@
 		57B7557D2CD02AFF0000FE66 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = NO;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = QZPLNQ7VA7;
 				IPHONEOS_DEPLOYMENT_TARGET = 12.2;
-				OTHER_LDFLAGS = "-ObjC";
+				OTHER_CFLAGS = "";
+				OTHER_LDFLAGS = (
+					"-ObjC",
+					"-Wl,--require-defined,NativeAOT_StaticInitialization",
+				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
