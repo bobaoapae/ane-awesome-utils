@@ -86,6 +86,7 @@ __cdecl static void webSocketErrorCallBack(char* guid, int closeCode, const char
     writeLog(closeCodeReason.c_str());
 
     dispatchWebSocketEvent(guid, "disconnected", closeCodeReason.c_str());
+    removeWebSocketClient(guid);
 }
 
 __cdecl void urlLoaderSuccessCallBack(const char *id, uint8_t *result, int32_t length) {
@@ -139,7 +140,7 @@ static FREObject awesomeUtils_createWebSocket(FREContext ctx, void *funcData, ui
     setWebSocketClient(std::string(idWebSocket), wsClient);
     
     FREObject resultStr;
-    FRENewObjectFromUTF8(strlen(idWebSocket), (const uint8_t *)idWebSocket, &resultStr);
+    FRENewObjectFromUTF8((uint32_t)strlen(idWebSocket), (const uint8_t *)idWebSocket, &resultStr);
     return resultStr;
 }
 
@@ -260,7 +261,7 @@ static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void 
     
     FREObject byteArrayObject = nullptr;
     FREByteArray byteArray;
-    byteArray.length = vectorData.size();
+    byteArray.length = (uint32_t)vectorData.size();
     byteArray.bytes = vectorData.data();
 
     FRENewByteArray(&byteArray, &byteArrayObject);
@@ -301,7 +302,7 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
     writeLog(("Result: " + std::string(result)).c_str());
 
     FREObject resultStr;
-    FRENewObjectFromUTF8(strlen(result), (const uint8_t *)result, &resultStr);
+    FRENewObjectFromUTF8((uint32_t)strlen(result), (const uint8_t *)result, &resultStr);
     free(result);
     return resultStr;
 }
@@ -329,7 +330,7 @@ static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData
     if (!result.empty()) {
         writeLog("Creating AS3 ByteArray");
         FREByteArray byteArray;
-        byteArray.length = result.size();
+        byteArray.length = (uint32_t)result.size();
         byteArray.bytes = result.data();
 
         FRENewByteArray(&byteArray, &byteArrayObject);
@@ -394,7 +395,7 @@ static FREObject awesomeUtils_getDeviceUniqueId(FREContext ctx, void *funcData, 
     }
 
     FREObject resultStr;
-    FRENewObjectFromUTF8(strlen(result), (const uint8_t *)result, &resultStr);
+    FRENewObjectFromUTF8((uint32_t)strlen(result), (const uint8_t *)result, &resultStr);
     free(result);
     return resultStr;
 #endif
