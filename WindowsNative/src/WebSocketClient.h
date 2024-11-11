@@ -16,20 +16,20 @@
 
 class WebSocketClient {
 public:
-    explicit WebSocketClient(char* guid);
+    explicit WebSocketClient(const char* guid);
 
     ~WebSocketClient();
 
-    void connect(const char* uri);
-    void close(uint32_t closeCode);
-    void sendMessage(uint8_t* bytes, int lenght);
+    void connect(const char* uri) const;
+    void close(uint32_t closeCode) const;
+    void sendMessage(uint8_t* bytes, int lenght) const;
     std::optional<std::vector<uint8_t>> getNextMessage();
     void enqueueMessage(const std::vector<uint8_t>& message);
 
 private:
     std::mutex m_lock_receive_queue;
     std::queue<std::vector<uint8_t>> m_received_message_queue;
-    char* m_guidPointer;
+    std::string m_guid;
 };
 
 #endif /* WebSocketClient_hpp */

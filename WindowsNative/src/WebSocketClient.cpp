@@ -2,24 +2,24 @@
 #include "WebSocketClient.h"
 #include "log.h"
 
-WebSocketClient::WebSocketClient(char* guid) {
+WebSocketClient::WebSocketClient(const char *guid) {
     writeLog("WebSocketClient created");
-    m_guidPointer = guid;
-    writeLog(m_guidPointer);
+    m_guid = std::string(guid); // Use std::string instead of char*
+    writeLog(m_guid.c_str());
 }
 
 WebSocketClient::~WebSocketClient() = default;
 
-void WebSocketClient::connect(const char* uri) {
-    csharpLibrary_awesomeUtils_connectWebSocket(m_guidPointer, uri);
+void WebSocketClient::connect(const char *uri) const {
+    csharpLibrary_awesomeUtils_connectWebSocket(m_guid.c_str(), uri);
 }
 
-void WebSocketClient::close(uint32_t closeCode) {
-    csharpLibrary_awesomeUtils_closeWebSocket(m_guidPointer, static_cast<int>(closeCode));
+void WebSocketClient::close(uint32_t closeCode) const {
+    csharpLibrary_awesomeUtils_closeWebSocket(m_guid.c_str(), static_cast<int>(closeCode));
 }
 
-void WebSocketClient::sendMessage(uint8_t* bytes, int lenght) {
-    csharpLibrary_awesomeUtils_sendWebSocketMessage(m_guidPointer, bytes, lenght);
+void WebSocketClient::sendMessage(uint8_t *bytes, int length) const {
+    csharpLibrary_awesomeUtils_sendWebSocketMessage(m_guid.c_str(), bytes, length);
 }
 
 std::optional<std::vector<uint8_t> > WebSocketClient::getNextMessage() {

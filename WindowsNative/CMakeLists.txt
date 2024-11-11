@@ -22,6 +22,7 @@ if(VCPKG_TARGET_TRIPLET MATCHES "-static$")
     message(STATUS "Compiling static")
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 else()
+    message(STATUS "Compiling dynamic")
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
 endif()
 

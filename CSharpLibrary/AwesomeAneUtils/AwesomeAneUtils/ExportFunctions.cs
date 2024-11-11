@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 
 namespace AwesomeAneUtils;
 
@@ -79,13 +80,13 @@ public static class ExportFunctions
 
         try
         {
-            _writeLogWrapper = (message) =>
+            _writeLogWrapper = message =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(message);
 
                 _writeLogCallBackDelegate(ptr1);
 
-                Marshal.FreeCoTaskMem(ptr1);
+                SafeFreeCoTaskMem(ptr1);
             };
 
             _urlLoaderSuccessWrapper = (guid, bytes) =>
@@ -96,8 +97,8 @@ public static class ExportFunctions
 
                 _urlLoaderSuccessCallBackDelegate(ptr1, ptr2, bytes.Length);
 
-                Marshal.FreeCoTaskMem(ptr1);
-                Marshal.FreeCoTaskMem(ptr2);
+                SafeFreeCoTaskMem(ptr1);
+                SafeFreeCoTaskMem(ptr2);
             };
 
             _urlLoaderFailureWrapper = (guid, error) =>
@@ -107,8 +108,8 @@ public static class ExportFunctions
 
                 _urlLoaderFailureCallBackDelegate(ptr1, ptr2);
 
-                Marshal.FreeCoTaskMem(ptr1);
-                Marshal.FreeCoTaskMem(ptr2);
+                SafeFreeCoTaskMem(ptr1);
+                SafeFreeCoTaskMem(ptr2);
             };
 
             _urlLoaderProgressWrapper = (guid, progress) =>
@@ -118,17 +119,17 @@ public static class ExportFunctions
 
                 _urlLoaderProgressCallBackDelegate(ptr1, ptr2);
 
-                Marshal.FreeCoTaskMem(ptr1);
-                Marshal.FreeCoTaskMem(ptr2);
+                SafeFreeCoTaskMem(ptr1);
+                SafeFreeCoTaskMem(ptr2);
             };
 
-            _webSocketConnectWrapper = (guid) =>
+            _webSocketConnectWrapper = guid =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
 
                 _webSocketConnectCallBackDelegate(ptr1);
 
-                Marshal.FreeCoTaskMem(ptr1);
+                SafeFreeCoTaskMem(ptr1);
             };
 
             _webSocketErrorWrapper = (guid, errorCode, error) =>
@@ -138,8 +139,8 @@ public static class ExportFunctions
 
                 _webSocketErrorCallBackDelegate(ptr1, errorCode, ptr2);
 
-                Marshal.FreeCoTaskMem(ptr1);
-                Marshal.FreeCoTaskMem(ptr2);
+                SafeFreeCoTaskMem(ptr1);
+                SafeFreeCoTaskMem(ptr2);
             };
 
             _webSocketDataWrapper = (guid, data) =>
@@ -150,8 +151,8 @@ public static class ExportFunctions
 
                 _webSocketDataCallBackDelegate(ptr1, ptr2, data.Length);
 
-                Marshal.FreeCoTaskMem(ptr1);
-                Marshal.FreeCoTaskMem(ptr2);
+                SafeFreeCoTaskMem(ptr1);
+                SafeFreeCoTaskMem(ptr2);
             };
         }
         catch
@@ -185,23 +186,31 @@ public static class ExportFunctions
         var guid = Guid.NewGuid();
         var guidString = guid.ToString();
         var stringPtr = Marshal.StringToCoTaskMemAnsi(guidString);
+        var alreadyDispatchError = false;
+        var lockError = new Lock();
 
         var webSocketClient = new WebSocketClient(
             () => { _webSocketConnectWrapper(guidString); },
-            (data) => { _webSocketDataWrapper(guidString, data.Array); },
+            data => { _webSocketDataWrapper(guidString, data.Array); },
             (errorCode, error) =>
             {
-                _webSocketErrorWrapper(guidString, errorCode, error);
-                Marshal.FreeCoTaskMem(stringPtr);
-                if (WebSocketClients.TryRemove(guid, out var removed))
-                    removed.Dispose();
+                using (lockError.EnterScope())
+                {
+                    if (alreadyDispatchError)
+                        return;
+                    _webSocketErrorWrapper(guidString, errorCode, error);
+                    SafeFreeCoTaskMem(stringPtr);
+                    if (WebSocketClients.TryRemove(guid, out var removed))
+                        removed.Dispose();
+                    alreadyDispatchError = true;
+                }
             },
             _writeLogWrapper);
 
         if (!WebSocketClients.TryAdd(guid, webSocketClient))
         {
             webSocketClient.Dispose();
-            Marshal.FreeCoTaskMem(stringPtr);
+            SafeFreeCoTaskMem(stringPtr);
             return IntPtr.Zero;
         }
 
@@ -379,7 +388,7 @@ public static class ExportFunctions
 
         try
         {
-            var logBuilder = new System.Text.StringBuilder();
+            var logBuilder = new StringBuilder();
 
             // Log the main exception
             logBuilder.AppendLine($"Exception: {exception.Message}");
@@ -399,6 +408,18 @@ public static class ExportFunctions
         catch (Exception)
         {
             // ignored
+        }
+    }
+
+    private static void SafeFreeCoTaskMem(IntPtr ptr)
+    {
+        try
+        {
+            Marshal.FreeCoTaskMem(ptr);
+        }
+        catch
+        {
+            //ignored
         }
     }
 }

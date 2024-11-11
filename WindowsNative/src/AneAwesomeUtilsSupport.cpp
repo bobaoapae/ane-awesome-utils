@@ -1,7 +1,7 @@
 #include "AneAwesomeUtilsCsharp.h"
 #include "WebSocketClient.h"
-#include <queue>
 #include <string>
+#include <utility>
 #include <vector>
 #include <unordered_map>
 #include <mutex>
@@ -12,69 +12,91 @@
 #include "log.h"
 
 static bool alreadyInitialized = false;
-static FRENamedFunction* exportedFunctions = new FRENamedFunction[11];
-static std::unordered_map<std::string, WebSocketClient*> wsClientMap;
+static FRENamedFunction *exportedFunctions = new FRENamedFunction[11];
+static std::unordered_map<std::string, std::shared_ptr<WebSocketClient> > wsClientMap;
 static std::mutex wsClientMapMutex;
-static std::unordered_map<std::string, std::vector<uint8_t>> loaderResultMap;
+static std::unordered_map<std::string, std::shared_ptr<WebSocketClient> > deferredDeleteWsClientMap;
+static std::mutex deferredDeleteWsClientMapMutex;
+static std::unordered_map<std::string, std::vector<uint8_t> > loaderResultMap;
 static std::mutex loaderResultMapMutex;
 static FREContext context;
 
-// Helper function to safely retrieve WebSocketClient from the map
-static WebSocketClient* getWebSocketClient(std::string guidString) {
-    std::lock_guard<std::mutex> guard(wsClientMapMutex);
+static std::shared_ptr<WebSocketClient> getWebSocketClient(const std::string &guidString) {
+    std::lock_guard guard(wsClientMapMutex);
+    auto it = wsClientMap.find(guidString);
+    return (it != wsClientMap.end()) ? it->second : nullptr;
+}
+
+static void setWebSocketClient(const std::string &guidString, std::shared_ptr<WebSocketClient> wsClient) {
+    std::lock_guard guard(wsClientMapMutex);
+    wsClientMap[guidString] = std::move(wsClient);
+}
+
+// Remove WebSocketClient safely, with deferred deletion if necessary
+static void removeWebSocketClient(const std::string &guidString) {
+    std::lock_guard guard(wsClientMapMutex);
     auto it = wsClientMap.find(guidString);
     if (it != wsClientMap.end()) {
-        return it->second;
+        if (it->second.use_count() == 1) {
+            wsClientMap.erase(it); // Safe to delete
+        } else {
+            std::lock_guard deferredLock(deferredDeleteWsClientMapMutex);
+            deferredDeleteWsClientMap[guidString] = it->second; // Move to deferred deletion
+        }
     }
-    return nullptr;
 }
 
-// Helper function to safely insert WebSocketClient into the map
-static void setWebSocketClient(std::string guidString, WebSocketClient* wsClient) {
-    std::lock_guard<std::mutex> guard(wsClientMapMutex);
-    wsClientMap[guidString] = wsClient;
+// Check and delete deferred WebSocketClients if no other references remain
+static void deferredDeleteWebSocketClients() {
+    std::lock_guard deferredLock(deferredDeleteWsClientMapMutex);
+    for (auto it = deferredDeleteWsClientMap.begin(); it != deferredDeleteWsClientMap.end();) {
+        if (it->second.use_count() == 1) {
+            std::lock_guard mapLock(wsClientMapMutex);
+            wsClientMap.erase(it->first); // Remove from main map
+            it = deferredDeleteWsClientMap.erase(it); // Safe erase from deferred map
+        } else {
+            ++it; // Skip if still in use
+        }
+    }
 }
 
-// Helper function to safely remove WebSocketClient from the map
-static void removeWebSocketClient(std::string guidString) {
-    std::lock_guard<std::mutex> guard(wsClientMapMutex);
-    wsClientMap.erase(guidString);
-}
-
-static void dispatchWebSocketEvent(const char* guid, const char* code, const char* level) {
+static void dispatchWebSocketEvent(const char *guid, const char *code, const char *level) {
     std::string fullCode = std::string("web-socket;") + code + std::string(";") + guid;
     FREDispatchStatusEventAsync(context, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
 }
 
-static void dispatchUrlLoaderEvent(const char* guid, const char* code, const char* level) {
+static void dispatchUrlLoaderEvent(const char *guid, const char *code, const char *level) {
     std::string fullCode = std::string("url-loader;") + code + std::string(";") + guid;
     FREDispatchStatusEventAsync(context, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
 }
 
-static void __cdecl webSocketConnectCallBack(char* guid) {
+static void __cdecl webSocketConnectCallBack(char *guid) {
     writeLog("connectCallback called");
     dispatchWebSocketEvent(guid, "connected", "");
 }
 
-static void __cdecl webSocketDataCallBack(char* guid, const uint8_t *data, int length) {
+static void __cdecl webSocketDataCallBack(char *guid, const uint8_t *data, int length) {
     writeLog("dataCallback called");
-    
-    WebSocketClient* wsClient = getWebSocketClient(guid);
 
-    if(wsClient == nullptr){
+    // Retrieve the WebSocketClient using shared_ptr for safe memory management
+    auto wsClient = getWebSocketClient(guid);
+
+    if (wsClient == nullptr) {
         writeLog("wsClient not found");
         return;
     }
-    
-    auto dataCopyVector = std::vector<uint8_t>();
-    dataCopyVector.resize(length);
-    std::copy_n(data, length, dataCopyVector.begin());
+
+    // Copy the incoming data into a vector
+    auto dataCopyVector = std::vector(data, data + length);
+
+    // Enqueue the message for the WebSocketClient
     wsClient->enqueueMessage(dataCopyVector);
 
+    // Dispatch the event to notify that a new message is available
     dispatchWebSocketEvent(guid, "nextMessage", "");
 }
 
-static void __cdecl webSocketErrorCallBack(char* guid, int closeCode, const char *reason) {
+static void __cdecl webSocketErrorCallBack(char *guid, int closeCode, const char *reason) {
     writeLog("disconnectCallback called");
 
     auto closeCodeReason = std::to_string(closeCode) + ";" + std::string(reason);
@@ -88,13 +110,20 @@ static void __cdecl webSocketErrorCallBack(char* guid, int closeCode, const char
 static void __cdecl urlLoaderSuccessCallBack(const char *id, uint8_t *result, int32_t length) {
     writeLog("Calling SuccessCallback");
 
+    // Prepare data outside the lock to minimize locked duration
     std::string id_str(id);
+    std::vector resultData(result, result + length);
+
     writeLog(("ID: " + id_str).c_str());
     writeLog(("Result Length: " + std::to_string(length)).c_str());
 
-    std::lock_guard lock(loaderResultMapMutex);
-    loaderResultMap.insert({id_str, std::vector<uint8_t>(result, result + length)});
+    // Lock only around the insert operation
+    {
+        std::lock_guard lock(loaderResultMapMutex);
+        loaderResultMap.insert({id_str, std::move(resultData)});
+    }
 
+    // Notify and log the success event outside the lock
     dispatchUrlLoaderEvent(id, "success", "");
     writeLog("Dispatched success event");
 }
@@ -115,15 +144,15 @@ static void writeLogCallback(const char *message) {
 static FREObject awesomeUtils_initialize(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("initialize called");
     auto initResult = csharpLibrary_awesomeUtils_initialize(
-                                                            (void*)&urlLoaderSuccessCallBack,
-                                                            (void*)&urlLoaderProgressCallBack,
-                                                            (void*)&urlLoaderErrorCallBack,
-                                                            (void*)&webSocketConnectCallBack,
-                                                            (void*)&webSocketErrorCallBack,
-                                                            (void*)&webSocketDataCallBack,
-                                                            (void*)&writeLogCallback
-                                                            );
-    
+        (void *) &urlLoaderSuccessCallBack,
+        (void *) &urlLoaderProgressCallBack,
+        (void *) &urlLoaderErrorCallBack,
+        (void *) &webSocketConnectCallBack,
+        (void *) &webSocketErrorCallBack,
+        (void *) &webSocketDataCallBack,
+        (void *) &writeLogCallback
+    );
+
     FREObject resultBool;
     FRENewObjectFromBool(initResult == 1, &resultBool);
     return resultBool;
@@ -131,12 +160,20 @@ static FREObject awesomeUtils_initialize(FREContext ctx, void *funcData, uint32_
 
 static FREObject awesomeUtils_createWebSocket(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("createWebSocket called");
-    auto idWebSocket = csharpLibrary_awesomeUtils_createWebSocket();
-    auto wsClient = new WebSocketClient(idWebSocket);
-    setWebSocketClient(std::string(idWebSocket), wsClient);
-    
+
+    deferredDeleteWebSocketClients();
+
+    // Capture idWebSocket immediately as a string
+    const char *idWebSocketPtr = csharpLibrary_awesomeUtils_createWebSocket();
+    std::string idWebSocket(idWebSocketPtr); // Copy to std::string to ensure safety
+
+    auto wsClient = std::make_shared<WebSocketClient>(idWebSocket.c_str()); // Constructor already copies
+
+    // Pass std::string to setWebSocketClient to avoid further use of the raw pointer
+    setWebSocketClient(idWebSocket, wsClient);
+
     FREObject resultStr;
-    FRENewObjectFromUTF8(strlen(idWebSocket), (const uint8_t *)idWebSocket, &resultStr);
+    FRENewObjectFromUTF8(idWebSocket.length(), reinterpret_cast<const uint8_t *>(idWebSocket.c_str()), &resultStr);
     return resultStr;
 }
 
@@ -158,16 +195,14 @@ static FREObject awesomeUtils_connectWebSocket(FREContext ctx, void *funcData, u
     writeLog("Calling connect to uri: ");
     writeLog(uriChar);
 
-    WebSocketClient* wsClient = getWebSocketClient(idChar);
-    
-    if(wsClient == nullptr){
+    auto wsClient = getWebSocketClient(idChar);
+
+    if (wsClient == nullptr) {
         writeLog("wsClient not found");
         return nullptr;
     }
 
-    if (wsClient != nullptr) {
-        wsClient->connect(reinterpret_cast<const char *>(uri));
-    }
+    wsClient->connect(reinterpret_cast<const char *>(uri));
 
     return nullptr;
 }
@@ -181,17 +216,15 @@ static FREObject awesomeUtils_closeWebSocket(FREContext ctx, void *funcData, uin
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
     auto idChar = reinterpret_cast<const char *>(id);
 
-    WebSocketClient* wsClient = getWebSocketClient(idChar);
-    
-    if(wsClient == nullptr){
+    auto wsClient = getWebSocketClient(idChar);
+
+    if (wsClient == nullptr) {
         writeLog("wsClient not found");
         return nullptr;
     }
 
     uint32_t closeCode = 1000; // Default close code
-    if (argc > 0) {
-        FREGetObjectAsUint32(argv[0], &closeCode);
-    }
+    FREGetObjectAsUint32(argv[0], &closeCode);
 
     wsClient->close(closeCode);
     return nullptr;
@@ -206,7 +239,7 @@ static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcDat
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
     auto idChar = reinterpret_cast<const char *>(id);
 
-    WebSocketClient* wsClient = getWebSocketClient(idChar);
+    auto wsClient = getWebSocketClient(idChar);
 
     uint32_t messageType;
     FREGetObjectAsUint32(argv[1], &messageType);
@@ -231,7 +264,7 @@ static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcDat
 
 static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("getByteArrayMessage called");
-    
+
     if (argc < 1) return nullptr;
 
     uint32_t idLength;
@@ -239,7 +272,7 @@ static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void 
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
     auto idChar = reinterpret_cast<const char *>(id);
 
-    WebSocketClient* wsClient = getWebSocketClient(idChar);
+    auto wsClient = getWebSocketClient(idChar);
 
     auto nextMessageResult = wsClient->getNextMessage();
 
@@ -254,7 +287,7 @@ static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void 
         writeLog("message it's empty");
         return nullptr;
     }
-    
+
     FREObject byteArrayObject = nullptr;
     FREByteArray byteArray;
     byteArray.length = vectorData.size();
@@ -271,73 +304,73 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
     uint32_t stringLength;
     const uint8_t *url;
     FREGetObjectAsUTF8(argv[0], &stringLength, &url);
-    writeLog(("URL: " + std::string((const char *)url)).c_str());
+    writeLog(("URL: " + std::string(reinterpret_cast<const char *>(url))).c_str());
 
     uint32_t methodLength;
     const uint8_t *method;
     FREGetObjectAsUTF8(argv[1], &methodLength, &method);
-    writeLog(("Method: " + std::string((const char *)method)).c_str());
+    writeLog(("Method: " + std::string(reinterpret_cast<const char *>(method))).c_str());
 
     uint32_t variableLength;
     const uint8_t *variable;
     FREGetObjectAsUTF8(argv[2], &variableLength, &variable);
-    writeLog(("Variable: " + std::string((const char *)variable)).c_str());
+    writeLog(("Variable: " + std::string(reinterpret_cast<const char *>(variable))).c_str());
 
     uint32_t headersLength;
     const uint8_t *headers;
     FREGetObjectAsUTF8(argv[3], &headersLength, &headers);
-    writeLog(("Headers: " + std::string((const char *)headers)).c_str());
+    writeLog(("Headers: " + std::string(reinterpret_cast<const char *>(headers))).c_str());
 
-    char *result = csharpLibrary_awesomeUtils_loadUrl((const char *)url, (const char *)method, (const char *)variable, (const char *)headers);
+    char *result = csharpLibrary_awesomeUtils_loadUrl(reinterpret_cast<const char *>(url), reinterpret_cast<const char *>(method), reinterpret_cast<const char *>(variable), reinterpret_cast<const char *>(headers));
 
     if (!result) {
         writeLog("startLoader returned null");
         return nullptr;
     }
 
-    writeLog(("Result: " + std::string(result)).c_str());
+    auto resultString = std::string(result);
+
+    writeLog(("Result: " + resultString).c_str());
 
     FREObject resultStr;
-    FRENewObjectFromUTF8(strlen(result), (const uint8_t *)result, &resultStr);
+    FRENewObjectFromUTF8(resultString.length(), reinterpret_cast<const uint8_t *>(resultString.c_str()), &resultStr);
     free(result);
     return resultStr;
 }
 
-
 static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData, uint32_t argc, FREObject argv[]) {
     writeLog("Calling getResult");
 
+    // Extract UUID from arguments
     uint32_t uuidLength;
     const uint8_t *uuid;
     FREGetObjectAsUTF8(argv[0], &uuidLength, &uuid);
     std::string uuidStr(reinterpret_cast<const char *>(uuid), uuidLength);
-    writeLog(("GetResult ID: " + uuidStr).c_str());
 
-    std::vector<uint8_t> result;
-    std::lock_guard lock(loaderResultMapMutex);
-    auto it = loaderResultMap.find(uuidStr);
-    if (it != loaderResultMap.end()) {
-        result = it->second;
-        loaderResultMap.erase(it);
-        writeLog("Result found");
+    // Use an optional to store the result if found
+    std::optional<std::vector<uint8_t> > result;
+
+    // Lock the map only for the lookup and erase
+    {
+        std::lock_guard lock(loaderResultMapMutex);
+        auto it = loaderResultMap.find(uuidStr);
+        if (it != loaderResultMap.end()) {
+            result = std::move(it->second); // Move data to optional
+            loaderResultMap.erase(it); // Erase from map
+        }
     }
 
+    // Handle the result outside the lock
     FREObject byteArrayObject = nullptr;
-    if (!result.empty()) {
-        writeLog("Creating AS3 ByteArray");
+    if (result && !result->empty()) {
         FREByteArray byteArray;
-        byteArray.length = result.size();
-        byteArray.bytes = result.data();
-
+        byteArray.length = result->size();
+        byteArray.bytes = result->data();
         FRENewByteArray(&byteArray, &byteArrayObject);
-        writeLog("AS3 ByteArray created");
-    } else {
-        writeLog("Result is empty");
     }
-
-    result.clear();
     return byteArrayObject;
 }
+
 
 static FREObject awesomeUtils_addStaticHost(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("addStaticHost called");
@@ -384,35 +417,35 @@ static FREObject awesomeUtils_getDeviceUniqueId(FREContext ctx, void *funcData, 
 }
 
 static void AneAwesomeUtilsSupportInitializer(
-        void* extData,
-        const uint8_t* ctxType,
-        FREContext ctx,
-        uint32_t* numFunctionsToSet,
-        const FRENamedFunction** functionsToSet
+    void *extData,
+    const uint8_t *ctxType,
+    FREContext ctx,
+    uint32_t *numFunctionsToSet,
+    const FRENamedFunction **functionsToSet
 ) {
-    if(!alreadyInitialized){
+    if (!alreadyInitialized) {
         alreadyInitialized = true;
-        exportedFunctions[0].name = (const uint8_t*)"awesomeUtils_initialize";
+        exportedFunctions[0].name = reinterpret_cast<const uint8_t *>("awesomeUtils_initialize");
         exportedFunctions[0].function = awesomeUtils_initialize;
-        exportedFunctions[1].name = (const uint8_t*)"awesomeUtils_createWebSocket";
+        exportedFunctions[1].name = reinterpret_cast<const uint8_t *>("awesomeUtils_createWebSocket");
         exportedFunctions[1].function = awesomeUtils_createWebSocket;
-        exportedFunctions[2].name = (const uint8_t*)"awesomeUtils_sendWebSocketMessage";
+        exportedFunctions[2].name = reinterpret_cast<const uint8_t *>("awesomeUtils_sendWebSocketMessage");
         exportedFunctions[2].function = awesomeUtils_sendWebSocketMessage;
-        exportedFunctions[3].name = (const uint8_t*)"awesomeUtils_closeWebSocket";
+        exportedFunctions[3].name = reinterpret_cast<const uint8_t *>("awesomeUtils_closeWebSocket");
         exportedFunctions[3].function = awesomeUtils_closeWebSocket;
-        exportedFunctions[4].name = (const uint8_t*)"awesomeUtils_connectWebSocket";
+        exportedFunctions[4].name = (const uint8_t *) "awesomeUtils_connectWebSocket";
         exportedFunctions[4].function = awesomeUtils_connectWebSocket;
-        exportedFunctions[5].name = (const uint8_t*)"awesomeUtils_addStaticHost";
+        exportedFunctions[5].name = (const uint8_t *) "awesomeUtils_addStaticHost";
         exportedFunctions[5].function = awesomeUtils_addStaticHost;
-        exportedFunctions[6].name = (const uint8_t*)"awesomeUtils_removeStaticHost";
+        exportedFunctions[6].name = (const uint8_t *) "awesomeUtils_removeStaticHost";
         exportedFunctions[6].function = awesomeUtils_removeStaticHost;
-        exportedFunctions[7].name = (const uint8_t*)"awesomeUtils_loadUrl";
+        exportedFunctions[7].name = (const uint8_t *) "awesomeUtils_loadUrl";
         exportedFunctions[7].function = awesomeUtils_loadUrl;
-        exportedFunctions[8].name = (const uint8_t*)"awesomeUtils_getLoaderResult";
+        exportedFunctions[8].name = (const uint8_t *) "awesomeUtils_getLoaderResult";
         exportedFunctions[8].function = awesomeUtils_getLoaderResult;
-        exportedFunctions[9].name = (const uint8_t*)"awesomeUtils_getWebSocketByteArrayMessage";
+        exportedFunctions[9].name = (const uint8_t *) "awesomeUtils_getWebSocketByteArrayMessage";
         exportedFunctions[9].function = awesomeUtils_getWebSocketByteArrayMessage;
-        exportedFunctions[10].name = (const uint8_t*)"awesomeUtils_getDeviceUniqueId";
+        exportedFunctions[10].name = (const uint8_t *) "awesomeUtils_getDeviceUniqueId";
         exportedFunctions[10].function = awesomeUtils_getDeviceUniqueId;
         context = ctx;
     }
@@ -421,21 +454,19 @@ static void AneAwesomeUtilsSupportInitializer(
 }
 
 static void AneAwesomeUtilsSupportFinalizer(FREContext ctx) {
-
 }
 
 extern "C" {
+__declspec(dllexport) void InitExtension(void **extDataToSet, FREContextInitializer *ctxInitializerToSet, FREContextFinalizer *ctxFinalizerToSet) {
+    writeLog("InitExtension called");
+    if (extDataToSet) *extDataToSet = nullptr;
+    if (ctxInitializerToSet) *ctxInitializerToSet = AneAwesomeUtilsSupportInitializer;
+    if (ctxFinalizerToSet) *ctxFinalizerToSet = AneAwesomeUtilsSupportFinalizer;
+    writeLog("InitExtension completed");
+}
 
-    __declspec(dllexport) void InitExtension(void** extDataToSet, FREContextInitializer* ctxInitializerToSet, FREContextFinalizer* ctxFinalizerToSet) {
-        writeLog("InitExtension called");
-        if (extDataToSet) *extDataToSet = nullptr;
-        if (ctxInitializerToSet) *ctxInitializerToSet = AneAwesomeUtilsSupportInitializer;
-        if (ctxFinalizerToSet) *ctxFinalizerToSet = AneAwesomeUtilsSupportFinalizer;
-        writeLog("InitExtension completed");
-    }
-
-    __declspec(dllexport) void DestroyExtension(void* extData) {
-        writeLog("DestroyExtension called");
-        closeLog();
-    }
+__declspec(dllexport) void DestroyExtension(void *extData) {
+    writeLog("DestroyExtension called");
+    closeLog();
+}
 } // end of extern "C"
