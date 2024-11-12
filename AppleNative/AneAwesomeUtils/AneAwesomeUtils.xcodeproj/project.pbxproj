@@ -59,7 +59,6 @@
 				AneAwesomeUtilsSupport.cpp,
 				DeviceUtils.m,
 				log.cpp,
-				WebSocketClient.cpp,
 			);
 			target = 57B755732CD02AFF0000FE66 /* AneAwesomeUtils-IOS */;
 		};
