@@ -1,8 +1,10 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Text;
 using System.Threading.Tasks;
 using System.Web;
 
@@ -16,13 +18,14 @@ public class LoaderManager
 
     public bool Initialized { get; private set; }
 
-    private Action<string, byte[]> _success;
+    private Action<string> _success;
     private Action<string, string> _error;
     private Action<string, string> _progress;
     private Action<string> _writeLog;
     private HttpClient _client;
+    private ConcurrentDictionary<Guid, byte[]> _results;
 
-    public void Initialize(Action<string, byte[]> success, Action<string, string> error, Action<string, string> progress, Action<string> writeLog)
+    public void Initialize(Action<string> success, Action<string, string> error, Action<string, string> progress, Action<string> writeLog)
     {
         Initialized = true;
         _success = success;
@@ -30,6 +33,7 @@ public class LoaderManager
         _progress = progress;
         _writeLog = writeLog;
         _client = HappyEyeballsHttp.CreateHttpClient(true, _writeLog);
+        _results = new ConcurrentDictionary<Guid, byte[]>();
     }
 
     public string StartLoad(string url, string method, Dictionary<string, string> variables, Dictionary<string, string> headers)
@@ -92,7 +96,7 @@ public class LoaderManager
                 using var memoryStream = new MemoryStream();
 
                 int bytesRead;
-                while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                while ((bytesRead = await stream.ReadAsync(buffer)) > 0)
                 {
                     memoryStream.Write(buffer, 0, bytesRead);
                     totalBytesRead += bytesRead;
@@ -105,11 +109,25 @@ public class LoaderManager
                 }
 
                 var result = memoryStream.ToArray();
+                if (!_results.TryAdd(randomId, result))
+                {
+                    try
+                    {
+                        _error(randomId.ToString(), $"Failed to add result for {randomId}");
+                    }
+                    catch (Exception)
+                    {
+                        // ignored
+                    }
+
+                    return;
+                }
+
                 _ = Task.Run(() =>
                 {
                     try
                     {
-                        _success(randomId.ToString(), result);
+                        _success(randomId.ToString());
                     }
                     catch (Exception e)
                     {
@@ -147,6 +165,11 @@ public class LoaderManager
         return randomId.ToString();
     }
 
+    public bool TryGetResult(Guid guid, out byte[] result)
+    {
+        return _results.TryGetValue(guid, out result);
+    }
+
     private void LogAll(Exception exception)
     {
         if (exception == null)
@@ -154,7 +177,7 @@ public class LoaderManager
 
         try
         {
-            var logBuilder = new System.Text.StringBuilder();
+            var logBuilder = new StringBuilder();
 
             // Log the main exception
             logBuilder.AppendLine($"Exception: {exception.Message}");

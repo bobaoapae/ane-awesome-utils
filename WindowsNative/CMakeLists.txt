@@ -36,8 +36,7 @@ add_library(AneAwesomeUtilsWindows SHARED
         src/AneAwesomeUtilsCsharp.cpp
         src/AneAwesomeUtilsCsharp.h
         src/AneAwesomeUtilsSupport.cpp
-        src/WebSocketClient.cpp
-        src/WebSocketClient.h
+        src/DataArray.h
 )
 
 target_link_libraries(AneAwesomeUtilsWindows PRIVATE ${LIBRARY_PATH}/FlashRuntimeExtensions.lib)

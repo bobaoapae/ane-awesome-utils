@@ -15,7 +15,7 @@ namespace AwesomeAneUtils;
 public static class ExportFunctions
 {
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void UrlLoaderSuccessCallBackDelegate(IntPtr pointerGuid, IntPtr pointerArray, int length);
+    private delegate void UrlLoaderSuccessCallBackDelegate(IntPtr pointerGuid);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void UrlLoaderFailureCallBackDelegate(IntPtr pointerGuid, IntPtr pointerMessage);
@@ -30,7 +30,7 @@ public static class ExportFunctions
     private delegate void WebSocketErrorCallBackDelegate(IntPtr pointerGuid, int closeCode, IntPtr pointerMessage);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void WebSocketDataCallBackDelegate(IntPtr pointerGuid, IntPtr pointerArray, int length);
+    private delegate void WebSocketDataCallBackDelegate(IntPtr pointerGuid);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void WriteLogCallBackDelegate(IntPtr pointerMessage);
@@ -43,12 +43,12 @@ public static class ExportFunctions
     private static WebSocketDataCallBackDelegate _webSocketDataCallBackDelegate;
     private static WriteLogCallBackDelegate _writeLogCallBackDelegate;
 
-    private static Action<string, byte[]> _urlLoaderSuccessWrapper;
+    private static Action<string> _urlLoaderSuccessWrapper;
     private static Action<string, string> _urlLoaderFailureWrapper;
     private static Action<string, string> _urlLoaderProgressWrapper;
     private static Action<string> _webSocketConnectWrapper;
     private static Action<string, int, string> _webSocketErrorWrapper;
-    private static Action<string, byte[]> _webSocketDataWrapper;
+    private static Action<string> _webSocketDataWrapper;
     private static Action<string> _writeLogWrapper;
 
     private static readonly ConcurrentDictionary<Guid, WebSocketClient> WebSocketClients = new();
@@ -89,16 +89,13 @@ public static class ExportFunctions
                 SafeFreeCoTaskMem(ptr1);
             };
 
-            _urlLoaderSuccessWrapper = (guid, bytes) =>
+            _urlLoaderSuccessWrapper = (guid) =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.AllocCoTaskMem(bytes.Length);
-                Marshal.Copy(bytes, 0, ptr2, bytes.Length);
 
-                _urlLoaderSuccessCallBackDelegate(ptr1, ptr2, bytes.Length);
+                _urlLoaderSuccessCallBackDelegate(ptr1);
 
                 SafeFreeCoTaskMem(ptr1);
-                SafeFreeCoTaskMem(ptr2);
             };
 
             _urlLoaderFailureWrapper = (guid, error) =>
@@ -143,16 +140,13 @@ public static class ExportFunctions
                 SafeFreeCoTaskMem(ptr2);
             };
 
-            _webSocketDataWrapper = (guid, data) =>
+            _webSocketDataWrapper = (guid) =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.AllocCoTaskMem(data.Length);
-                Marshal.Copy(data, 0, ptr2, data.Length);
 
-                _webSocketDataCallBackDelegate(ptr1, ptr2, data.Length);
+                _webSocketDataCallBackDelegate(ptr1);
 
                 SafeFreeCoTaskMem(ptr1);
-                SafeFreeCoTaskMem(ptr2);
             };
         }
         catch
@@ -191,7 +185,7 @@ public static class ExportFunctions
 
         var webSocketClient = new WebSocketClient(
             () => { _webSocketConnectWrapper(guidString); },
-            data => { _webSocketDataWrapper(guidString, data.Array); },
+            () => { _webSocketDataWrapper(guidString); },
             (errorCode, error) =>
             {
                 using (lockError.EnterScope())
@@ -299,6 +293,44 @@ public static class ExportFunctions
         }
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_getWebSocketMessage", CallConvs = [typeof(CallConvCdecl)])]
+    public static DataArray GetWebSocketMessage(IntPtr guidPointer)
+    {
+        var result = new DataArray();
+
+        try
+        {
+            var guidString = Marshal.PtrToStringAnsi(guidPointer);
+
+            if (!Guid.TryParse(guidString, out var guid))
+            {
+                return result;
+            }
+
+            if (!WebSocketClients.TryGetValue(guid, out var client))
+            {
+                return result;
+            }
+
+            if (!client.TryGetNextMessage(out var message))
+            {
+                return result;
+            }
+
+            result.Size = message.Length;
+
+            result.DataPointer = Marshal.AllocHGlobal(result.Size);
+            Marshal.Copy(message, 0, result.DataPointer, result.Size);
+
+            return result;
+        }
+        catch (Exception e)
+        {
+            LogAll(e, _writeLogWrapper);
+            return result;
+        }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_addStaticHost", CallConvs = [typeof(CallConvCdecl)])]
     public static void AddStaticHost(IntPtr hostPtr, IntPtr ipPtr)
     {
@@ -349,6 +381,39 @@ public static class ExportFunctions
         catch
         {
             return IntPtr.Zero;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_getLoaderResult", CallConvs = [typeof(CallConvCdecl)])]
+    public static DataArray GetLoaderResult(IntPtr guidPointer)
+    {
+        var result = new DataArray();
+
+        try
+        {
+            var guidString = Marshal.PtrToStringAnsi(guidPointer);
+
+            if (!Guid.TryParse(guidString, out var guid))
+            {
+                return result;
+            }
+
+            if (!LoaderManager.Instance.TryGetResult(guid, out var data))
+            {
+                return result;
+            }
+
+            result.Size = data.Length;
+
+            result.DataPointer = Marshal.AllocHGlobal(result.Size);
+            Marshal.Copy(data, 0, result.DataPointer, result.Size);
+
+            return result;
+        }
+        catch (Exception e)
+        {
+            LogAll(e, _writeLogWrapper);
+            return result;
         }
     }
 

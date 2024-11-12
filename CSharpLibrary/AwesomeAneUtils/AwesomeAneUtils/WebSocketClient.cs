@@ -4,15 +4,9 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Net;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Net.Sockets;
 using System.Net.WebSockets;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using DnsClient;
 
 namespace AwesomeAneUtils;
 
@@ -23,22 +17,23 @@ public class WebSocketClient : IDisposable
 
     // Callbacks
     private readonly Action _onConnect;
-    private readonly Action<ArraySegment<byte>> _onReceived;
+    private readonly Action _onReceived;
     private readonly Action<int, string> _onIoError;
     private readonly Action<string> _onLog;
 
     private ClientWebSocket _activeWebSocket;
     private bool _disposed;
     private bool _isDisconnectCalled;
+    private ConcurrentQueue<IMemoryOwner<byte>> _receiveQueue = new();
 
-    public WebSocketClient(Action onConnect, Action<ArraySegment<byte>> onReceived, Action<int, string> onIoError, Action<string> onLog)
+    public WebSocketClient(Action onConnect, Action onReceived, Action<int, string> onIoError, Action<string> onLog)
     {
         _onConnect = onConnect;
         _onReceived = onReceived;
         _onIoError = onIoError;
         _onLog = onLog;
     }
-    
+
     public void Connect(string uri)
     {
         _ = Task.Run(async () => await ConnectAsync(uri));
@@ -303,7 +298,10 @@ public class WebSocketClient : IDisposable
                     }
                 } while (!result.EndOfMessage); // Keep receiving until the end of the message
 
-                _onReceived?.Invoke(new ArraySegment<byte>(buffer, 0, totalBytesReceived));
+                var memory = MemoryPool<byte>.Shared.Rent(totalBytesReceived);
+                buffer.AsSpan(..totalBytesReceived).CopyTo(memory.Memory.Span);
+                _receiveQueue.Enqueue(memory);
+                _onReceived?.Invoke();
                 _onLog?.Invoke("Message received.");
             }
         }
@@ -323,9 +321,23 @@ public class WebSocketClient : IDisposable
         _ = Task.Run(async () => await DisconnectAsync(closeReason));
     }
 
+    public bool TryGetNextMessage(out byte[] data)
+    {
+        data = [];
+        if (_isDisconnectCalled)
+            return false;
+
+        if (!_receiveQueue.TryDequeue(out var memory))
+            return false;
+
+        data = memory.Memory.ToArray();
+        memory.Dispose();
+        return true;
+    }
+
     private async Task DisconnectAsync(int closeReason, string reason = "Closing connection gracefully.")
     {
-        if(!_isDisconnectCalled)
+        if (!_isDisconnectCalled)
             _onIoError?.Invoke(closeReason, reason);
         if (_activeWebSocket is { State: WebSocketState.Open or WebSocketState.CloseReceived })
         {

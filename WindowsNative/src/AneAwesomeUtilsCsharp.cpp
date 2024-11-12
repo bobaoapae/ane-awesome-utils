@@ -105,7 +105,7 @@ int __cdecl csharpLibrary_awesomeUtils_initialize(
     return result;
 }
 
-char* __cdecl csharpLibrary_awesomeUtils_uuid() {
+char * __cdecl csharpLibrary_awesomeUtils_uuid() {
     writeLog("uuid called");
     using UuidFunction = char *(__cdecl *)();
     auto func = reinterpret_cast<UuidFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_uuid"));
@@ -121,7 +121,7 @@ char* __cdecl csharpLibrary_awesomeUtils_uuid() {
     return result;
 }
 
-char* __cdecl csharpLibrary_awesomeUtils_deviceUniqueId() {
+char * __cdecl csharpLibrary_awesomeUtils_deviceUniqueId() {
     writeLog("deviceUniqueId called");
     using DeviceUniqueIdFunction = char *(__cdecl *)();
     auto func = reinterpret_cast<DeviceUniqueIdFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_deviceUniqueId"));
@@ -137,7 +137,7 @@ char* __cdecl csharpLibrary_awesomeUtils_deviceUniqueId() {
     return result;
 }
 
-char* __cdecl csharpLibrary_awesomeUtils_loadUrl(const char* url, const char* method, const char* variables, const char* headers) {
+char * __cdecl csharpLibrary_awesomeUtils_loadUrl(const char *url, const char *method, const char *variables, const char *headers) {
     writeLog("loadUrl called");
     using LoadUrlFunction = char *(__cdecl *)(const char *, const char *, const char *, const char *);
     auto func = reinterpret_cast<LoadUrlFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_loadUrl"));
@@ -153,7 +153,23 @@ char* __cdecl csharpLibrary_awesomeUtils_loadUrl(const char* url, const char* me
     return result;
 }
 
-char* __cdecl csharpLibrary_awesomeUtils_createWebSocket() {
+DataArray __cdecl csharpLibrary_awesomeUtils_getLoaderResult(const void *guidPointer) {
+    writeLog("getLoaderResult called");
+    using GetLoaderResultFunction = DataArray(__cdecl *)(const void *);
+    auto func = reinterpret_cast<GetLoaderResultFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_getLoaderResult"));
+
+    if (!func) {
+        writeLog("Could not load getLoaderResult function");
+        return {};
+    }
+
+    DataArray result = func(guidPointer);
+    writeLog("getLoaderResult result: ");
+    writeLog(std::to_string(result.Size).c_str());
+    return result;
+}
+
+char * __cdecl csharpLibrary_awesomeUtils_createWebSocket() {
     writeLog("createWebSocket called");
     using CreateWebSocketFunction = char *(__cdecl *)();
     auto func = reinterpret_cast<CreateWebSocketFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_createWebSocket"));
@@ -169,7 +185,7 @@ char* __cdecl csharpLibrary_awesomeUtils_createWebSocket() {
     return result;
 }
 
-int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void* guidPointer, const char* host) {
+int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void *guidPointer, const char *host) {
     writeLog("connectWebSocket called");
     using ConnectWebSocketFunction = int(__cdecl *)(const void *, const char *);
     auto func = reinterpret_cast<ConnectWebSocketFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_connectWebSocket"));
@@ -184,7 +200,7 @@ int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void* guidPointer,
     return result;
 }
 
-int __cdecl csharpLibrary_awesomeUtils_sendWebSocketMessage(const void* guidPointer, const void* data, int length) {
+int __cdecl csharpLibrary_awesomeUtils_sendWebSocketMessage(const void *guidPointer, const void *data, int length) {
     writeLog("sendWebSocketMessage called");
     using SendWebSocketMessageFunction = int(__cdecl *)(const void *, const void *, int);
     auto func = reinterpret_cast<SendWebSocketMessageFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_sendWebSocketMessage"));
@@ -199,7 +215,7 @@ int __cdecl csharpLibrary_awesomeUtils_sendWebSocketMessage(const void* guidPoin
     return result;
 }
 
-int __cdecl csharpLibrary_awesomeUtils_closeWebSocket(const void* guidPointer, int closeCode) {
+int __cdecl csharpLibrary_awesomeUtils_closeWebSocket(const void *guidPointer, int closeCode) {
     writeLog("closeWebSocket called");
     using CloseWebSocketFunction = int(__cdecl *)(const void *, int);
     auto func = reinterpret_cast<CloseWebSocketFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_closeWebSocket"));
@@ -214,7 +230,23 @@ int __cdecl csharpLibrary_awesomeUtils_closeWebSocket(const void* guidPointer, i
     return result;
 }
 
-void __cdecl csharpLibrary_awesomeUtils_addStaticHost(const char* host, const char* ip) {
+DataArray __cdecl csharpLibrary_awesomeUtils_getWebSocketMessage(const void *guidPointer) {
+    writeLog("getWebSocketMessage called");
+    using GetWebSocketMessageFunction = DataArray(__cdecl *)(const void *);
+    auto func = reinterpret_cast<GetWebSocketMessageFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_getWebSocketMessage"));
+
+    if (!func) {
+        writeLog("Could not load getWebSocketMessage function");
+        return {};
+    }
+
+    DataArray result = func(guidPointer);
+    writeLog("getWebSocketMessage result: ");
+    writeLog(std::to_string(result.Size).c_str());
+    return result;
+}
+
+void __cdecl csharpLibrary_awesomeUtils_addStaticHost(const char *host, const char *ip) {
     writeLog("addStaticHost called");
     using AddStaticHostFunction = void(__cdecl *)(const char *, const char *);
     auto func = reinterpret_cast<AddStaticHostFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_addStaticHost"));
@@ -227,7 +259,7 @@ void __cdecl csharpLibrary_awesomeUtils_addStaticHost(const char* host, const ch
     func(host, ip);
 }
 
-void __cdecl csharpLibrary_awesomeUtils_removeStaticHost(const char* host) {
+void __cdecl csharpLibrary_awesomeUtils_removeStaticHost(const char *host) {
     writeLog("removeStaticHost called");
     using RemoveStaticHostFunction = void(__cdecl *)(const char *);
     auto func = reinterpret_cast<RemoveStaticHostFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_removeStaticHost"));
