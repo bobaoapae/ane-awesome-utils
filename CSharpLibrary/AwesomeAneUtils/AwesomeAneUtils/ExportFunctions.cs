@@ -422,23 +422,7 @@ public static class ExportFunctions
     {
         try
         {
-            var macAddresses = NetworkInterface.GetAllNetworkInterfaces()
-                .Where(nic => nic.OperationalStatus == OperationalStatus.Up &&
-                              nic.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-                .Select(nic => nic.GetPhysicalAddress().ToString())
-                .OrderBy(mac => mac) // Order the MAC addresses
-                .ToList();
-
-            // Concatenate ordered MAC addresses into a single string
-            var concatenatedMacs = string.Join("", macAddresses);
-
-            // Compute SHA256 hash
-            var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(concatenatedMacs));
-
-            // Convert hash to hexadecimal string
-            var hashString = Convert.ToHexStringLower(hashBytes);
-
-            return Marshal.StringToHGlobalAnsi(hashString);
+            return Marshal.StringToHGlobalAnsi(HardwareID.GetDeviceUniqueIdHash());
         }
         catch
         {
