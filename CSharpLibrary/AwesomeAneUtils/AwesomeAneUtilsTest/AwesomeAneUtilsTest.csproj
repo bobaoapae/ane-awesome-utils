@@ -6,6 +6,10 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
     </PropertyGroup>
+    
+    <PropertyGroup>
+        <PublishAot>true</PublishAot>
+    </PropertyGroup>
 
     <ItemGroup>
       <ProjectReference Include="..\AwesomeAneUtils\AwesomeAneUtils.csproj" />

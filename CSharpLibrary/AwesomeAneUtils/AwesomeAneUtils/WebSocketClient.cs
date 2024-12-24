@@ -217,7 +217,10 @@ public class WebSocketClient : IDisposable
 
             try
             {
-                await webSocket.ConnectAsync(webSocketUri, ctx);
+                var timeout = TimeSpan.FromSeconds(5);
+                using var timeoutCts = new CancellationTokenSource(timeout);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ctx, timeoutCts.Token);
+                await webSocket.ConnectAsync(webSocketUri, linkedCts.Token);
                 if (webSocket.State == WebSocketState.Open)
                 {
                     _onLog?.Invoke($"Successfully connected to {ipAddress}.");

@@ -57,9 +57,14 @@ public static partial class HardwareID
 
     private static string GetWindowsDeviceInfo()
     {
-        var cpuId = RunCommand("wmic", "cpu get processorid").Split('\n').Skip(1).FirstOrDefault()?.Trim() ?? string.Empty;
-        var motherboardId = RunCommand("wmic", "baseboard get serialnumber").Split('\n').Skip(1).FirstOrDefault()?.Trim() ?? string.Empty;
-        return $"{cpuId}{motherboardId}";
+        string GetHardwareInfo(string command, string args) =>
+            RunCommand(command, args).Split('\n').Skip(1).FirstOrDefault()?.Trim() ?? string.Empty;
+
+        var cpuId = GetHardwareInfo("wmic", "cpu get processorid");
+        var motherboardId = GetHardwareInfo("wmic", "baseboard get serialnumber");
+        var diskId = GetHardwareInfo("wmic", "diskdrive get serialnumber");
+    
+        return $"{cpuId}-{motherboardId}-{diskId}";
     }
 
     private static string RunCommand(string command, string arguments)

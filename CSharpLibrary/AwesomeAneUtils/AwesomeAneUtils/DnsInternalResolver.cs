@@ -139,6 +139,11 @@ public sealed class DnsInternalResolver
             throw new Exception("No IP addresses resolved for the domain.");
         }
 
+        if (!IsIpv6Available())
+        {
+            ipAddresses = ipAddresses.Where(x => x.AddressFamily != AddressFamily.InterNetworkV6).ToArray();
+        }
+
         return SortInterleaved(ipAddresses);
     }
 
@@ -218,6 +223,20 @@ public sealed class DnsInternalResolver
         catch (Exception)
         {
             return [];
+        }
+    }
+
+    private bool IsIpv6Available()
+    {
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
+            socket.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 }
