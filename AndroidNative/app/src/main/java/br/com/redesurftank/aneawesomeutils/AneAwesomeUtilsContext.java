@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.ProtocolException;
 import java.net.UnknownHostException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -25,12 +26,14 @@ import java.util.Objects;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.Dns;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
+import okhttp3.Protocol;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.WebSocket;
@@ -89,13 +92,19 @@ public class AneAwesomeUtilsContext extends FREContext {
             AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_initialize");
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
-                ctx._client = new OkHttpClient.Builder().fastFallback(true).dns(new Dns() {
-                    @NonNull
-                    @Override
-                    public List<InetAddress> lookup(@NonNull String s) throws UnknownHostException {
-                        return InternalDnsResolver.getInstance().resolveHost(s);
-                    }
-                }).build();
+                ctx._client = new OkHttpClient.Builder()
+                        .fastFallback(true)
+                        .dns(new Dns() {
+                            @NonNull
+                            @Override
+                            public List<InetAddress> lookup(@NonNull String s) throws UnknownHostException {
+                                return InternalDnsResolver.getInstance().resolveHost(s);
+                            }
+                        })
+                        .connectionPool(new okhttp3.ConnectionPool(5, 1, TimeUnit.MINUTES))
+                        .pingInterval(30, TimeUnit.SECONDS)
+                        .connectTimeout(5, TimeUnit.SECONDS)
+                        .build();
 
                 return FREObject.newObject(true);
             } catch (Exception e) {
@@ -230,7 +239,6 @@ public class AneAwesomeUtilsContext extends FREContext {
 
                     @Override
                     public void onFailure(@NonNull WebSocket webSocket, @NonNull Throwable t, @NonNull Response response) {
-                        AneAwesomeUtilsLogging.e(TAG, "WebSocket failure", t);
                         if (t instanceof ProtocolException) {
                             ProtocolException protocolException = (ProtocolException) t;
                             //template: Code must be in range [1000,5000): 6000
@@ -247,6 +255,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                                 }
                             }
                         }
+                        AneAwesomeUtilsLogging.e(TAG, "WebSocket failure", t);
                         ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", "1005;Unknown error");
                         ctx._webSockets.remove(uuid);
                     }

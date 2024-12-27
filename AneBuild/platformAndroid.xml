@@ -6,7 +6,7 @@
 		</repositories>
 		<dependencies>
 			<dependency>implementation "com.squareup.okhttp3:okhttp:5.0.0-alpha.14"</dependency>
-			<dependency>implementation "dnsjava:dnsjava:3.6.0"</dependency>
+			<dependency>implementation "dnsjava:dnsjava:3.6.2"</dependency>
 			<dependency>implementation "androidx.appcompat:appcompat:1.7.0"</dependency>
 			<dependency>implementation(platform("org.jetbrains.kotlin:kotlin-bom:2.0.0"))</dependency>
 		</dependencies>
