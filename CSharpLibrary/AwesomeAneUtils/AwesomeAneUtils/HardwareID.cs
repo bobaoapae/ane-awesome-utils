@@ -13,41 +13,61 @@ public static partial class HardwareID
 {
     public static string GetDeviceUniqueId()
     {
-        try
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return GetWindowsDeviceInfo();
-            }
-
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            {
-                return GetLinuxDeviceInfo();
-            }
-
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            {
-                return GetMacOSDeviceInfo();
-            }
-
-            return string.Empty;
+            return GetWindowsDeviceInfo();
         }
-        catch
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
         {
-            return string.Empty;
+            return GetLinuxDeviceInfo();
         }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            return GetMacOSDeviceInfo();
+        }
+
+        throw new PlatformNotSupportedException();
     }
 
-    public static string GetDeviceUniqueIdHash()
+    public static string GetDeviceUniqueIdHash(Action<Exception> onError = null)
     {
         try
         {
             var deviceId = GetDeviceUniqueId();
             if (string.IsNullOrEmpty(deviceId))
-                return string.Empty;
+                return "NOT_AVAILABLE";
 
             var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(deviceId));
             return Convert.ToHexString(hashBytes).ToLowerInvariant();
+        }
+        catch (Exception e)
+        {
+            onError?.Invoke(e);
+            return "NOT_AVAILABLE";
+        }
+    }
+
+    private static string RunCommand(string command, string args)
+    {
+        try
+        {
+            using (var process = new System.Diagnostics.Process())
+            {
+                process.StartInfo.FileName = command;
+                process.StartInfo.Arguments = args;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.CreateNoWindow = true;
+
+                process.Start();
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                return output.Trim();
+            }
         }
         catch
         {
@@ -55,34 +75,128 @@ public static partial class HardwareID
         }
     }
 
-    private static string GetWindowsDeviceInfo()
+    private static string RunPowerShellCommand(string command)
     {
-        string GetHardwareInfo(string command, string args) =>
-            RunCommand(command, args).Split('\n').Skip(1).FirstOrDefault()?.Trim() ?? string.Empty;
+        try
+        {
+            using (var process = new System.Diagnostics.Process())
+            {
+                process.StartInfo.FileName = "powershell";
+                process.StartInfo.Arguments = $"-Command \"{command}\"";
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.CreateNoWindow = true;
 
-        var cpuId = GetHardwareInfo("wmic", "cpu get processorid");
-        var motherboardId = GetHardwareInfo("wmic", "baseboard get serialnumber");
-        var diskId = GetHardwareInfo("wmic", "diskdrive get serialnumber");
-    
-        return $"{cpuId}-{motherboardId}-{diskId}";
+                process.Start();
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                return output.Trim();
+            }
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
-    private static string RunCommand(string command, string arguments)
+    private static bool IsWmicAvailable()
     {
-        using var process = new Process();
-        process.StartInfo = new ProcessStartInfo
-        {
-            FileName = command,
-            Arguments = arguments,
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
+        return !string.IsNullOrEmpty(RunCommand("where", "wmic"));
+    }
 
-        process.Start();
-        var result = process.StandardOutput.ReadToEnd();
-        process.WaitForExit();
-        return result;
+    private static string GetSystemDiskSerial()
+    {
+        if (IsWmicAvailable())
+        {
+            // WMIC logic remains unchanged
+            var logicalToPartitionOutput = RunCommand("wmic", "path Win32_LogicalDiskToPartition get Antecedent,Dependent");
+            var osDiskMapping = logicalToPartitionOutput
+                .Split('\n')
+                .Skip(1)
+                .Select(line => line.Trim())
+                .FirstOrDefault(line => line.Contains("C:"));
+
+            if (string.IsNullOrEmpty(osDiskMapping))
+                return string.Empty;
+
+            var mappingParts = osDiskMapping.Split('"');
+            if (mappingParts.Length < 2)
+                return string.Empty;
+
+            var partitionDeviceId = mappingParts[1];
+
+            var diskToPartitionOutput = RunCommand("wmic", "path Win32_DiskDriveToDiskPartition get Antecedent,Dependent");
+            var physicalDiskMapping = diskToPartitionOutput
+                .Split('\n')
+                .Skip(1)
+                .Select(line => line.Trim())
+                .FirstOrDefault(line => line.Contains(partitionDeviceId));
+
+            if (string.IsNullOrEmpty(physicalDiskMapping))
+                return string.Empty;
+
+            var parts = physicalDiskMapping.Split(new[] { "  " }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2)
+                return string.Empty;
+
+            var diskDrivePart = parts[0];
+            if (!diskDrivePart.Contains("PHYSICALDRIVE"))
+                return string.Empty;
+
+            var physicalDriveId = diskDrivePart.Split('"')[1];
+            var diskIndexString = new string(physicalDriveId.Where(char.IsDigit).ToArray());
+            if (!int.TryParse(diskIndexString, out var diskIndex))
+                return string.Empty;
+
+            var serialNumberOutput = RunCommand("wmic", $"diskdrive where Index={diskIndex} get SerialNumber");
+            return serialNumberOutput
+                .Split('\n')
+                .Skip(1)
+                .Select(line => line.Trim())
+                .FirstOrDefault() ?? string.Empty;
+        }
+        else
+        {
+            // PowerShell script to get the OS disk's serial number
+            var command = @"
+            $osVolume = Get-Volume -DriveLetter C;
+            $partition = Get-Partition | Where-Object { $_.DriveLetter -eq $osVolume.DriveLetter };
+            $disk = Get-Disk -Number $partition.DiskNumber;
+            $disk.SerialNumber;
+        ";
+            var output = RunPowerShellCommand(command);
+            return output.Split('\n').FirstOrDefault()?.Trim() ?? string.Empty;
+        }
+    }
+
+    private static string GetWindowsDeviceInfo()
+    {
+        string GetHardwareInfoWmic(string command, string args) =>
+            RunCommand(command, args)
+                .Split('\n')
+                .Skip(1)
+                .Select(line => line.Trim())
+                .FirstOrDefault(line => !string.IsNullOrEmpty(line)) ?? string.Empty;
+
+        string GetHardwareInfoPowerShell(string query)
+        {
+            var output = RunPowerShellCommand(query);
+            return output.Split('\n').FirstOrDefault()?.Trim() ?? string.Empty;
+        }
+
+        var cpuId = IsWmicAvailable()
+            ? GetHardwareInfoWmic("wmic", "cpu get processorid")
+            : GetHardwareInfoPowerShell("(Get-WmiObject Win32_Processor).ProcessorId");
+
+        var motherboardId = IsWmicAvailable()
+            ? GetHardwareInfoWmic("wmic", "baseboard get serialnumber")
+            : GetHardwareInfoPowerShell("(Get-WmiObject Win32_BaseBoard).SerialNumber");
+
+        var osDiskSerial = GetSystemDiskSerial();
+
+        return $"{cpuId}-{motherboardId}-{osDiskSerial}";
     }
 
     private static string GetLinuxDeviceInfo()

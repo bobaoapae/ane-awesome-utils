@@ -1,11 +1,8 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
-using System.Net.NetworkInformation;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -417,12 +414,12 @@ public static class ExportFunctions
         }
     }
 
-    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_deviceUniqueId", CallConvs = new[] { typeof(CallConvCdecl) })]
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_deviceUniqueId", CallConvs = [typeof(CallConvCdecl)])]
     public static IntPtr get_deviceUniqueId()
     {
         try
         {
-            return Marshal.StringToHGlobalAnsi(HardwareID.GetDeviceUniqueIdHash());
+            return Marshal.StringToHGlobalAnsi(HardwareID.GetDeviceUniqueIdHash(e => LogAll(e, _writeLogWrapper)));
         }
         catch
         {

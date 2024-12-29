@@ -1,3 +1,3 @@
 ﻿using AwesomeAneUtils;
 
-Console.WriteLine(HardwareID.GetDeviceUniqueIdHash());
+Console.WriteLine(HardwareID.GetDeviceUniqueIdHash(Console.WriteLine));
