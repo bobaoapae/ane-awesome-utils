@@ -3,8 +3,11 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -24,7 +27,8 @@ public class WebSocketClient : IDisposable
     private ClientWebSocket _activeWebSocket;
     private bool _disposed;
     private bool _isDisconnectCalled;
-    private ConcurrentQueue<IMemoryOwner<byte>> _receiveQueue = new();
+    private NetCapture _capture;
+    private readonly ConcurrentQueue<IMemoryOwner<byte>> _receiveQueue = new();
 
     public WebSocketClient(Action onConnect, Action onReceived, Action<int, string> onIoError, Action<string> onLog)
     {
@@ -59,13 +63,16 @@ public class WebSocketClient : IDisposable
             // Try to connect to all resolved IPs in parallel
             var ctxSource = new CancellationTokenSource();
 
-            var (webSocket, index) = await ParallelTask(
+            var (resultConnection, index) = await ParallelTask(
                 ipAddresses.Length,
                 (i, cancel) => AttemptConnectionAsync(uriObject, ipAddresses[i].ToString(), ctxSource.Token),
                 TimeSpan.FromMilliseconds(250),
                 linkedCts.Token);
+            
+            var (webSocket, capture) = resultConnection;
 
             _activeWebSocket = webSocket;
+            _capture = capture;
 
             await ctxSource.CancelAsync(); // Cancel the other connection attempts
 
@@ -93,9 +100,9 @@ public class WebSocketClient : IDisposable
         }
     }
 
-    private async Task<(ClientWebSocket, int)> ParallelTask(
+    private async Task<((ClientWebSocket, NetCapture), int)> ParallelTask(
         int candidateCount,
-        Func<int, CancellationToken, Task<ClientWebSocket>> taskBuilder,
+        Func<int, CancellationToken, Task<(ClientWebSocket, NetCapture)>> taskBuilder,
         TimeSpan delay,
         CancellationToken cancel)
     {
@@ -104,9 +111,9 @@ public class WebSocketClient : IDisposable
         using var successCts = CancellationTokenSource.CreateLinkedTokenSource(cancel);
 
         // All tasks we have ever tried.
-        var allTasks = new List<Task<ClientWebSocket>>();
+        var allTasks = new List<Task<(ClientWebSocket, NetCapture)>>();
         // Tasks we are still waiting on.
-        var tasks = new List<Task<ClientWebSocket>>();
+        var tasks = new List<Task<(ClientWebSocket, NetCapture)>>();
 
         // The general loop here is as follows:
         // 1. Add a new task for the next IP to try.
@@ -115,7 +122,7 @@ public class WebSocketClient : IDisposable
         // Every iteration we add another task, until we're full on them.
         // We keep looping until we have SUCCESS, or we run out of attempt tasks entirely.
 
-        Task<ClientWebSocket> successTask = null;
+        Task<(ClientWebSocket, NetCapture)> successTask = null;
         while ((allTasks.Count < candidateCount || tasks.Count > 0))
         {
             if (allTasks.Count < candidateCount)
@@ -127,7 +134,7 @@ public class WebSocketClient : IDisposable
             }
 
             var whenAnyDone = Task.WhenAny(tasks);
-            Task<ClientWebSocket> completedTask;
+            Task<(ClientWebSocket, NetCapture)> completedTask;
 
             if (allTasks.Count < candidateCount)
             {
@@ -147,7 +154,7 @@ public class WebSocketClient : IDisposable
                 completedTask = await whenAnyDone.ConfigureAwait(false);
             }
 
-            if (completedTask.IsCompletedSuccessfully && completedTask.Result != null)
+            if (completedTask.IsCompletedSuccessfully && completedTask.Result.Item1 != null)
             {
                 // We did it. We have success.
                 successTask = completedTask;
@@ -177,12 +184,12 @@ public class WebSocketClient : IDisposable
             await Task.WhenAll(allTasks); // Wait for all connection attempts to finish
             foreach (var task in allTasks)
             {
-                if (task == successTask || task.Result is not { State: WebSocketState.Open })
+                if (task == successTask || task.Result.Item1 is not { State: WebSocketState.Open })
                     continue;
 
                 try
                 {
-                    await task.Result.CloseAsync(WebSocketCloseStatus.EndpointUnavailable, "Connection established", CancellationToken.None);
+                    await task.Result.Item1.CloseAsync(WebSocketCloseStatus.EndpointUnavailable, "Connection established", CancellationToken.None);
                 }
                 catch (Exception ex)
                 {
@@ -190,7 +197,8 @@ public class WebSocketClient : IDisposable
                 }
                 finally
                 {
-                    task.Result.Dispose();
+                    task.Result.Item1.Dispose();
+                    task.Result.Item2?.Dispose();
                 }
             }
         });
@@ -198,14 +206,40 @@ public class WebSocketClient : IDisposable
         return (successTask.Result, allTasks.IndexOf(successTask));
     }
 
-    private async Task<ClientWebSocket> AttemptConnectionAsync(Uri uri, string ipAddress, CancellationToken ctx)
+    private (HttpMessageInvoker, NetCapture) CreateInvoker()
+    {
+        var socketsHandler = new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.Zero,
+            UseProxy = false,
+            UseCookies = false,
+            ConnectTimeout = TimeSpan.FromSeconds(5),
+        };
+        socketsHandler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+
+        NetCapture capture = null;
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && Directory.Exists(@"C:\debug"))
+        {
+            var currentTime = DateTime.Now.ToString("yyyy-MM-dd-HH-mm-ss-fff");
+            capture = new NetCapture(@"C:\debug\capture-" + currentTime + ".pcap");
+            socketsHandler.PlaintextStreamFilter = (context, _) => ValueTask.FromResult<Stream>(capture.AddStream(context.PlaintextStream));
+        }
+
+        var invoker = new HttpMessageInvoker(socketsHandler, true);
+        return (invoker, capture);
+    }
+
+    private async Task<(ClientWebSocket, NetCapture)> AttemptConnectionAsync(Uri uri, string ipAddress, CancellationToken ctx)
     {
         try
         {
             var webSocket = new ClientWebSocket();
 
             // Set the 'Host' header to the domain from the original URI
+            webSocket.Options.SetRequestHeader("User-Agent", HappyEyeballsHttp.CustomAgent);
             webSocket.Options.SetRequestHeader("Host", uri.Host);
+            webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(30); // Set the keep-alive interval
+            webSocket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(5); // Set the keep-alive timeout
 
             _onLog?.Invoke($"Attempting connection to {uri} via IP {ipAddress}");
 
@@ -215,21 +249,23 @@ public class WebSocketClient : IDisposable
                 Host = ipAddress // Use the IP address for the connection
             }.Uri;
 
+            var (invoker, capture) = CreateInvoker();
+
             try
             {
-                var timeout = TimeSpan.FromSeconds(5);
-                using var timeoutCts = new CancellationTokenSource(timeout);
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ctx, timeoutCts.Token);
-                await webSocket.ConnectAsync(webSocketUri, linkedCts.Token);
+                await webSocket.ConnectAsync(webSocketUri, invoker, ctx);
+
                 if (webSocket.State == WebSocketState.Open)
                 {
                     _onLog?.Invoke($"Successfully connected to {ipAddress}.");
-                    return webSocket;
+                    return (webSocket, capture);
                 }
             }
             catch (Exception ex)
             {
                 _onLog?.Invoke($"Failed to connect to {ipAddress}: {ex.Message}");
+                webSocket.Dispose();
+                capture?.Dispose();
             }
         }
         catch (Exception ex)
@@ -237,7 +273,7 @@ public class WebSocketClient : IDisposable
             _onLog?.Invoke($"Error connecting to {ipAddress}: {ex.Message}");
         }
 
-        return null;
+        return (null, null);
     }
 
 
@@ -357,6 +393,7 @@ public class WebSocketClient : IDisposable
 
         _cancellationTokenSource?.Cancel();
         _onLog?.Invoke($"Connection closed. Reason: {closeReason}");
+        Dispose();
     }
 
     public void Stop()
@@ -380,6 +417,7 @@ public class WebSocketClient : IDisposable
                 _cancellationTokenSource?.Cancel();
                 _cancellationTokenSource?.Dispose();
                 _activeWebSocket?.Dispose();
+                _capture?.Dispose();
             }
 
             // Mark as disposed

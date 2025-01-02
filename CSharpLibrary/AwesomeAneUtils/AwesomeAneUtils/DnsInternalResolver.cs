@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text.Json;
@@ -225,18 +226,42 @@ public sealed class DnsInternalResolver
             return [];
         }
     }
-
-    private bool IsIpv6Available()
+    public List<IPAddress> GetAllAvailableIPs()
     {
-        try
+        var ipAddresses = new List<IPAddress>();
+
+        // Get all network interfaces
+        foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
         {
-            using var socket = new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp);
-            socket.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
-            return true;
+            // Skip interfaces that are not up or do not support IP
+            if (networkInterface.OperationalStatus != OperationalStatus.Up)
+                continue;
+
+            foreach (var unicastAddress in networkInterface.GetIPProperties().UnicastAddresses)
+            {
+                // Add all valid IP addresses to the list
+                ipAddresses.Add(unicastAddress.Address);
+            }
         }
-        catch
+
+        return ipAddresses;
+    }
+
+    public bool IsIpv6Available()
+    {
+        // Get all available IP addresses
+        var ipAddresses = GetAllAvailableIPs();
+
+        // Check if any is IPv6
+        foreach (var ip in ipAddresses)
         {
-            return false;
+            //if local continue
+            if (IPAddress.IsLoopback(ip))
+                continue;
+            if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+                return true;
         }
+
+        return false;
     }
 }

@@ -17,7 +17,7 @@ public static class HappyEyeballsHttp
     private const int ConnectionAttemptDelay = 250;
     private static readonly string SystemArch = Environment.Is64BitProcess ? "64" : "32";
 
-    private static readonly string CustomAgent = $"Mozilla/5.0 (Windows NT 6.1{SystemArch}; Win; x{SystemArch};) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.51 Safari/537.36 NativeLoader/1.0";
+    public static readonly string CustomAgent = $"Mozilla/5.0 (Windows NT 6.1{SystemArch}; Win; x{SystemArch};) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.51 Safari/537.36 NativeLoader/1.0";
     private static Action<string> _log = Console.WriteLine;
 
 #if DEBUG
