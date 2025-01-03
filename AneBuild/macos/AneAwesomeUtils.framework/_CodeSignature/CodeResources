@@ -6,7 +6,7 @@
 	<dict>
 		<key>Resources/Info.plist</key>
 		<data>
-		ixuEmr5uTaT4w+u/AJVaHuMGMlg=
+		oSC2zz/cdg7oNgK51NDcGoWSiQY=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -15,7 +15,7 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			4X04X4L+iKSi6h2pySMfaIJr2F0=
+			maZGkJYwtJQI/fa8NGcvZXoVDmo=
 			</data>
 			<key>requirement</key>
 			<string>identifier AwesomeAneUtils and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = QZPLNQ7VA7</string>
@@ -38,7 +38,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			00HuxdA1CHoVFMhhgsXiGaxI1yQHXhLods1I0ffgn4U=
+			xkfszvpxoE+/w7Fvy3chFMhUB4L0zegz9ke8542V2ns=
 			</data>
 		</dict>
 	</dict>
