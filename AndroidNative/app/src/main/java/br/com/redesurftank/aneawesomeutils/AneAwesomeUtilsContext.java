@@ -51,7 +51,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
     @Override
     public Map<String, FREFunction> getFunctions() {
-        AneAwesomeUtilsLogging.i(TAG, "Creating function Map");
+        AneAwesomeUtilsLogging.d(TAG, "Creating function Map");
         Map<String, FREFunction> functionMap = new HashMap<>();
 
         functionMap.put(Initialize.KEY, new Initialize());
@@ -89,7 +89,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_initialize");
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_initialize");
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
                 ctx._client = new OkHttpClient.Builder()
@@ -119,7 +119,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_createWebSocket");
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_createWebSocket");
             try {
                 UUID uuid = UUID.randomUUID();
                 return FREObject.newObject(uuid.toString());
@@ -135,7 +135,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_sendWebSocketMessage");
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_sendWebSocketMessage");
 
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
@@ -170,7 +170,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_closeWebSocket");
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_closeWebSocket");
 
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
@@ -274,7 +274,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_addStaticHost");
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_addStaticHost");
 
             try {
                 String host = args[0].getAsString();
@@ -292,7 +292,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_removeStaticHost");
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_removeStaticHost");
 
             try {
                 String host = args[0].getAsString();
@@ -309,7 +309,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_loadUrl");
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_loadUrl");
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
 
@@ -318,10 +318,10 @@ public class AneAwesomeUtilsContext extends FREContext {
                 String variablesJson = args[2].getAsString();
                 String headersJson = args[3].getAsString();
 
-                AneAwesomeUtilsLogging.i(TAG, "URL: " + url);
-                AneAwesomeUtilsLogging.i(TAG, "Method: " + method);
-                AneAwesomeUtilsLogging.i(TAG, "Variables: " + variablesJson);
-                AneAwesomeUtilsLogging.i(TAG, "Headers: " + headersJson);
+                AneAwesomeUtilsLogging.d(TAG, "URL: " + url);
+                AneAwesomeUtilsLogging.d(TAG, "Method: " + method);
+                AneAwesomeUtilsLogging.d(TAG, "Variables: " + variablesJson);
+                AneAwesomeUtilsLogging.d(TAG, "Headers: " + headersJson);
 
                 Map<String, String> variables = new HashMap<>();
                 JsonReader reader = new JsonReader(new java.io.StringReader(variablesJson));
@@ -383,7 +383,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                     public void onResponse(@NonNull Call call, @NonNull Response response) throws IOException {
                         try {
                             int statusCode = response.code();
-                            AneAwesomeUtilsLogging.i(TAG, "URL: " + url + " Status code: " + statusCode);
+                            AneAwesomeUtilsLogging.d(TAG, "URL: " + url + " Status code: " + statusCode);
                             if (statusCode >= 400) {
                                 ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", "Invalid status code: " + statusCode);
                                 return;
@@ -413,7 +413,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_getLoaderResult");
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_getLoaderResult");
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
 
@@ -440,7 +440,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_getWebSocketByteArrayMessage");
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_getWebSocketByteArrayMessage");
 
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
@@ -464,7 +464,7 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_getDeviceUniqueId");
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_getDeviceUniqueId");
             try {
                 ContentResolver contentResolver = context.getActivity().getContentResolver();
                 String androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID);

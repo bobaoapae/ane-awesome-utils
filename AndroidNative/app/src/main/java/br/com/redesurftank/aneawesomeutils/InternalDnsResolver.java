@@ -251,22 +251,22 @@ public class InternalDnsResolver {
         return CompletableFuture.anyOf(cloudflareFuture, googleFuture, adguardFuture, cloudflareNormalFuture, googleNormalFuture, adguardNormalFuture)
                 .thenApply(o -> {
                     if (cloudflareFuture.isDone() && !cloudflareFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.d(TAG, "resolveWithDns() resolved with cloudflare");
+                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with cloudflare");
                         return cloudflareFuture.join();
                     } else if (googleFuture.isDone() && !googleFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.d(TAG, "resolveWithDns() resolved with google");
+                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with google");
                         return googleFuture.join();
                     } else if (adguardFuture.isDone() && !adguardFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.d(TAG, "resolveWithDns() resolved with adguard");
+                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with adguard");
                         return adguardFuture.join();
                     } else if (cloudflareNormalFuture.isDone() && !cloudflareNormalFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.d(TAG, "resolveWithDns() resolved with cloudflare normal");
+                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with cloudflare normal");
                         return cloudflareNormalFuture.join();
                     } else if (googleNormalFuture.isDone() && !googleNormalFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.d(TAG, "resolveWithDns() resolved with google normal");
+                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with google normal");
                         return googleNormalFuture.join();
                     } else if (adguardNormalFuture.isDone() && !adguardNormalFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.d(TAG, "resolveWithDns() resolved with adguard normal");
+                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with adguard normal");
                         return adguardNormalFuture.join();
                     }
 
