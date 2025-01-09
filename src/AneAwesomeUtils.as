@@ -227,9 +227,12 @@ public class AneAwesomeUtils {
         var dataSplit:Array = param1.level.split(";");
         var webSocketId:String = codeSplit[1];
         var ws:AneWebSocket = getWebSocket(webSocketId);
+        if (!ws) {
+            return;
+        }
         switch (codeSplit[0]) {
             case "connected":
-                ws.dispatchEvent(new Event("connect"));
+                ws.AneAwesomeUtilsInternal::onConnect();
                 break;
             case "nextMessage":
                 var bytes:ByteArray = _extContext.call("awesomeUtils_getWebSocketByteArrayMessage", webSocketId) as ByteArray;
@@ -239,8 +242,7 @@ public class AneAwesomeUtils {
                 ws.dispatchEvent(new WebSocketEvent("websocketData", WebSocket.fmtBINARY, bytes));
                 break;
             case "disconnected":
-                ws.closeReason = int(dataSplit[0]);
-                ws.dispatchEvent(new Event("close"));
+                ws.AneAwesomeUtilsInternal::onClose(dataSplit[0]);
                 break;
             case "error":
                 ws.dispatchEvent(new IOErrorEvent("ioError", false, false, param1.level));

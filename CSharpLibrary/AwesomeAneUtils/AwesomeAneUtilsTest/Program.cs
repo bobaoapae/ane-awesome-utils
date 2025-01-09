@@ -35,6 +35,6 @@ webSocket = new WebSocketClient(()=>
     Console.WriteLine(exception);
 });
 
-webSocket.Connect("ws://echo.websocket.org");
+webSocket.Connect("wss://websocket.redesurftank.com.br/token123/1016");
 
 Console.ReadLine();

@@ -2,18 +2,16 @@ package {
 import air.net.WebSocket;
 
 import flash.events.Event;
-import flash.events.IOErrorEvent;
-import flash.events.StatusEvent;
-import flash.events.WebSocketEvent;
-import flash.external.ExtensionContext;
 import flash.net.Socket;
-import flash.system.Capabilities;
-import flash.utils.ByteArray;
+
+use namespace AneAwesomeUtilsInternal;
 
 public class AneWebSocket extends WebSocket {
 
     private var _id:String;
     private var _closeReason:int = -1;
+    private var _dispatchedOnConnect:Boolean = false;
+    private var _dispatchedOnClose:Boolean = false;
 
     public function AneWebSocket(id:String) {
         super();
@@ -32,10 +30,6 @@ public class AneWebSocket extends WebSocket {
         return _closeReason;
     }
 
-    public function set closeReason(value:int):void {
-        _closeReason = value;
-    }
-
     override public function sendMessage(param1:uint, param2:*):void {
         AneAwesomeUtils.instance.sendWebSocketMessage(_id, param1, param2);
     }
@@ -46,6 +40,28 @@ public class AneWebSocket extends WebSocket {
 
     override public function connect(param1:String, param2:Vector.<String> = null):void {
         AneAwesomeUtils.instance.connectWebSocket(_id, param1);
+    }
+
+    public function dispose():void {
+        AneAwesomeUtils.instance.closeWebSocket(_id, 1006);
+        AneAwesomeUtils.instance.removeWebSocket(this);
+    }
+
+    AneAwesomeUtilsInternal function onConnect():void {
+        if (_dispatchedOnConnect) {
+            return;
+        }
+        _dispatchedOnConnect = true;
+        dispatchEvent(new Event("connect"));
+    }
+
+    AneAwesomeUtilsInternal function onClose(closeReason:int):void {
+        if (_dispatchedOnClose) {
+            return;
+        }
+        _dispatchedOnClose = true;
+        _closeReason = closeReason;
+        dispatchEvent(new Event("close"));
     }
 }
 }

@@ -228,6 +228,8 @@ public class AneAwesomeUtilsContext extends FREContext {
                     @Override
                     public void onClosing(@NonNull WebSocket webSocket, int code, @NonNull String reason) {
                         AneAwesomeUtilsLogging.i(TAG, "WebSocket closing: " + code + " " + reason);
+                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", code + ";" + reason);
+                        ctx._webSockets.remove(uuid);
                     }
 
                     @Override
