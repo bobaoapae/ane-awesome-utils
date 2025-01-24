@@ -12,6 +12,8 @@ namespace AwesomeAneUtils;
 
 public class LoaderManager
 {
+    private static byte[] EmptyResult = [0, 1, 2, 3];
+
     private static LoaderManager _instance;
 
     public static LoaderManager Instance => _instance ??= new LoaderManager();
@@ -109,6 +111,11 @@ public class LoaderManager
                 }
 
                 var result = memoryStream.ToArray();
+                if (result.Length == 0)
+                {
+                    result = EmptyResult;
+                }
+
                 if (!_results.TryAdd(randomId, result))
                 {
                     try
@@ -167,7 +174,7 @@ public class LoaderManager
 
     public bool TryGetResult(Guid guid, out byte[] result)
     {
-        return _results.TryGetValue(guid, out result);
+        return _results.TryRemove(guid, out result);
     }
 
     private void LogAll(Exception exception)

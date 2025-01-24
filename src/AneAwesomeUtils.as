@@ -213,6 +213,17 @@ public class AneAwesomeUtils {
                         }
                     } else {
                         result.position = 0;
+                        if (result.length == 4) {
+                            var header1:int = result.readUnsignedByte();
+                            var header2:int = result.readUnsignedByte();
+                            var header3:int = result.readUnsignedByte();
+                            var header4:int = result.readUnsignedByte();
+                            if (header1 == 0 && header2 == 1 && header3 == 2 && header4 == 3) {
+                                loader.onResult(new ByteArray());
+                                break;
+                            }
+                            result.position = 0;
+                        }
                         loader.onResult(result);
                     }
                 }

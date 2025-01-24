@@ -307,6 +307,7 @@ public class AneAwesomeUtilsContext extends FREContext {
     }
 
     public static class LoadUrl implements FREFunction {
+        private static final byte[] EmptyResult = new byte[]{0, 1, 2, 3};
         public static final String KEY = "awesomeUtils_loadUrl";
 
         @Override
@@ -391,6 +392,9 @@ public class AneAwesomeUtilsContext extends FREContext {
                                 return;
                             }
                             byte[] bytes = response.body().bytes();
+                            if (bytes.length == 0) {
+                                bytes = EmptyResult;
+                            }
                             ctx._urlLoaderResults.put(uuid, bytes);
                             ctx.dispatchUrlLoaderEvent(uuid.toString(), "success", "");
                         } catch (Exception e) {
