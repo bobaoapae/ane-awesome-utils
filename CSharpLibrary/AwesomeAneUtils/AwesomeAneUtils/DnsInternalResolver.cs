@@ -17,6 +17,8 @@ namespace AwesomeAneUtils;
 
 public sealed class DnsInternalResolver
 {
+    private static readonly IPAddress[] LOCALHOST_IPS = [IPAddress.Loopback, IPAddress.IPv6Loopback];
+
     private static DnsInternalResolver _instance;
 
     public static DnsInternalResolver Instance => _instance ??= new DnsInternalResolver();
@@ -80,6 +82,11 @@ public sealed class DnsInternalResolver
     public async Task<IPAddress[]> ResolveHost(string host)
     {
         IPAddress[] ipAddresses = [];
+
+        if (host == "localhost")
+        {
+            return LOCALHOST_IPS;
+        }
 
         lock (_resolvedHosts)
         {
@@ -226,6 +233,7 @@ public sealed class DnsInternalResolver
             return [];
         }
     }
+
     public List<IPAddress> GetAllAvailableIPs()
     {
         var ipAddresses = new List<IPAddress>();
