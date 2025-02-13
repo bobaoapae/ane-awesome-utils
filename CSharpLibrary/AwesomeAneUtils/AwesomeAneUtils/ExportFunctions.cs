@@ -280,7 +280,6 @@ public static class ExportFunctions
             }
 
             client.Disconnect(closeCode);
-            client.Dispose();
             return 1;
         }
         catch (Exception e)

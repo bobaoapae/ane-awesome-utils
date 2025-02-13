@@ -130,6 +130,25 @@ public class AneAwesomeUtils {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
+        var i:int = url.indexOf("?");
+        if (i > -1) {
+            var qs:String = url.substring(i + 1);
+            url = url.substring(0, i);
+            var queryVars:URLVariables = new URLVariables(qs);
+            if (!variables) {
+                variables = {};
+            }
+            if (variables is URLVariables) {
+                var tmp:Object = {};
+                for (var k:String in variables) {
+                    tmp[k] = String(variables[k]);
+                }
+                variables = tmp;
+            }
+            for (var k2:String in queryVars) {
+                variables[k2] = String(queryVars[k2]);
+            }
+        }
         if (headers is Dictionary) {
             var headersDict:Dictionary = headers as Dictionary;
             var headersObj:Object = {};
@@ -157,6 +176,7 @@ public class AneAwesomeUtils {
         }
         _loaders[loaderId] = {onResult: onResult, onError: onError, onProgress: onProgress};
     }
+
 
     public function getDeviceUniqueId():String {
         if (!_successInit) {
