@@ -1,4 +1,6 @@
-﻿using System.Text;
+﻿using System.Net.WebSockets;
+using System.Text;
+using System.Text.Json;
 using AwesomeAneUtils;
 
 var allIps = DnsInternalResolver.Instance.GetAllAvailableIPs();
@@ -26,7 +28,7 @@ webSocket = new WebSocketClient(()=>
     }
     
     Console.WriteLine(Encoding.UTF8.GetString(data));
-    webSocket.Disconnect(1000);
+    webSocket.Disconnect(1003);
 }, (closeCode, reason)=>
 {
     Console.WriteLine($"Closed: {closeCode} {reason}");
@@ -35,6 +37,6 @@ webSocket = new WebSocketClient(()=>
     Console.WriteLine(exception);
 });
 
-webSocket.Connect("wss://websocket.redesurftank.com.br/token123/1016");
+webSocket.Connect("wss://neo.cabal-argo-tunnel.com/38141");
 
 Console.ReadLine();

@@ -6,6 +6,7 @@ using System.Net.WebSockets;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using CommunityToolkit.HighPerformance.Buffers;
 
 namespace AwesomeAneUtils;
 
@@ -145,7 +146,7 @@ public class WebSocketClient : IDisposable
                     }
                 } while (!result.EndOfMessage); // Keep receiving until the end of the message
 
-                var memory = MemoryPool<byte>.Shared.Rent(totalBytesReceived);
+                var memory = MemoryOwner<byte>.Allocate(totalBytesReceived);
                 buffer.AsSpan(..totalBytesReceived).CopyTo(memory.Memory.Span);
                 _receiveQueue.Enqueue(memory);
                 _onReceived?.Invoke();

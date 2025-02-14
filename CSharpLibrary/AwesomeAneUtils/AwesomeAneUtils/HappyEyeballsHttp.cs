@@ -140,7 +140,7 @@ public static class HappyEyeballsHttp
             await socket.ConnectAsync(new IPEndPoint(address, port), cancel).ConfigureAwait(false);
             return socket;
         }
-        catch (Exception e)
+        catch (Exception)
         {
             socket.Dispose();
             return null;
