@@ -270,13 +270,13 @@ public class AneAwesomeUtils {
                 if (!bytes)
                     break;
                 bytes.position = 0;
-                ws.dispatchEvent(new WebSocketEvent("websocketData", WebSocket.fmtBINARY, bytes));
+                ws.AneAwesomeUtilsInternal::onData(bytes);
                 break;
             case "disconnected":
                 ws.AneAwesomeUtilsInternal::onClose(dataSplit[0]);
                 break;
             case "error":
-                ws.dispatchEvent(new IOErrorEvent("ioError", false, false, param1.level));
+                ws.AneAwesomeUtilsInternal::onIoError(param1.level);
                 break;
             default:
                 throw new Error("TODO: handle StatusEvent code = [" + param1.code + "], level = [" + param1.level + "]");

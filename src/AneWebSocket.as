@@ -2,7 +2,10 @@ package {
 import air.net.WebSocket;
 
 import flash.events.Event;
+import flash.events.IOErrorEvent;
+import flash.events.WebSocketEvent;
 import flash.net.Socket;
+import flash.utils.ByteArray;
 
 use namespace AneAwesomeUtilsInternal;
 
@@ -55,6 +58,10 @@ public class AneWebSocket extends WebSocket {
         dispatchEvent(new Event("connect"));
     }
 
+    AneAwesomeUtilsInternal function onData(bytes:ByteArray):void {
+       dispatchEvent(new WebSocketEvent("websocketData", WebSocket.fmtBINARY, bytes));
+    }
+
     AneAwesomeUtilsInternal function onClose(closeReason:int):void {
         if (_dispatchedOnClose) {
             return;
@@ -62,6 +69,15 @@ public class AneWebSocket extends WebSocket {
         _dispatchedOnClose = true;
         _closeReason = closeReason;
         dispatchEvent(new Event("close"));
+    }
+
+    AneAwesomeUtilsInternal function onIoError(error:String):void {
+        if (_dispatchedOnClose) {
+            return;
+        }
+        _dispatchedOnClose = true;
+        _closeReason = 1006;
+        dispatchEvent(new IOErrorEvent("ioError", false, false, error));
     }
 }
 }

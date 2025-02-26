@@ -185,25 +185,52 @@ public class LoaderManager
         try
         {
             var logBuilder = new StringBuilder();
-
-            // Log the main exception
-            logBuilder.AppendLine($"Exception: {exception.Message}");
-            logBuilder.AppendLine($"Stack Trace: {exception.StackTrace}");
-
-            var inner = exception.InnerException;
-            while (inner != null)
-            {
-                logBuilder.AppendLine($"Inner Exception: {inner.Message}");
-                logBuilder.AppendLine($"Inner Stack Trace: {inner.StackTrace}");
-                inner = inner.InnerException;
-            }
-
-            // Call _writeLog once with the complete log string
+            BuildExceptionLogString(exception, logBuilder, /*indent=*/"");
             _writeLog(logBuilder.ToString());
         }
         catch (Exception)
         {
-            // ignored
+            // Avoid throwing from inside logging.
+        }
+    }
+
+    /// <summary>
+    /// Recursively builds the exception log string, including aggregate inner exceptions.
+    /// </summary>
+    /// <param name="ex">The exception to log.</param>
+    /// <param name="builder">StringBuilder to accumulate the logs.</param>
+    /// <param name="indent">Used for indentation of nested exceptions.</param>
+    private void BuildExceptionLogString(Exception ex, StringBuilder builder, string indent)
+    {
+        if (ex == null) return;
+
+        // Record basic exception info
+        builder.AppendLine($"{indent}Exception Type: {ex.GetType().FullName}");
+        builder.AppendLine($"{indent}Message       : {ex.Message}");
+        builder.AppendLine($"{indent}Stack Trace   :");
+        builder.AppendLine($"{indent}{ex.StackTrace}");
+        builder.AppendLine(); // Blank line for readability
+
+        // If this is an AggregateException, we need to handle all its inner exceptions
+        if (ex is AggregateException aggEx)
+        {
+            // Flattening ensures nested AggregateExceptions come together into one list
+            aggEx = aggEx.Flatten();
+            foreach (var innerEx in aggEx.InnerExceptions)
+            {
+                builder.AppendLine($"{indent}---> (Aggregate Inner Exception) <---");
+                // Increase indent for nested exceptions
+                BuildExceptionLogString(innerEx, builder, indent + "    ");
+            }
+        }
+        else
+        {
+            // For a "normal" exception, just follow the single InnerException chain
+            if (ex.InnerException != null)
+            {
+                builder.AppendLine($"{indent}---> (Inner Exception) <---");
+                BuildExceptionLogString(ex.InnerException, builder, indent + "    ");
+            }
         }
     }
 }
