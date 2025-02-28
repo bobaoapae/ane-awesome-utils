@@ -260,12 +260,18 @@ public sealed class DnsInternalResolver
         // Get all available IP addresses
         var ipAddresses = GetAllAvailableIPs();
 
-        // Check if any is IPv6
+        // Check if any is a non-local IPv6 address
         foreach (var ip in ipAddresses)
         {
-            //if local continue
+            // Skip loopback addresses
             if (IPAddress.IsLoopback(ip))
                 continue;
+        
+            // Skip link-local IPv6 addresses
+            if (ip.AddressFamily == AddressFamily.InterNetworkV6 && ip.IsIPv6LinkLocal)
+                continue;
+
+            // If it's a non-local IPv6 address, return true
             if (ip.AddressFamily == AddressFamily.InterNetworkV6)
                 return true;
         }

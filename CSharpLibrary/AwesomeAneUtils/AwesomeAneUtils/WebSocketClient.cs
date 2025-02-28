@@ -67,8 +67,8 @@ public class WebSocketClient : IDisposable
                 _onConnect?.Invoke(); // Callback after successful connection
 
                 // Start background tasks for sending and receiving messages
-                _ = Task.Factory.StartNew(() => SendLoopAsync(_cancellationTokenSource.Token), TaskCreationOptions.LongRunning);
-                _ = Task.Factory.StartNew(() => ReceiveLoopAsync(_cancellationTokenSource.Token), TaskCreationOptions.LongRunning);
+                _ = Task.Factory.StartNew(SendLoopAsync, TaskCreationOptions.LongRunning);
+                _ = Task.Factory.StartNew(ReceiveLoopAsync, TaskCreationOptions.LongRunning);
             }
             else
             {
@@ -95,8 +95,9 @@ public class WebSocketClient : IDisposable
         Disconnect((int)WebSocketCloseStatus.PolicyViolation);
     }
 
-    private async Task SendLoopAsync(CancellationToken cancellationToken)
+    private async Task SendLoopAsync()
     {
+        var cancellationToken = _cancellationTokenSource.Token;
         while (!cancellationToken.IsCancellationRequested)
         {
             var data = await _sendChannel.Reader.ReadAsync(cancellationToken);
@@ -113,8 +114,9 @@ public class WebSocketClient : IDisposable
         }
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
+    private async Task ReceiveLoopAsync()
     {
+        var cancellationToken = _cancellationTokenSource.Token;
         var bufferPool = ArrayPool<byte>.Shared; // ArrayPool for efficient buffer management
         var buffer = bufferPool.Rent(1024); // Rent a buffer from the pool
         try

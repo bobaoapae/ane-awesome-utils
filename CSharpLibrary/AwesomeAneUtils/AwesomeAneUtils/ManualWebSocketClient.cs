@@ -20,7 +20,7 @@ public static class ManualWebSocketClient
     public static async Task<WebSocket> ConnectAsync(Uri uri, Action<string> onLog, CancellationToken cancellationToken)
     {
         // 1. Resolve DNS
-        var addresses = await Dns.GetHostAddressesAsync(uri.Host, cancellationToken);
+        var addresses = await DnsInternalResolver.Instance.ResolveHost(uri.Host);
         if (addresses.Length == 0)
             throw new InvalidOperationException($"No IP addresses resolved for host {uri.Host}");
 
@@ -33,7 +33,14 @@ public static class ManualWebSocketClient
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
         // 2. Start all TCP connections in parallel, *without* doing the handshake yet
-        var connectTasks = addresses.Select(addr => ConnectSocketAsync(addr, port, onLog, cts.Token)).ToList();
+        var connectTasks = addresses.Select(addr =>
+            Task.Factory.StartNew(
+                () => ConnectSocketAsync(addr, port, onLog, cts.Token),
+                cts.Token,
+                TaskCreationOptions.DenyChildAttach,
+                TaskScheduler.Default
+            ).Unwrap()
+        ).ToList();
 
         // We'll store exceptions if all fail
         var exceptions = new List<Exception>();
@@ -95,6 +102,7 @@ public static class ManualWebSocketClient
     {
         onLog?.Invoke($"Trying to connect to {addr} on port {port}...");
         var socket = new Socket(addr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        socket.NoDelay = true;
 
         try
         {
