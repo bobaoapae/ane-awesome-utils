@@ -101,7 +101,7 @@ public static class ManualWebSocketClient
     private static async Task<Socket> ConnectSocketAsync(IPAddress addr, int port, Action<string> onLog, CancellationToken cancellationToken)
     {
         onLog?.Invoke($"Trying to connect to {addr} on port {port}...");
-        var socket = new Socket(addr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
         socket.NoDelay = true;
 
         try

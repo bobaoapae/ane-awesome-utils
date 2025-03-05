@@ -101,7 +101,7 @@ public static class HappyEyeballsHttp
             throw new Exception($"Host {context.DnsEndPoint.Host} resolved to no IPs!");
 
         linkedCts.Token.ThrowIfCancellationRequested();
-        
+
         var (socket, index) = await ParallelTask(
             resolvedAddresses.Length,
             (i, cancel) => AttemptConnection(i, resolvedAddresses[i], endPoint.Port, cancel),
@@ -119,12 +119,7 @@ public static class HappyEyeballsHttp
         CancellationToken cancel)
     {
         // The following socket constructor will create a dual-mode socket on systems where IPV6 is available.
-        var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp)
-        {
-            // Turn off Nagle's algorithm since it degrades performance in most HttpClient scenarios.
-            NoDelay = true
-        };
-
+        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
         try
         {
 #if DEBUG
@@ -154,7 +149,7 @@ public static class HappyEyeballsHttp
 
         return DnsInternalResolver.Instance.ResolveHost(endPoint.Host);
     }
-    
+
     internal static async Task<(T, int)> ParallelTask<T>(
         int candidateCount,
         Func<int, CancellationToken, Task<T>> taskBuilder,
