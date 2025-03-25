@@ -237,6 +237,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                 }
                 webSocket.close(1000, "User closed");
                 ctx._webSockets.remove(uuid);
+                ctx._webSocketResponseHeaders.remove(uuid);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error closing web socket", e);
             }
@@ -310,6 +311,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                         AneAwesomeUtilsLogging.i(TAG, "WebSocket closing: " + code + " " + reason);
                         ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", code + ";" + reason);
                         ctx._webSockets.remove(uuid);
+                        ctx._webSocketResponseHeaders.remove(uuid);
                     }
 
                     @Override
@@ -317,6 +319,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                         AneAwesomeUtilsLogging.i(TAG, "WebSocket closed: " + code + " " + reason);
                         ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", code + ";" + reason);
                         ctx._webSockets.remove(uuid);
+                        ctx._webSocketResponseHeaders.remove(uuid);
                     }
 
                     @Override
@@ -332,6 +335,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                                     if (parts2.length > 1) {
                                         ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", parts2[1]);
                                         ctx._webSockets.remove(uuid);
+                                        ctx._webSocketResponseHeaders.remove(uuid);
                                         return;
                                     }
                                 }
@@ -340,6 +344,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                         AneAwesomeUtilsLogging.e(TAG, "WebSocket failure", t);
                         ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", "1005;Unknown error");
                         ctx._webSockets.remove(uuid);
+                        ctx._webSocketResponseHeaders.remove(uuid);
                     }
                 });
 
@@ -372,6 +377,8 @@ public class AneAwesomeUtilsContext extends FREContext {
                     writer.close();
                     return FREObject.newObject(writer.toString());
                 }
+
+                return FREObject.newObject("{}");
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error getting web socket headers", e);
             }
