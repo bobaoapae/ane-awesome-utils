@@ -5,6 +5,7 @@ import static br.com.redesurftank.aneawesomeutils.AneAwesomeUtilsExtension.TAG;
 import android.content.ContentResolver;
 import android.provider.Settings;
 import android.util.JsonReader;
+import android.util.JsonWriter;
 
 import androidx.annotation.NonNull;
 
@@ -54,6 +55,7 @@ public class AneAwesomeUtilsContext extends FREContext {
     private OkHttpClient _client;
     private final Map<UUID, byte[]> _urlLoaderResults = new HashMap<>();
     private final Map<UUID, RealWebSocket> _webSockets = new HashMap<>();
+    private final Map<UUID, Map<String, String>> _webSocketResponseHeaders = new HashMap<>();
     private final Queue<byte[]> _byteBufferQueue = new ConcurrentLinkedQueue<>();
 
 
@@ -73,6 +75,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(GetLoaderResult.KEY, new GetLoaderResult());
         functionMap.put(GetWebSocketByteArrayMessage.KEY, new GetWebSocketByteArrayMessage());
         functionMap.put(GetDeviceUniqueId.KEY, new GetDeviceUniqueId());
+        functionMap.put(GetWebSocketResponseHeaders.KEY, new GetWebSocketResponseHeaders());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -252,15 +255,40 @@ public class AneAwesomeUtilsContext extends FREContext {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
                 UUID uuid = UUID.fromString(args[0].getAsString());
                 String url = args[1].getAsString();
+                String headersJson = args[2].getAsString();
+
+                Map<String, String> headers = new HashMap<>();
+                JsonReader reader = new JsonReader(new java.io.StringReader(headersJson));
+                if (!headersJson.isEmpty()) {
+                    reader.beginObject();
+                    while (reader.hasNext()) {
+                        String name = reader.nextName();
+                        String value = reader.nextString();
+                        headers.put(name, value);
+                    }
+                    reader.endObject();
+                }
+
 
                 if (ctx._webSockets.containsKey(uuid)) {
                     return null;
                 }
 
-                WebSocket webSocket = ctx._client.newWebSocket(new Request.Builder().url(url).build(), new okhttp3.WebSocketListener() {
+                Request.Builder requestBuilder = new Request.Builder();
+
+                for (Map.Entry<String, String> entry : headers.entrySet()) {
+                    requestBuilder.addHeader(entry.getKey(), entry.getValue());
+                }
+
+                WebSocket webSocket = ctx._client.newWebSocket(requestBuilder.url(url).build(), new okhttp3.WebSocketListener() {
                     @Override
                     public void onOpen(@NonNull WebSocket webSocket, @NonNull Response response) {
                         AneAwesomeUtilsLogging.i(TAG, "WebSocket opened");
+                        Map<String, String> headers = new HashMap<>();
+                        for (String name : response.headers().names()) {
+                            headers.put(name, response.header(name));
+                        }
+                        ctx._webSocketResponseHeaders.put(uuid, headers);
                         ctx.dispatchWebSocketEvent(uuid.toString(), "connected", "");
                     }
 
@@ -322,6 +350,34 @@ public class AneAwesomeUtilsContext extends FREContext {
             return null;
         }
     }
+
+    public static class GetWebSocketResponseHeaders implements FREFunction {
+        public static final String KEY = "awesomeUtils_getWebSocketReceivedHeaders";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_getWebSocketReceivedHeaders");
+            try {
+                AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+                UUID uuid = UUID.fromString(args[0].getAsString());
+                Map<String, String> headers = ctx._webSocketResponseHeaders.get(uuid);
+                if (headers != null) {
+                    // Convert headers to JSON
+                    JsonWriter writer = new JsonWriter(new java.io.StringWriter());
+                    writer.beginObject();
+                    for (Map.Entry<String, String> entry : headers.entrySet()) {
+                        writer.name(entry.getKey()).value(entry.getValue());
+                    }
+                    writer.endObject();
+                    writer.close();
+                    return FREObject.newObject(writer.toString());
+                }
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error getting web socket headers", e);
+            }
+            return null;
+        }
+        }
 
     public static class AddStaticHost implements FREFunction {
         public static final String KEY = "awesomeUtils_addStaticHost";

@@ -1,10 +1,5 @@
 package {
-import air.net.WebSocket;
-
-import flash.events.Event;
-import flash.events.IOErrorEvent;
 import flash.events.StatusEvent;
-import flash.events.WebSocketEvent;
 import flash.external.ExtensionContext;
 import flash.net.URLVariables;
 import flash.system.Capabilities;
@@ -98,11 +93,29 @@ public class AneAwesomeUtils {
         _extContext.call("awesomeUtils_closeWebSocket", id, code);
     }
 
-    public function connectWebSocket(id:String, url:String):void {
+    public function connectWebSocket(id:String, url:String, headers:Dictionary):void {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
-        _extContext.call("awesomeUtils_connectWebSocket", id, url);
+        var headersObj:Object = {};
+        for (var key:Object in headers) {
+            headersObj[key] = String(headers[key]);
+        }
+        var headersJson:String = JSON.stringify(headersObj);
+        _extContext.call("awesomeUtils_connectWebSocket", id, url, headersJson);
+    }
+
+    public function getWebSocketReceivedHeaders(id:String):Dictionary {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        var headersJson:String = _extContext.call("awesomeUtils_getWebSocketReceivedHeaders", id) as String;
+        var headersObj:Object = JSON.parse(headersJson);
+        var headers:Dictionary = new Dictionary();
+        for (var key:String in headersObj) {
+            headers[key] = headersObj[key];
+        }
+        return headers;
     }
 
     public function removeWebSocket(ws:AneWebSocket):void {
@@ -213,7 +226,7 @@ public class AneAwesomeUtils {
         switch (codeSplit[0]) {
             case "progress": {
                 if (loader.onProgress) {
-                    loader.onProgress(dataSplit[0]);
+                    loader.onProgress(dataSplit[0], dataSplit[1]);
                 }
                 break;
             }

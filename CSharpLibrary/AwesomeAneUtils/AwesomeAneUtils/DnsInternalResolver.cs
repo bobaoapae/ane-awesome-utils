@@ -1,15 +1,12 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
-using System.Net.WebSockets;
 using System.Text.Json;
-using System.Threading;
 using System.Threading.Tasks;
 using DnsClient;
 
@@ -106,7 +103,7 @@ public sealed class DnsInternalResolver
             {
                 lock (_resolvedHosts)
                 {
-                    _resolvedHosts.Add(host, ipAddresses.ToList());
+                    _resolvedHosts.TryAdd(host, ipAddresses.ToList());
                 }
             }
         }
@@ -121,7 +118,7 @@ public sealed class DnsInternalResolver
                 {
                     lock (_resolvedHosts)
                     {
-                        _resolvedHosts.Add(host, ipAddresses.ToList());
+                        _resolvedHosts.TryAdd(host, ipAddresses.ToList());
                     }
                 }
             }
@@ -211,8 +208,8 @@ public sealed class DnsInternalResolver
             if (dnsResponse.Answers == null)
                 return [];
 
-            var ipAddresses = dnsResponse.Answers
-                .Where(answer => answer.Type == 1 || answer.Type == 28) // 1 for A records, 28 for AAAA records
+            var ipAddresses = Enumerable
+                .Where<DnsAnswer>(dnsResponse.Answers, answer => answer.Type == 1 || answer.Type == 28) // 1 for A records, 28 for AAAA records
                 .Select(answer =>
                 {
                     // Try to parse the IP address, handle both IPv4 and IPv6
@@ -266,7 +263,7 @@ public sealed class DnsInternalResolver
             // Skip loopback addresses
             if (IPAddress.IsLoopback(ip))
                 continue;
-        
+
             // Skip link-local IPv6 addresses
             if (ip.AddressFamily == AddressFamily.InterNetworkV6 && ip.IsIPv6LinkLocal)
                 continue;

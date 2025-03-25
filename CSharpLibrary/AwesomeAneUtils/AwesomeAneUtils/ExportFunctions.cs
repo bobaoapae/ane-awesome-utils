@@ -209,7 +209,7 @@ public static class ExportFunctions
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_connectWebSocket", CallConvs = [typeof(CallConvCdecl)])]
-    public static int ConnectWebSocket(IntPtr guidPointer, IntPtr pointerUri)
+    public static int ConnectWebSocket(IntPtr guidPointer, IntPtr pointerUri, IntPtr pointerHeaders)
     {
         try
         {
@@ -225,8 +225,38 @@ public static class ExportFunctions
             }
 
             var uri = Marshal.PtrToStringAnsi(pointerUri);
-            client.Connect(uri);
+            
+            var headers = Marshal.PtrToStringAnsi(pointerHeaders);
+            var headersDictionary = string.IsNullOrEmpty(headers) ? new Dictionary<string, string>() : JsonSerializer.Deserialize(headers, JsonDictionaryHeaderContext.Default.DictionaryStringString);
+            
+            client.Connect(uri, headersDictionary);
             return 1;
+        }
+        catch (Exception e)
+        {
+            LogAll(e, _writeLogWrapper);
+            return 0;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_getReceivedHeaders", CallConvs = [typeof(CallConvCdecl)])]
+    public static IntPtr GetReceivedHeaders(IntPtr guidPointer)
+    {
+        try
+        {
+            var guidString = Marshal.PtrToStringAnsi(guidPointer);
+            if (!Guid.TryParse(guidString, out var guid))
+            {
+                return 0;
+            }
+
+            if (!WebSocketClients.TryGetValue(guid, out var client))
+            {
+                return 0;
+            }
+            
+            var headers = JsonSerializer.Serialize(client.ReceivedHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString);
+            return Marshal.StringToCoTaskMemAnsi(headers);
         }
         catch (Exception e)
         {

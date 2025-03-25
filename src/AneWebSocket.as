@@ -6,12 +6,14 @@ import flash.events.IOErrorEvent;
 import flash.events.WebSocketEvent;
 import flash.net.Socket;
 import flash.utils.ByteArray;
+import flash.utils.Dictionary;
 
 use namespace AneAwesomeUtilsInternal;
 
 public class AneWebSocket extends WebSocket {
 
     private var _id:String;
+    private var _headers:Dictionary;
     private var _closeReason:int = -1;
     private var _dispatchedOnConnect:Boolean = false;
     private var _dispatchedOnClose:Boolean = false;
@@ -19,10 +21,27 @@ public class AneWebSocket extends WebSocket {
     public function AneWebSocket(id:String) {
         super();
         _id = id;
+        _headers = new Dictionary();
     }
 
     public function get id():String {
         return _id;
+    }
+
+    public function get headers():Dictionary {
+        return _headers;
+    }
+
+    public function addHeader(param1:String, param2:String):void {
+        _headers[param1] = param2;
+    }
+
+    public function removeHeader(param1:String):void {
+        delete _headers[param1];
+    }
+
+    public function getReceivedHeaders():Dictionary {
+        return AneAwesomeUtils.instance.getWebSocketReceivedHeaders(_id);
     }
 
     override public function startServer(param1:Socket):void {
@@ -42,7 +61,7 @@ public class AneWebSocket extends WebSocket {
     }
 
     override public function connect(param1:String, param2:Vector.<String> = null):void {
-        AneAwesomeUtils.instance.connectWebSocket(_id, param1);
+        AneAwesomeUtils.instance.connectWebSocket(_id, param1, _headers);
     }
 
     public function dispose():void {
@@ -59,7 +78,7 @@ public class AneWebSocket extends WebSocket {
     }
 
     AneAwesomeUtilsInternal function onData(bytes:ByteArray):void {
-       dispatchEvent(new WebSocketEvent("websocketData", WebSocket.fmtBINARY, bytes));
+        dispatchEvent(new WebSocketEvent("websocketData", WebSocket.fmtBINARY, bytes));
     }
 
     AneAwesomeUtilsInternal function onClose(closeReason:int):void {

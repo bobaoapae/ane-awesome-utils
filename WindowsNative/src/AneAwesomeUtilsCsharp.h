@@ -20,7 +20,8 @@ extern "C" {
     char* __cdecl csharpLibrary_awesomeUtils_loadUrl(const char* url, const char* method, const char* variables, const char* headers);
     DataArray __cdecl csharpLibrary_awesomeUtils_getLoaderResult(const void* guidPointer);
     char* __cdecl csharpLibrary_awesomeUtils_createWebSocket();
-    int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void* guidPointer, const char* host);
+    int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void* guidPointer, const char* host, const char* headers);
+    char* __cdecl csharpLibrary_awesomeUtils_getReceivedHeaders(const void* guidPointer);
     int __cdecl csharpLibrary_awesomeUtils_sendWebSocketMessage(const void* guidPointer, const void* data, int length);
     int __cdecl csharpLibrary_awesomeUtils_closeWebSocket(const void* guidPointer, int closeCode);
     DataArray __cdecl csharpLibrary_awesomeUtils_getWebSocketMessage(const void* guidPointer);

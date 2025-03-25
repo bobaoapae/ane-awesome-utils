@@ -185,9 +185,9 @@ char * __cdecl csharpLibrary_awesomeUtils_createWebSocket() {
     return result;
 }
 
-int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void *guidPointer, const char *host) {
+int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void *guidPointer, const char *host, const char *headers) {
     writeLog("connectWebSocket called");
-    using ConnectWebSocketFunction = int(__cdecl *)(const void *, const char *);
+    using ConnectWebSocketFunction = int(__cdecl *)(const void *, const char *, const char *);
     auto func = reinterpret_cast<ConnectWebSocketFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_connectWebSocket"));
 
     if (!func) {
@@ -195,8 +195,24 @@ int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void *guidPointer,
         return -1;
     }
 
-    int result = func(guidPointer, host);
+    int result = func(guidPointer, host, headers);
     writeLog(("connectWebSocket result: " + std::to_string(result)).c_str());
+    return result;
+}
+
+char * __cdecl csharpLibrary_awesomeUtils_getReceivedHeaders(const void *guidPointer) {
+    writeLog("getReceivedHeaders called");
+    using GetReceivedHeadersFunction = char *(__cdecl *)(const void *);
+    auto func = reinterpret_cast<GetReceivedHeadersFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_getReceivedHeaders"));
+
+    if (!func) {
+        writeLog("Could not load getReceivedHeaders function");
+        return nullptr;
+    }
+
+    char *result = func(guidPointer);
+    writeLog("getReceivedHeaders result: ");
+    writeLog(result);
     return result;
 }
 

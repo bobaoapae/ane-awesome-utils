@@ -1,23 +1,24 @@
-﻿using System.Collections.Generic;
-using System.Linq;
-
-namespace AwesomeAneUtils;
-
-using System;
-using System.Buffers;
+﻿using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
-using System.Net.Security; // SslStream
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
+namespace AwesomeAneUtils;
+
+// SslStream
+
 public static class ManualWebSocketClient
 {
-    public static async Task<WebSocket> ConnectAsync(Uri uri, Action<string> onLog, CancellationToken cancellationToken)
+    public static async Task<(WebSocket, IPEndPoint, Stream, Dictionary<string, string>)> ConnectAsync(Uri uri, Dictionary<string, string> headers, Action<string> onLog, TimeSpan timeout, CancellationToken cancellationToken)
     {
         // 1. Resolve DNS
         var addresses = await DnsInternalResolver.Instance.ResolveHost(uri.Host);
@@ -32,14 +33,18 @@ public static class ManualWebSocketClient
         // We'll use a linked CTS so we can cancel other attempts once the first socket is connected
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
+        var maxTimeIndividually = TimeSpan.FromMilliseconds(timeout.TotalMilliseconds / addresses.Length);
+
         // 2. Start all TCP connections in parallel, *without* doing the handshake yet
         var connectTasks = addresses.Select(addr =>
-            Task.Factory.StartNew(
-                () => ConnectSocketAsync(addr, port, onLog, cts.Token),
-                cts.Token,
-                TaskCreationOptions.DenyChildAttach,
-                TaskScheduler.Default
-            ).Unwrap()
+            {
+                return Task.Factory.StartNew(
+                    () => ConnectSocketAsync(addr, port, onLog, maxTimeIndividually, cts.Token),
+                    cts.Token,
+                    TaskCreationOptions.DenyChildAttach,
+                    TaskScheduler.Default
+                ).Unwrap();
+            }
         ).ToList();
 
         // We'll store exceptions if all fail
@@ -60,6 +65,8 @@ public static class ManualWebSocketClient
                 // If we got here, we have a connected socket. Cancel the others.
                 cts.Cancel();
 
+                onLog?.Invoke($"TCP connection to {socket.RemoteEndPoint} succeeded.");
+
                 // 4. Now do the handshake steps on the *first connected* socket
                 Stream stream = new NetworkStream(socket, ownsSocket: true);
                 if (uri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase))
@@ -70,7 +77,7 @@ public static class ManualWebSocketClient
                 }
 
                 // 5. Perform WebSocket handshake on the single “fastest” socket
-                var websocket = await DoWebSocketHandshake(stream, uri, onLog, cancellationToken);
+                var (websocket, receivedHeaders) = await DoWebSocketHandshake(stream, uri, headers, onLog, cancellationToken);
                 if (websocket == null)
                 {
                     // If handshake fails, we close and throw.
@@ -81,7 +88,7 @@ public static class ManualWebSocketClient
                 }
 
                 onLog?.Invoke($"Connection established to host {uri.Host}, IP {socket.RemoteEndPoint}");
-                return websocket;
+                return (websocket, socket.RemoteEndPoint as IPEndPoint, stream, receivedHeaders);
             }
             catch (Exception ex)
             {
@@ -98,11 +105,29 @@ public static class ManualWebSocketClient
     /// Attempts to connect a Socket to a given IP address/port.
     /// Returns the connected Socket on success, or throws on failure.
     /// </summary>
-    private static async Task<Socket> ConnectSocketAsync(IPAddress addr, int port, Action<string> onLog, CancellationToken cancellationToken)
+    private static async Task<Socket> ConnectSocketAsync(IPAddress addr, int port, Action<string> onLog, TimeSpan timeout, CancellationToken cancellationToken)
     {
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(timeout);
         onLog?.Invoke($"Trying to connect to {addr} on port {port}...");
-        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+
+        var socket = new Socket(addr.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         socket.NoDelay = true;
+
+        // Keep-alive settings for long-lived WebSocket connections
+        socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+
+        // On Windows, you can set more specific keep-alive parameters
+        // This requires platform-specific code or a check for the operating system
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            // Set TCP keep-alive time (milliseconds)
+            byte[] keepAliveValues = new byte[12];
+            BitConverter.GetBytes(1).CopyTo(keepAliveValues, 0); // Enable keep-alive
+            BitConverter.GetBytes(3000).CopyTo(keepAliveValues, 4); // Idle time before first probe (30 seconds)
+            BitConverter.GetBytes(1000).CopyTo(keepAliveValues, 8); // Interval between probes (5 seconds)
+            socket.IOControl(IOControlCode.KeepAliveValues, keepAliveValues, null);
+        }
 
         try
         {
@@ -113,25 +138,26 @@ public static class ManualWebSocketClient
                              socket.Close(0);
                          }))
             {
-                await socket.ConnectAsync(new IPEndPoint(addr, port), cancellationToken);
+                await socket.ConnectAsync(new IPEndPoint(addr, port), timeoutCts.Token);
             }
 
-            onLog?.Invoke($"TCP connection to {addr}:{port} succeeded.");
             return socket;
         }
         catch (Exception ex)
         {
             // Clean up the socket on failure
             socket.Dispose();
-            onLog?.Invoke($"Failed to connect to {addr} on port {port}: {ex.Message}");
+            if (ex is not OperationCanceledException)
+                onLog?.Invoke($"Failed to connect to {addr} on port {port}: {ex.Message}");
             throw;
         }
     }
 
 
-    private static async Task<WebSocket> DoWebSocketHandshake(
+    private static async Task<(WebSocket, Dictionary<string, string>)> DoWebSocketHandshake(
         Stream stream,
         Uri uri,
+        Dictionary<string, string> headers,
         Action<string> onLog,
         CancellationToken token)
     {
@@ -144,12 +170,20 @@ public static class ManualWebSocketClient
         var requestHeaders =
             $"GET {uri.PathAndQuery} HTTP/1.1\r\n" +
             $"Host: {uri.Host}\r\n" +
-            $"User-Agent: {HappyEyeballsHttp.CustomAgent}\r\n" +
+            $"User-Agent: cloudflared/2025.2.1\r\n" +
             "Upgrade: websocket\r\n" +
             "Connection: Upgrade\r\n" +
             $"Sec-WebSocket-Key: {secKeyBase64}\r\n" +
-            "Sec-WebSocket-Version: 13\r\n" +
-            "\r\n";
+            "Sec-WebSocket-Version: 13\r\n";
+
+        foreach (var (key, value) in headers)
+        {
+            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(value))
+                continue;
+            requestHeaders += $"{key}: {value}\r\n";
+        }
+
+        requestHeaders += "\r\n";
 
         var requestBytes = Encoding.ASCII.GetBytes(requestHeaders);
         await stream.WriteAsync(requestBytes, token).ConfigureAwait(false);
@@ -158,16 +192,41 @@ public static class ManualWebSocketClient
         var headerBuffer = await ReadHeadersUntilCrLfCrLf(stream, token).ConfigureAwait(false);
         var headerText = Encoding.ASCII.GetString(headerBuffer);
 
-        onLog?.Invoke($"Server handshake:\n{headerText}");
+        var headersDict = new Dictionary<string, string>();
 
+        // Split the header text by lines and process each line
+        var headerLines = headerText.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var line in headerLines)
+        {
+            // Skip the first line which is typically the HTTP status line
+            if (line.StartsWith("HTTP/"))
+                continue;
+
+            // Find the position of the first colon
+            var colonPos = line.IndexOf(':');
+            if (colonPos > 0)
+            {
+                // Extract header name and value
+                var headerName = line[..colonPos].Trim();
+                var headerValue = line[(colonPos + 1)..].Trim();
+
+                // Add to dictionary (case-insensitive option)
+                headersDict[headerName] = headerValue;
+            }
+        }
+
+#if DEBUG
+        onLog?.Invoke($"Server handshake:\n{headerText}");
+#endif
         // 4. Verifica 101 Switching Protocols
         if (!headerText.Contains("101 Switching Protocols"))
-            return null;
+            return (null, headersDict);
 
         // 5. Verifica Sec-WebSocket-Accept
         var expectedAccept = ComputeWebSocketAccept(secKeyBase64);
         if (!headerText.Contains(expectedAccept))
-            return null;
+            return (null, headersDict);
 
         // 6. Ao chegar aqui, NENHUM byte do WS foi lido.
         //    Podemos criar o WebSocket do stream original, sem CombinedStream.
@@ -177,7 +236,7 @@ public static class ManualWebSocketClient
             subProtocol: null,
             keepAliveInterval: TimeSpan.FromSeconds(30));
 
-        return ws;
+        return (ws, headersDict);
     }
 
     private static async Task<byte[]> ReadHeadersUntilCrLfCrLf(Stream stream, CancellationToken token)

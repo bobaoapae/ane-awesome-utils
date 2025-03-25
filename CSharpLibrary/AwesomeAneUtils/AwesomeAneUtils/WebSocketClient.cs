@@ -2,6 +2,8 @@
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
+using System.Net;
 using System.Net.WebSockets;
 using System.Threading;
 using System.Threading.Channels;
@@ -21,11 +23,16 @@ public class WebSocketClient : IDisposable
     private readonly Action<string> _onLog;
 
     private WebSocket _activeWebSocket;
+    private IPEndPoint _remoteEndPoint;
+    private Stream _stream;
+    private Dictionary<string, string> _receivedHeaders = new();
     private bool _disposed;
     private bool _isDisconnectCalled;
     private readonly Lock _sendLocker;
     private readonly Channel<byte[]> _sendChannel;
     private readonly ConcurrentQueue<IMemoryOwner<byte>> _receiveQueue;
+
+    public IReadOnlyDictionary<string, string> ReceivedHeaders => _receivedHeaders;
 
     public WebSocketClient(Action onConnect, Action onReceived, Action<int, string> onIoError, Action<string> onLog)
     {
@@ -42,12 +49,12 @@ public class WebSocketClient : IDisposable
         _sendLocker = new Lock();
     }
 
-    public void Connect(string uri)
+    public void Connect(string uri, Dictionary<string, string> headers = null)
     {
-        _ = Task.Run(async () => await ConnectAsync(uri));
+        _ = Task.Run(async () => await ConnectAsync(uri, headers));
     }
 
-    private async Task ConnectAsync(string uri)
+    private async Task ConnectAsync(string uri, Dictionary<string, string> headers)
     {
         _cancellationTokenSource = new CancellationTokenSource();
 
@@ -59,7 +66,7 @@ public class WebSocketClient : IDisposable
             _onLog?.Invoke($"Connecting to {uri}...");
             var uriObject = new Uri(uri);
 
-            _activeWebSocket = await ManualWebSocketClient.ConnectAsync(uriObject, _onLog, linkedCts.Token);
+            (_activeWebSocket, _remoteEndPoint, _stream, _receivedHeaders) = await ManualWebSocketClient.ConnectAsync(uriObject, headers, _onLog, TimeSpan.FromSeconds(10), linkedCts.Token);
 
             // Check if the connection succeeded
             if (_activeWebSocket is { State: WebSocketState.Open })
