@@ -10,7 +10,7 @@ typedef void* NSWindow; // don't need this..
 #endif
 
 static bool alreadyInitialized = false;
-static FRENamedFunction *exportedFunctions = new FRENamedFunction[11];
+static FRENamedFunction *exportedFunctions = new FRENamedFunction[12];
 static FREContext context;
 
 static void dispatchWebSocketEvent(const char *guid, const char *code, const char *level) {
@@ -112,13 +112,35 @@ static FREObject awesomeUtils_connectWebSocket(FREContext ctx, void *funcData, u
     FREGetObjectAsUTF8(argv[1], &uriLength, &uri);
 
     auto uriChar = reinterpret_cast<const char *>(uri);
+    
+    uint32_t headersLength;
+    const uint8_t *headers;
+    FREGetObjectAsUTF8(argv[2], &headersLength, &headers);
+
+    auto headersChar = reinterpret_cast<const char *>(headers);
 
     writeLog("Calling connect to uri: ");
     writeLog(uriChar);
 
-    csharpLibrary_awesomeUtils_connectWebSocket(idChar, uriChar);
+    csharpLibrary_awesomeUtils_connectWebSocket(idChar, uriChar, headersChar);
 
     return nullptr;
+}
+
+static FREObject awesomeUtils_getWebSocketReceivedHeaders(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("getReceivedHeaders called");
+    if (argc < 1) return nullptr;
+
+    uint32_t idLength;
+    const uint8_t *id;
+    FREGetObjectAsUTF8(argv[0], &idLength, &id);
+    auto idChar = reinterpret_cast<const char *>(id);
+
+    auto headers = csharpLibrary_awesomeUtils_getReceivedHeaders(idChar);
+
+    FREObject resultStr;
+    FRENewObjectFromUTF8(strlen(headers), reinterpret_cast<const uint8_t *>(headers), &resultStr);
+    return resultStr;
 }
 
 static FREObject awesomeUtils_closeWebSocket(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
@@ -335,23 +357,25 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[2].function = awesomeUtils_sendWebSocketMessage;
         exportedFunctions[3].name = reinterpret_cast<const uint8_t *>("awesomeUtils_closeWebSocket");
         exportedFunctions[3].function = awesomeUtils_closeWebSocket;
-        exportedFunctions[4].name = (const uint8_t *) "awesomeUtils_connectWebSocket";
+        exportedFunctions[4].name = reinterpret_cast<const uint8_t *>("awesomeUtils_connectWebSocket");
         exportedFunctions[4].function = awesomeUtils_connectWebSocket;
-        exportedFunctions[5].name = (const uint8_t *) "awesomeUtils_addStaticHost";
+        exportedFunctions[5].name = reinterpret_cast<const uint8_t *>("awesomeUtils_addStaticHost");
         exportedFunctions[5].function = awesomeUtils_addStaticHost;
-        exportedFunctions[6].name = (const uint8_t *) "awesomeUtils_removeStaticHost";
+        exportedFunctions[6].name = reinterpret_cast<const uint8_t *>("awesomeUtils_removeStaticHost");
         exportedFunctions[6].function = awesomeUtils_removeStaticHost;
-        exportedFunctions[7].name = (const uint8_t *) "awesomeUtils_loadUrl";
+        exportedFunctions[7].name = reinterpret_cast<const uint8_t *>("awesomeUtils_loadUrl");
         exportedFunctions[7].function = awesomeUtils_loadUrl;
-        exportedFunctions[8].name = (const uint8_t *) "awesomeUtils_getLoaderResult";
+        exportedFunctions[8].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getLoaderResult");
         exportedFunctions[8].function = awesomeUtils_getLoaderResult;
-        exportedFunctions[9].name = (const uint8_t *) "awesomeUtils_getWebSocketByteArrayMessage";
+        exportedFunctions[9].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getWebSocketByteArrayMessage");
         exportedFunctions[9].function = awesomeUtils_getWebSocketByteArrayMessage;
-        exportedFunctions[10].name = (const uint8_t *) "awesomeUtils_getDeviceUniqueId";
+        exportedFunctions[10].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getDeviceUniqueId");
         exportedFunctions[10].function = awesomeUtils_getDeviceUniqueId;
+        exportedFunctions[11].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getWebSocketReceivedHeaders");
+        exportedFunctions[11].function = awesomeUtils_getWebSocketReceivedHeaders;
         context = ctx;
     }
-    if (numFunctionsToSet) *numFunctionsToSet = 11;
+    if (numFunctionsToSet) *numFunctionsToSet = 12;
     if (functionsToSet) *functionsToSet = exportedFunctions;
 }
 
