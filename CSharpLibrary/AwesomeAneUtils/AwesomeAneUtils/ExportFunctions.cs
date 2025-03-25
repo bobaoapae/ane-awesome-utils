@@ -247,12 +247,12 @@ public static class ExportFunctions
             var guidString = Marshal.PtrToStringAnsi(guidPointer);
             if (!Guid.TryParse(guidString, out var guid))
             {
-                return 0;
+                return Marshal.StringToCoTaskMemAnsi("{}");
             }
 
             if (!WebSocketClients.TryGetValue(guid, out var client))
             {
-                return 0;
+                return Marshal.StringToCoTaskMemAnsi("{}");
             }
             
             var headers = JsonSerializer.Serialize(client.ReceivedHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString);
