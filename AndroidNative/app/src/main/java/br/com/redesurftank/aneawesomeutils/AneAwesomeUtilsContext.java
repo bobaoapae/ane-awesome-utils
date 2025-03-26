@@ -15,6 +15,7 @@ import com.adobe.fre.FREFunction;
 import com.adobe.fre.FREObject;
 
 import java.io.IOException;
+import java.io.StringWriter;
 import java.net.InetAddress;
 import java.net.ProtocolException;
 import java.net.UnknownHostException;
@@ -126,11 +127,11 @@ public class AneAwesomeUtilsContext extends FREContext {
         }
 
         private static OkHttpClient.Builder configureToIgnoreCertificate(OkHttpClient.Builder builder) {
-           AneAwesomeUtilsLogging.w(TAG, "Ignoring SSL certificate");
+            AneAwesomeUtilsLogging.w(TAG, "Ignoring SSL certificate");
             try {
 
                 // Create a trust manager that does not validate certificate chains
-                final TrustManager[] trustAllCerts = new TrustManager[] {
+                final TrustManager[] trustAllCerts = new TrustManager[]{
                         new X509TrustManager() {
                             @Override
                             public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType)
@@ -155,7 +156,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                 // Create an ssl socket factory with our all-trusting manager
                 final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
 
-                builder.sslSocketFactory(sslSocketFactory, (X509TrustManager)trustAllCerts[0]);
+                builder.sslSocketFactory(sslSocketFactory, (X509TrustManager) trustAllCerts[0]);
                 builder.hostnameVerifier(new HostnameVerifier() {
                     @Override
                     public boolean verify(String hostname, SSLSession session) {
@@ -361,21 +362,22 @@ public class AneAwesomeUtilsContext extends FREContext {
 
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_getWebSocketReceivedHeaders");
+            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_getWebSocketReceivedHeaders");
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
                 UUID uuid = UUID.fromString(args[0].getAsString());
                 Map<String, String> headers = ctx._webSocketResponseHeaders.get(uuid);
                 if (headers != null) {
                     // Convert headers to JSON
-                    JsonWriter writer = new JsonWriter(new java.io.StringWriter());
+                    StringWriter stringWriter = new StringWriter();
+                    JsonWriter writer = new JsonWriter(stringWriter);
                     writer.beginObject();
                     for (Map.Entry<String, String> entry : headers.entrySet()) {
                         writer.name(entry.getKey()).value(entry.getValue());
                     }
                     writer.endObject();
                     writer.close();
-                    return FREObject.newObject(writer.toString());
+                    return FREObject.newObject(stringWriter.toString());
                 }
 
                 return FREObject.newObject("{}");
@@ -384,7 +386,7 @@ public class AneAwesomeUtilsContext extends FREContext {
             }
             return null;
         }
-        }
+    }
 
     public static class AddStaticHost implements FREFunction {
         public static final String KEY = "awesomeUtils_addStaticHost";
