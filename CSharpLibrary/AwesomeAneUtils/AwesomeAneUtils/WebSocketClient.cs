@@ -17,15 +17,16 @@ public class WebSocketClient : IDisposable
     private CancellationTokenSource _cancellationTokenSource;
 
     // Callbacks
-    private readonly Action _onConnect;
+    private readonly Action<Dictionary<string, string>> _onConnect;
     private readonly Action _onReceived;
-    private readonly Action<int, string> _onIoError;
+    private readonly Action<int, string, int, Dictionary<string, string>> _onIoError;
     private readonly Action<string> _onLog;
 
     private WebSocket _activeWebSocket;
     private IPEndPoint _remoteEndPoint;
     private Stream _stream;
     private Dictionary<string, string> _receivedHeaders = new();
+    private int _responseCode;
     private bool _disposed;
     private bool _isDisconnectCalled;
     private readonly Lock _sendLocker;
@@ -34,7 +35,7 @@ public class WebSocketClient : IDisposable
 
     public IReadOnlyDictionary<string, string> ReceivedHeaders => _receivedHeaders;
 
-    public WebSocketClient(Action onConnect, Action onReceived, Action<int, string> onIoError, Action<string> onLog)
+    public WebSocketClient(Action<Dictionary<string, string>> onConnect, Action onReceived, Action<int, string, int, Dictionary<string, string>> onIoError, Action<string> onLog)
     {
         _onConnect = onConnect;
         _onReceived = onReceived;
@@ -66,12 +67,12 @@ public class WebSocketClient : IDisposable
             _onLog?.Invoke($"Connecting to {uri}...");
             var uriObject = new Uri(uri);
 
-            (_activeWebSocket, _remoteEndPoint, _stream, _receivedHeaders) = await ManualWebSocketClient.ConnectAsync(uriObject, headers, _onLog, TimeSpan.FromSeconds(10), linkedCts.Token);
+            (_activeWebSocket, _remoteEndPoint, _stream, _responseCode, _receivedHeaders) = await ManualWebSocketClient.ConnectAsync(uriObject, headers, _onLog, TimeSpan.FromSeconds(10), linkedCts.Token);
 
             // Check if the connection succeeded
             if (_activeWebSocket is { State: WebSocketState.Open })
             {
-                _onConnect?.Invoke(); // Callback after successful connection
+                _onConnect?.Invoke(_receivedHeaders); // Callback after successful connection
 
                 // Start background tasks for sending and receiving messages
                 _ = Task.Factory.StartNew(SendLoopAsync, TaskCreationOptions.LongRunning);
@@ -82,6 +83,13 @@ public class WebSocketClient : IDisposable
                 _onLog?.Invoke("All connection attempts failed.");
                 await DisconnectAsync((int)WebSocketCloseStatus.EndpointUnavailable, "All connection attempts failed.");
             }
+        }
+        catch(WebSocketConnectException ex)
+        {
+            _responseCode = ex.ResponseCode;
+            _receivedHeaders = ex.Headers;
+            _onLog?.Invoke($"Error during connection: {ex.Message}");
+            await DisconnectAsync((int)WebSocketCloseStatus.InternalServerError, $"Error during connection: {ex.Message}");
         }
         catch (Exception ex)
         {
@@ -195,7 +203,7 @@ public class WebSocketClient : IDisposable
     private async Task DisconnectAsync(int closeReason, string reason = "Closing connection gracefully.")
     {
         if (!_isDisconnectCalled)
-            _onIoError?.Invoke(closeReason, reason);
+            _onIoError?.Invoke(closeReason, reason, _responseCode, _receivedHeaders);
         if (_activeWebSocket is { State: WebSocketState.Open or WebSocketState.CloseReceived })
         {
             try

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers.Text;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -21,10 +22,10 @@ public static class ExportFunctions
     private delegate void UrlLoaderProgressCallBackDelegate(IntPtr pointerGuid, IntPtr pointerMessage);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void WebSocketConnectCallBackDelegate(IntPtr pointerGuid);
+    private delegate void WebSocketConnectCallBackDelegate(IntPtr pointerGuid, IntPtr pointerHeaders);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void WebSocketErrorCallBackDelegate(IntPtr pointerGuid, int closeCode, IntPtr pointerMessage);
+    private delegate void WebSocketErrorCallBackDelegate(IntPtr pointerGuid, int closeCode, IntPtr pointerMessage, int responseCode, IntPtr pointerHeadersEncoded);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void WebSocketDataCallBackDelegate(IntPtr pointerGuid);
@@ -43,8 +44,8 @@ public static class ExportFunctions
     private static Action<string> _urlLoaderSuccessWrapper;
     private static Action<string, string> _urlLoaderFailureWrapper;
     private static Action<string, string> _urlLoaderProgressWrapper;
-    private static Action<string> _webSocketConnectWrapper;
-    private static Action<string, int, string> _webSocketErrorWrapper;
+    private static Action<string, string> _webSocketConnectWrapper;
+    private static Action<string, int, string, int, string> _webSocketErrorWrapper;
     private static Action<string> _webSocketDataWrapper;
     private static Action<string> _writeLogWrapper;
 
@@ -117,24 +118,28 @@ public static class ExportFunctions
                 SafeFreeCoTaskMem(ptr2);
             };
 
-            _webSocketConnectWrapper = guid =>
+            _webSocketConnectWrapper = (guid, headers) =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
+                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(headers);
 
-                _webSocketConnectCallBackDelegate(ptr1);
-
-                SafeFreeCoTaskMem(ptr1);
-            };
-
-            _webSocketErrorWrapper = (guid, errorCode, error) =>
-            {
-                IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(error);
-
-                _webSocketErrorCallBackDelegate(ptr1, errorCode, ptr2);
+                _webSocketConnectCallBackDelegate(ptr1, ptr2);
 
                 SafeFreeCoTaskMem(ptr1);
                 SafeFreeCoTaskMem(ptr2);
+            };
+
+            _webSocketErrorWrapper = (guid, errorCode, error, responseCode, headersEncoded) =>
+            {
+                IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
+                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(error);
+                IntPtr ptr3 = Marshal.StringToCoTaskMemAnsi(headersEncoded);
+
+                _webSocketErrorCallBackDelegate(ptr1, errorCode, ptr2, responseCode, ptr3);
+
+                SafeFreeCoTaskMem(ptr1);
+                SafeFreeCoTaskMem(ptr2);
+                SafeFreeCoTaskMem(ptr3);
             };
 
             _webSocketDataWrapper = (guid) =>
@@ -181,15 +186,20 @@ public static class ExportFunctions
         var lockError = new Lock();
 
         var webSocketClient = new WebSocketClient(
-            () => { _webSocketConnectWrapper(guidString); },
+            (responseHeaders) =>
+            {
+                var headersEncoded64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString)));
+                _webSocketConnectWrapper(guidString, headersEncoded64);
+            },
             () => { _webSocketDataWrapper(guidString); },
-            (errorCode, error) =>
+            (errorCode, error, responseCode, responseHeaders) =>
             {
                 using (lockError.EnterScope())
                 {
                     if (alreadyDispatchError)
                         return;
-                    _webSocketErrorWrapper(guidString, errorCode, error);
+                    var headersEncoded64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString)));
+                    _webSocketErrorWrapper(guidString, errorCode, error, responseCode, headersEncoded64);
                     SafeFreeCoTaskMem(stringPtr);
                     if (WebSocketClients.TryRemove(guid, out var removed))
                         removed.Dispose();
@@ -225,10 +235,10 @@ public static class ExportFunctions
             }
 
             var uri = Marshal.PtrToStringAnsi(pointerUri);
-            
+
             var headers = Marshal.PtrToStringAnsi(pointerHeaders);
             var headersDictionary = string.IsNullOrEmpty(headers) ? new Dictionary<string, string>() : JsonSerializer.Deserialize(headers, JsonDictionaryHeaderContext.Default.DictionaryStringString);
-            
+
             client.Connect(uri, headersDictionary);
             return 1;
         }
@@ -254,7 +264,7 @@ public static class ExportFunctions
             {
                 return Marshal.StringToCoTaskMemAnsi("{}");
             }
-            
+
             var headers = JsonSerializer.Serialize(client.ReceivedHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString);
             return Marshal.StringToCoTaskMemAnsi(headers);
         }

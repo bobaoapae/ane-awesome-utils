@@ -12,7 +12,7 @@ Console.WriteLine(DnsInternalResolver.Instance.IsIpv6Available());
 Console.WriteLine(HardwareID.GetDeviceUniqueIdHash(Console.WriteLine));
 WebSocketClient webSocket = null;
 
-webSocket = new WebSocketClient(()=>
+webSocket = new WebSocketClient((headers)=>
 {
     Console.WriteLine("Connected");
 }, ()=>
@@ -29,7 +29,7 @@ webSocket = new WebSocketClient(()=>
     
     Console.WriteLine(Encoding.UTF8.GetString(data));
     webSocket.Disconnect(1003);
-}, (closeCode, reason)=>
+}, (closeCode, reason, responseCode, headers)=>
 {
     Console.WriteLine($"Closed: {closeCode} {reason}");
 }, (exception)=>
@@ -37,6 +37,9 @@ webSocket = new WebSocketClient(()=>
     Console.WriteLine(exception);
 });
 
-webSocket.Connect("wss://neo.cabal-argo-tunnel.com/38141");
+webSocket.Connect("wss://35.199.72.111", new Dictionary<string, string>()
+{
+    {"authorization", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0YXJnZXRfc2VydmVyIjoxMDE2LCJleHAiOjE3NDM0NDEyMTAsImlhdCI6MTc0MzQ0MDkxMH0.PJc0u305cs-PWbvnMY7DuU7NM19F5DINeFQf1apjHl8"}
+});
 
 Console.ReadLine();

@@ -18,56 +18,45 @@ namespace AwesomeAneUtils;
 
 public static class ManualWebSocketClient
 {
-    public static async Task<(WebSocket, IPEndPoint, Stream, Dictionary<string, string>)> ConnectAsync(Uri uri, Dictionary<string, string> headers, Action<string> onLog, TimeSpan timeout, CancellationToken cancellationToken)
+    public static async Task<(WebSocket, IPEndPoint, Stream, int, Dictionary<string, string>)> ConnectAsync(
+        Uri uri,
+        Dictionary<string, string> headers,
+        Action<string> onLog,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
-        // 1. Resolve DNS
         var addresses = await DnsInternalResolver.Instance.ResolveHost(uri.Host);
         if (addresses.Length == 0)
             throw new InvalidOperationException($"No IP addresses resolved for host {uri.Host}");
 
-        // Determine port
-        var port = uri.IsDefaultPort
-            ? (uri.Scheme == "wss" ? 443 : 80)
-            : uri.Port;
-
-        // We'll use a linked CTS so we can cancel other attempts once the first socket is connected
+        var port = uri.IsDefaultPort ? (uri.Scheme == "wss" ? 443 : 80) : uri.Port;
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
         var maxTimeIndividually = TimeSpan.FromMilliseconds(timeout.TotalMilliseconds / addresses.Length);
 
-        // 2. Start all TCP connections in parallel, *without* doing the handshake yet
         var connectTasks = addresses.Select(addr =>
-            {
-                return Task.Factory.StartNew(
-                    () => ConnectSocketAsync(addr, port, onLog, maxTimeIndividually, cts.Token),
-                    cts.Token,
-                    TaskCreationOptions.DenyChildAttach,
-                    TaskScheduler.Default
-                ).Unwrap();
-            }
+            Task.Factory.StartNew(
+                () => ConnectSocketAsync(addr, port, onLog, maxTimeIndividually, cts.Token),
+                cts.Token,
+                TaskCreationOptions.DenyChildAttach,
+                TaskScheduler.Default).Unwrap()
         ).ToList();
 
-        // We'll store exceptions if all fail
         var exceptions = new List<Exception>();
+        int latestResponseCode = 0;
+        Dictionary<string, string> latestHeaders = new();
 
-        // 3. Wait for the first TCP connection to succeed
         while (connectTasks.Count > 0)
         {
-            // Wait until any one task finishes
             var finishedTask = await Task.WhenAny(connectTasks);
             connectTasks.Remove(finishedTask);
 
             try
             {
-                // This will rethrow if it failed
                 var socket = await finishedTask;
-
-                // If we got here, we have a connected socket. Cancel the others.
                 cts.Cancel();
 
                 onLog?.Invoke($"TCP connection to {socket.RemoteEndPoint} succeeded.");
 
-                // 4. Now do the handshake steps on the *first connected* socket
                 Stream stream = new NetworkStream(socket, ownsSocket: true);
                 if (uri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase))
                 {
@@ -76,30 +65,30 @@ public static class ManualWebSocketClient
                     stream = sslStream;
                 }
 
-                // 5. Perform WebSocket handshake on the single “fastest” socket
-                var (websocket, receivedHeaders) = await DoWebSocketHandshake(stream, uri, headers, onLog, cancellationToken);
+                var (websocket, responseCode, receivedHeaders) = await DoWebSocketHandshake(stream, uri, headers, onLog, cancellationToken);
+
+                latestResponseCode = responseCode;
+                latestHeaders = receivedHeaders;
+
                 if (websocket == null)
                 {
-                    // If handshake fails, we close and throw.
-                    // NOTE: We do *not* attempt fallback to other sockets in this simple example
-                    // but you could consider a more advanced approach.
                     stream.Dispose();
                     throw new InvalidOperationException("WebSocket handshake failed");
                 }
 
                 onLog?.Invoke($"Connection established to host {uri.Host}, IP {socket.RemoteEndPoint}");
-                return (websocket, socket.RemoteEndPoint as IPEndPoint, stream, receivedHeaders);
+                return (websocket, socket.RemoteEndPoint as IPEndPoint, stream, responseCode, receivedHeaders);
             }
             catch (Exception ex)
             {
-                // Record the failure and continue waiting for others
                 exceptions.Add(ex);
             }
         }
 
-        // If we reach here, all connection attempts (TCP) have failed
-        throw new AggregateException("Failed to connect to any resolved address", exceptions);
+        // If all fail, still return latest responseCode and headers (even if 0/empty)
+        throw new WebSocketConnectException("Failed to connect to any resolved address", exceptions, latestResponseCode, latestHeaders);
     }
+
 
     /// <summary>
     /// Attempts to connect a Socket to a given IP address/port.
@@ -154,7 +143,7 @@ public static class ManualWebSocketClient
     }
 
 
-    private static async Task<(WebSocket, Dictionary<string, string>)> DoWebSocketHandshake(
+    private static async Task<(WebSocket, int, Dictionary<string, string>)> DoWebSocketHandshake(
         Stream stream,
         Uri uri,
         Dictionary<string, string> headers,
@@ -176,11 +165,14 @@ public static class ManualWebSocketClient
             $"Sec-WebSocket-Key: {secKeyBase64}\r\n" +
             "Sec-WebSocket-Version: 13\r\n";
 
-        foreach (var (key, value) in headers)
+        if (headers != null)
         {
-            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(value))
-                continue;
-            requestHeaders += $"{key}: {value}\r\n";
+            foreach (var (key, value) in headers)
+            {
+                if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(value))
+                    continue;
+                requestHeaders += $"{key}: {value}\r\n";
+            }
         }
 
         requestHeaders += "\r\n";
@@ -193,6 +185,7 @@ public static class ManualWebSocketClient
         var headerText = Encoding.ASCII.GetString(headerBuffer);
 
         var headersDict = new Dictionary<string, string>();
+        var responseCode = 0;
 
         // Split the header text by lines and process each line
         var headerLines = headerText.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
@@ -219,14 +212,24 @@ public static class ManualWebSocketClient
 #if DEBUG
         onLog?.Invoke($"Server handshake:\n{headerText}");
 #endif
-        // 4. Verifica 101 Switching Protocols
-        if (!headerText.Contains("101 Switching Protocols"))
-            return (null, headersDict);
+        
+        // 4. Verifica o código de resposta
+        if (headerLines.Length > 0)
+        {
+            var statusLine = headerLines[0];
+            var statusParts = statusLine.Split(' ');
+            if (statusParts.Length > 1 && int.TryParse(statusParts[1], out responseCode))
+            {
+                // Sucesso
+                if (responseCode != 101 || !statusLine.Contains("Switching Protocols"))
+                    return (null, responseCode, headersDict);
+            }
+        }
 
         // 5. Verifica Sec-WebSocket-Accept
         var expectedAccept = ComputeWebSocketAccept(secKeyBase64);
         if (!headerText.Contains(expectedAccept))
-            return (null, headersDict);
+            return (null, responseCode, headersDict);
 
         // 6. Ao chegar aqui, NENHUM byte do WS foi lido.
         //    Podemos criar o WebSocket do stream original, sem CombinedStream.
@@ -236,7 +239,7 @@ public static class ManualWebSocketClient
             subProtocol: null,
             keepAliveInterval: TimeSpan.FromSeconds(30));
 
-        return (ws, headersDict);
+        return (ws, responseCode, headersDict);
     }
 
     private static async Task<byte[]> ReadHeadersUntilCrLfCrLf(Stream stream, CancellationToken token)
