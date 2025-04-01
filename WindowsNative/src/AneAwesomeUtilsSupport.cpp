@@ -5,7 +5,7 @@
 #include "log.h"
 
 static bool alreadyInitialized = false;
-static FRENamedFunction *exportedFunctions = new FRENamedFunction[12];
+static FRENamedFunction *exportedFunctions = new FRENamedFunction[11];
 static FREContext context;
 
 static void dispatchWebSocketEvent(const char *guid, const char *code, const char *level) {
@@ -18,9 +18,9 @@ static void dispatchUrlLoaderEvent(const char *guid, const char *code, const cha
     FREDispatchStatusEventAsync(context, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
 }
 
-static void __cdecl webSocketConnectCallBack(char *guid) {
+static void __cdecl webSocketConnectCallBack(char *guid, const char *headersEncoded) {
     writeLog("connectCallback called");
-    dispatchWebSocketEvent(guid, "connected", "");
+    dispatchWebSocketEvent(guid, "connected", headersEncoded);
 }
 
 static void __cdecl webSocketDataCallBack(char *guid) {
@@ -28,10 +28,10 @@ static void __cdecl webSocketDataCallBack(char *guid) {
     dispatchWebSocketEvent(guid, "nextMessage", "");
 }
 
-static void __cdecl webSocketErrorCallBack(char *guid, int closeCode, const char *reason) {
+static void __cdecl webSocketErrorCallBack(char *guid, int closeCode, const char *reason, int responseCode, const char *headersEncoded) {
     writeLog("disconnectCallback called");
 
-    auto closeCodeReason = std::to_string(closeCode) + ";" + std::string(reason);
+    auto closeCodeReason = std::to_string(closeCode) + ";" + std::string(reason) + ";" + std::to_string(responseCode) + ";" + std::string(headersEncoded);
 
     writeLog(closeCodeReason.c_str());
 
@@ -120,22 +120,6 @@ static FREObject awesomeUtils_connectWebSocket(FREContext ctx, void *funcData, u
     csharpLibrary_awesomeUtils_connectWebSocket(idChar, uriChar, headersChar);
 
     return nullptr;
-}
-
-static FREObject awesomeUtils_getWebSocketReceivedHeaders(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
-    writeLog("getReceivedHeaders called");
-    if (argc < 1) return nullptr;
-
-    uint32_t idLength;
-    const uint8_t *id;
-    FREGetObjectAsUTF8(argv[0], &idLength, &id);
-    auto idChar = reinterpret_cast<const char *>(id);
-
-    auto headers = csharpLibrary_awesomeUtils_getReceivedHeaders(idChar);
-
-    FREObject resultStr;
-    FRENewObjectFromUTF8(strlen(headers), reinterpret_cast<const uint8_t *>(headers), &resultStr);
-    return resultStr;
 }
 
 static FREObject awesomeUtils_closeWebSocket(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
@@ -352,11 +336,9 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[9].function = awesomeUtils_getWebSocketByteArrayMessage;
         exportedFunctions[10].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getDeviceUniqueId");
         exportedFunctions[10].function = awesomeUtils_getDeviceUniqueId;
-        exportedFunctions[11].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getWebSocketReceivedHeaders");
-        exportedFunctions[11].function = awesomeUtils_getWebSocketReceivedHeaders;
         context = ctx;
     }
-    if (numFunctionsToSet) *numFunctionsToSet = 12;
+    if (numFunctionsToSet) *numFunctionsToSet = 11;
     if (functionsToSet) *functionsToSet = exportedFunctions;
 }
 

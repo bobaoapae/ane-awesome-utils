@@ -105,19 +105,6 @@ public class AneAwesomeUtils {
         _extContext.call("awesomeUtils_connectWebSocket", id, url, headersJson);
     }
 
-    public function getWebSocketReceivedHeaders(id:String):Dictionary {
-        if (!_successInit) {
-            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
-        }
-        var headersJson:String = _extContext.call("awesomeUtils_getWebSocketReceivedHeaders", id) as String;
-        var headersObj:Object = JSON.parse(headersJson);
-        var headers:Dictionary = new Dictionary();
-        for (var key:String in headersObj) {
-            headers[key] = headersObj[key];
-        }
-        return headers;
-    }
-
     public function removeWebSocket(ws:AneWebSocket):void {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
@@ -276,7 +263,9 @@ public class AneAwesomeUtils {
         }
         switch (codeSplit[0]) {
             case "connected":
-                ws.AneAwesomeUtilsInternal::onConnect();
+                var headersBase64:String = dataSplit[0];
+                var headers:Dictionary = decodeHeaders(headersBase64);
+                ws.AneAwesomeUtilsInternal::onConnect(headers);
                 break;
             case "nextMessage":
                 var bytes:ByteArray = _extContext.call("awesomeUtils_getWebSocketByteArrayMessage", webSocketId) as ByteArray;
@@ -286,7 +275,10 @@ public class AneAwesomeUtils {
                 ws.AneAwesomeUtilsInternal::onData(bytes);
                 break;
             case "disconnected":
-                ws.AneAwesomeUtilsInternal::onClose(dataSplit[0]);
+                var responseCode:int = int(dataSplit[2]);
+                var headersBase64:String = dataSplit[3];
+                var headers:Dictionary = decodeHeaders(headersBase64);
+                ws.AneAwesomeUtilsInternal::onClose(dataSplit[0], responseCode, headers);
                 break;
             case "error":
                 ws.AneAwesomeUtilsInternal::onIoError(param1.level);
@@ -294,6 +286,16 @@ public class AneAwesomeUtils {
             default:
                 throw new Error("TODO: handle StatusEvent code = [" + param1.code + "], level = [" + param1.level + "]");
         }
+    }
+
+    private function decodeHeaders(headersEncoded:String):Dictionary {
+        var decodedHeaders:String = Base64.decode(headersEncoded);
+        var headersObj:Object = JSON.parse(decodedHeaders);
+        var headers:Dictionary = new Dictionary();
+        for (var key:String in headersObj) {
+            headers[key] = headersObj[key];
+        }
+        return headers;
     }
 }
 }

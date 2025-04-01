@@ -17,6 +17,8 @@ public class AneWebSocket extends WebSocket {
     private var _closeReason:int = -1;
     private var _dispatchedOnConnect:Boolean = false;
     private var _dispatchedOnClose:Boolean = false;
+    private var _receivedHeaders:Dictionary;
+    private var _responseCode:int = -1;
 
     public function AneWebSocket(id:String) {
         super();
@@ -41,7 +43,11 @@ public class AneWebSocket extends WebSocket {
     }
 
     public function getReceivedHeaders():Dictionary {
-        return AneAwesomeUtils.instance.getWebSocketReceivedHeaders(_id);
+        return _receivedHeaders;
+    }
+
+    public function getResponseCode():int {
+        return _responseCode;
     }
 
     override public function startServer(param1:Socket):void {
@@ -69,10 +75,11 @@ public class AneWebSocket extends WebSocket {
         AneAwesomeUtils.instance.removeWebSocket(this);
     }
 
-    AneAwesomeUtilsInternal function onConnect():void {
+    AneAwesomeUtilsInternal function onConnect(receivedHeaders:Dictionary):void {
         if (_dispatchedOnConnect) {
             return;
         }
+        _receivedHeaders = receivedHeaders;
         _dispatchedOnConnect = true;
         dispatchEvent(new Event("connect"));
     }
@@ -81,12 +88,14 @@ public class AneWebSocket extends WebSocket {
         dispatchEvent(new WebSocketEvent("websocketData", WebSocket.fmtBINARY, bytes));
     }
 
-    AneAwesomeUtilsInternal function onClose(closeReason:int):void {
+    AneAwesomeUtilsInternal function onClose(closeReason:int, responseCode:int, receivedHeaders:Dictionary):void {
         if (_dispatchedOnClose) {
             return;
         }
         _dispatchedOnClose = true;
         _closeReason = closeReason;
+        _responseCode = responseCode;
+        _receivedHeaders = receivedHeaders;
         dispatchEvent(new Event("close"));
     }
 

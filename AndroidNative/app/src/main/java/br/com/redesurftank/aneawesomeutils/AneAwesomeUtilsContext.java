@@ -4,6 +4,7 @@ import static br.com.redesurftank.aneawesomeutils.AneAwesomeUtilsExtension.TAG;
 
 import android.content.ContentResolver;
 import android.provider.Settings;
+import android.util.Base64;
 import android.util.JsonReader;
 import android.util.JsonWriter;
 
@@ -56,7 +57,6 @@ public class AneAwesomeUtilsContext extends FREContext {
     private OkHttpClient _client;
     private final Map<UUID, byte[]> _urlLoaderResults = new HashMap<>();
     private final Map<UUID, RealWebSocket> _webSockets = new HashMap<>();
-    private final Map<UUID, Map<String, String>> _webSocketResponseHeaders = new HashMap<>();
     private final Queue<byte[]> _byteBufferQueue = new ConcurrentLinkedQueue<>();
 
 
@@ -76,7 +76,6 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(GetLoaderResult.KEY, new GetLoaderResult());
         functionMap.put(GetWebSocketByteArrayMessage.KEY, new GetWebSocketByteArrayMessage());
         functionMap.put(GetDeviceUniqueId.KEY, new GetDeviceUniqueId());
-        functionMap.put(GetWebSocketResponseHeaders.KEY, new GetWebSocketResponseHeaders());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -238,7 +237,6 @@ public class AneAwesomeUtilsContext extends FREContext {
                 }
                 webSocket.close(1000, "User closed");
                 ctx._webSockets.remove(uuid);
-                ctx._webSocketResponseHeaders.remove(uuid);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error closing web socket", e);
             }
@@ -283,6 +281,8 @@ public class AneAwesomeUtilsContext extends FREContext {
                 }
 
                 WebSocket webSocket = ctx._client.newWebSocket(requestBuilder.url(url).build(), new okhttp3.WebSocketListener() {
+                    private Map<String, String> receivedHeaders = new HashMap<>();
+
                     @Override
                     public void onOpen(@NonNull WebSocket webSocket, @NonNull Response response) {
                         AneAwesomeUtilsLogging.i(TAG, "WebSocket opened");
@@ -290,8 +290,8 @@ public class AneAwesomeUtilsContext extends FREContext {
                         for (String name : response.headers().names()) {
                             headers.put(name, response.header(name));
                         }
-                        ctx._webSocketResponseHeaders.put(uuid, headers);
-                        ctx.dispatchWebSocketEvent(uuid.toString(), "connected", "");
+                        receivedHeaders = headers;
+                        ctx.dispatchWebSocketEvent(uuid.toString(), "connected", getHeadersAsBase64(receivedHeaders));
                     }
 
                     @Override
@@ -310,17 +310,15 @@ public class AneAwesomeUtilsContext extends FREContext {
                     @Override
                     public void onClosing(@NonNull WebSocket webSocket, int code, @NonNull String reason) {
                         AneAwesomeUtilsLogging.i(TAG, "WebSocket closing: " + code + " " + reason);
-                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", code + ";" + reason);
+                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", code + ";" + reason + ";" + 0 + ";" + getHeadersAsBase64(receivedHeaders));
                         ctx._webSockets.remove(uuid);
-                        ctx._webSocketResponseHeaders.remove(uuid);
                     }
 
                     @Override
                     public void onClosed(@NonNull WebSocket webSocket, int code, @NonNull String reason) {
                         AneAwesomeUtilsLogging.i(TAG, "WebSocket closed: " + code + " " + reason);
-                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", code + ";" + reason);
+                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", code + ";" + reason + ";" + 0 + ";" + getHeadersAsBase64(receivedHeaders));
                         ctx._webSockets.remove(uuid);
-                        ctx._webSocketResponseHeaders.remove(uuid);
                     }
 
                     @Override
@@ -336,53 +334,41 @@ public class AneAwesomeUtilsContext extends FREContext {
                                     if (parts2.length > 1) {
                                         ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", parts2[1]);
                                         ctx._webSockets.remove(uuid);
-                                        ctx._webSocketResponseHeaders.remove(uuid);
                                         return;
                                     }
                                 }
                             }
                         }
                         AneAwesomeUtilsLogging.e(TAG, "WebSocket failure", t);
-                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", "1005;Unknown error");
+                        Map<String, String> headers = new HashMap<>();
+                        for (String name : response.headers().names()) {
+                            headers.put(name, response.header(name));
+                        }
+                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", "1005;Unknown error;"+ response.code() + ";" + getHeadersAsBase64(headers));
                         ctx._webSockets.remove(uuid);
-                        ctx._webSocketResponseHeaders.remove(uuid);
+                    }
+
+                    private String getHeadersAsBase64(Map<String, String> headers) {
+                        StringWriter stringWriter = new StringWriter();
+                        JsonWriter jsonWriter = new JsonWriter(stringWriter);
+                        try {
+                            jsonWriter.beginObject();
+                            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                                jsonWriter.name(entry.getKey()).value(entry.getValue());
+                            }
+                            jsonWriter.endObject();
+                            jsonWriter.close();
+                        } catch (IOException e) {
+                            AneAwesomeUtilsLogging.e(TAG, "Error writing JSON", e);
+                        }
+                        String json = stringWriter.toString();
+                        return Base64.encodeToString(json.getBytes(), Base64.NO_WRAP);
                     }
                 });
 
                 ctx._webSockets.put(uuid, (RealWebSocket) webSocket);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error connecting web socket", e);
-            }
-            return null;
-        }
-    }
-
-    public static class GetWebSocketResponseHeaders implements FREFunction {
-        public static final String KEY = "awesomeUtils_getWebSocketReceivedHeaders";
-
-        @Override
-        public FREObject call(FREContext context, FREObject[] args) {
-            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_getWebSocketReceivedHeaders");
-            try {
-                AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
-                UUID uuid = UUID.fromString(args[0].getAsString());
-                Map<String, String> headers = ctx._webSocketResponseHeaders.get(uuid);
-                if (headers != null) {
-                    // Convert headers to JSON
-                    StringWriter stringWriter = new StringWriter();
-                    JsonWriter writer = new JsonWriter(stringWriter);
-                    writer.beginObject();
-                    for (Map.Entry<String, String> entry : headers.entrySet()) {
-                        writer.name(entry.getKey()).value(entry.getValue());
-                    }
-                    writer.endObject();
-                    writer.close();
-                    return FREObject.newObject(stringWriter.toString());
-                }
-
-                return FREObject.newObject("{}");
-            } catch (Exception e) {
-                AneAwesomeUtilsLogging.e(TAG, "Error getting web socket headers", e);
             }
             return null;
         }
