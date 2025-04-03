@@ -1,4 +1,6 @@
 package {
+import aneAwesomeUtils.Base64;
+
 import flash.events.StatusEvent;
 import flash.external.ExtensionContext;
 import flash.net.URLVariables;
