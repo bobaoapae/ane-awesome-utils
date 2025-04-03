@@ -159,7 +159,7 @@ public static class ManualWebSocketClient
         var requestHeaders =
             $"GET {uri.PathAndQuery} HTTP/1.1\r\n" +
             $"Host: {uri.Host}\r\n" +
-            $"User-Agent: cloudflared/2025.2.1\r\n" +
+            $"User-Agent: {HappyEyeballsHttp.CustomAgent}\r\n" +
             "Upgrade: websocket\r\n" +
             "Connection: Upgrade\r\n" +
             $"Sec-WebSocket-Key: {secKeyBase64}\r\n" +
