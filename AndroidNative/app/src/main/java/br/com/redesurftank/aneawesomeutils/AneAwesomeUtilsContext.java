@@ -114,10 +114,17 @@ public class AneAwesomeUtilsContext extends FREContext {
                         })
                         .connectionPool(new okhttp3.ConnectionPool(5, 1, TimeUnit.MINUTES))
                         .pingInterval(30, TimeUnit.SECONDS)
-                        .connectTimeout(5, TimeUnit.SECONDS);
+                        .connectTimeout(5, TimeUnit.SECONDS)
+                        .addInterceptor(chain -> {
+                            Request originalRequest = chain.request();
+                            Request requestWithUserAgent = originalRequest.newBuilder()
+                                    .header("User-Agent", originalRequest.header("User-Agent") + " NativeLoader/1.0")
+                                    .build();
+                            return chain.proceed(requestWithUserAgent);
+                        });
+
                 builder = configureToIgnoreCertificate(builder);
                 ctx._client = builder.build();
-
                 return FREObject.newObject(true);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error initializing", e);
