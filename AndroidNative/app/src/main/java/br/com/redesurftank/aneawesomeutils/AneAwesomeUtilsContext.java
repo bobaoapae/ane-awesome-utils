@@ -9,6 +9,7 @@ import android.util.JsonReader;
 import android.util.JsonWriter;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import com.adobe.fre.FREByteArray;
 import com.adobe.fre.FREContext;
@@ -21,7 +22,6 @@ import java.net.InetAddress;
 import java.net.ProtocolException;
 import java.net.UnknownHostException;
 import java.security.cert.CertificateException;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -44,12 +44,10 @@ import okhttp3.Callback;
 import okhttp3.Dns;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
-import okhttp3.Protocol;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.WebSocket;
 import okhttp3.internal.ws.RealWebSocket;
-import okhttp3.internal.ws.WebSocketProtocol;
 import okio.ByteString;
 
 public class AneAwesomeUtilsContext extends FREContext {
@@ -103,25 +101,17 @@ public class AneAwesomeUtilsContext extends FREContext {
             AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_initialize");
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
-                OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                        .fastFallback(true)
-                        .dns(new Dns() {
-                            @NonNull
-                            @Override
-                            public List<InetAddress> lookup(@NonNull String s) throws UnknownHostException {
-                                return InternalDnsResolver.getInstance().resolveHost(s);
-                            }
-                        })
-                        .connectionPool(new okhttp3.ConnectionPool(5, 1, TimeUnit.MINUTES))
-                        .pingInterval(30, TimeUnit.SECONDS)
-                        .connectTimeout(5, TimeUnit.SECONDS)
-                        .addInterceptor(chain -> {
-                            Request originalRequest = chain.request();
-                            Request requestWithUserAgent = originalRequest.newBuilder()
-                                    .header("User-Agent", originalRequest.header("User-Agent") + " NativeLoader/1.0")
-                                    .build();
-                            return chain.proceed(requestWithUserAgent);
-                        });
+                OkHttpClient.Builder builder = new OkHttpClient.Builder().fastFallback(true).dns(new Dns() {
+                    @NonNull
+                    @Override
+                    public List<InetAddress> lookup(@NonNull String s) throws UnknownHostException {
+                        return InternalDnsResolver.getInstance().resolveHost(s);
+                    }
+                }).connectionPool(new okhttp3.ConnectionPool(5, 1, TimeUnit.MINUTES)).pingInterval(30, TimeUnit.SECONDS).connectTimeout(5, TimeUnit.SECONDS).addInterceptor(chain -> {
+                    Request originalRequest = chain.request();
+                    Request requestWithUserAgent = originalRequest.newBuilder().header("User-Agent", originalRequest.header("User-Agent") + " NativeLoader/1.0").build();
+                    return chain.proceed(requestWithUserAgent);
+                });
 
                 builder = configureToIgnoreCertificate(builder);
                 ctx._client = builder.build();
@@ -137,24 +127,20 @@ public class AneAwesomeUtilsContext extends FREContext {
             try {
 
                 // Create a trust manager that does not validate certificate chains
-                final TrustManager[] trustAllCerts = new TrustManager[]{
-                        new X509TrustManager() {
-                            @Override
-                            public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType)
-                                    throws CertificateException {
-                            }
+                final TrustManager[] trustAllCerts = new TrustManager[]{new X509TrustManager() {
+                    @Override
+                    public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {
+                    }
 
-                            @Override
-                            public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType)
-                                    throws CertificateException {
-                            }
+                    @Override
+                    public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {
+                    }
 
-                            @Override
-                            public java.security.cert.X509Certificate[] getAcceptedIssuers() {
-                                return new java.security.cert.X509Certificate[]{};
-                            }
-                        }
-                };
+                    @Override
+                    public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                        return new java.security.cert.X509Certificate[]{};
+                    }
+                }};
 
                 // Install the all-trusting trust manager
                 final SSLContext sslContext = SSLContext.getInstance("SSL");
@@ -317,19 +303,17 @@ public class AneAwesomeUtilsContext extends FREContext {
                     @Override
                     public void onClosing(@NonNull WebSocket webSocket, int code, @NonNull String reason) {
                         AneAwesomeUtilsLogging.i(TAG, "WebSocket closing: " + code + " " + reason);
-                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", code + ";" + reason + ";" + 0 + ";" + getHeadersAsBase64(receivedHeaders));
-                        ctx._webSockets.remove(uuid);
+                        handleDisconnect(uuid, reason, code, null);
                     }
 
                     @Override
                     public void onClosed(@NonNull WebSocket webSocket, int code, @NonNull String reason) {
                         AneAwesomeUtilsLogging.i(TAG, "WebSocket closed: " + code + " " + reason);
-                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", code + ";" + reason + ";" + 0 + ";" + getHeadersAsBase64(receivedHeaders));
-                        ctx._webSockets.remove(uuid);
+                        handleDisconnect(uuid, reason, code, null);
                     }
 
                     @Override
-                    public void onFailure(@NonNull WebSocket webSocket, @NonNull Throwable t, @NonNull Response response) {
+                    public void onFailure(@NonNull WebSocket webSocket, @NonNull Throwable t, @Nullable Response response) {
                         if (t instanceof ProtocolException) {
                             ProtocolException protocolException = (ProtocolException) t;
                             //template: Code must be in range [1000,5000): 6000
@@ -339,29 +323,45 @@ public class AneAwesomeUtilsContext extends FREContext {
                                 if (parts.length > 1) {
                                     String[] parts2 = parts[1].split(" ");
                                     if (parts2.length > 1) {
-                                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", parts2[1]);
-                                        ctx._webSockets.remove(uuid);
+                                        int closeCode = Integer.parseInt(parts2[1]);
+                                        handleDisconnect(uuid, t.getMessage(), closeCode, response);
                                         return;
                                     }
                                 }
                             }
                         }
                         AneAwesomeUtilsLogging.e(TAG, "WebSocket failure", t);
-                        Map<String, String> headers = new HashMap<>();
-                        for (String name : response.headers().names()) {
-                            headers.put(name, response.header(name));
-                        }
-                        ctx.dispatchWebSocketEvent(uuid.toString(), "disconnected", "1005;Unknown error;"+ response.code() + ";" + getHeadersAsBase64(headers));
-                        ctx._webSockets.remove(uuid);
+                        handleDisconnect(uuid, t.getMessage(), 0, response);
                     }
 
-                    private String getHeadersAsBase64(Map<String, String> headers) {
+                    private void handleDisconnect(UUID id, String reason, int closeCode, @Nullable Response response) {
+                        int responseCode = response != null ? response.code() : 0;
+                        Map<String, String> headers = new HashMap<>();
+                        try {
+                            if (response != null) {
+                                for (String name : response.headers().names()) {
+                                    headers.put(name, response.header(name));
+                                }
+                            }
+                        } catch (Exception e) {
+                            AneAwesomeUtilsLogging.e(TAG, "Error getting headers", e);
+                        }
+                        if (headers.isEmpty()) {
+                            headers = receivedHeaders;
+                        }
+                        ctx.dispatchWebSocketEvent(id.toString(), "disconnected", reason + ";" + closeCode + ";" + responseCode + ";" + getHeadersAsBase64(headers));
+                        ctx._webSockets.remove(id);
+                    }
+
+                    private String getHeadersAsBase64(@Nullable Map<String, String> headers) {
                         StringWriter stringWriter = new StringWriter();
                         JsonWriter jsonWriter = new JsonWriter(stringWriter);
                         try {
                             jsonWriter.beginObject();
-                            for (Map.Entry<String, String> entry : headers.entrySet()) {
-                                jsonWriter.name(entry.getKey()).value(entry.getValue());
+                            if (headers != null) {
+                                for (Map.Entry<String, String> entry : headers.entrySet()) {
+                                    jsonWriter.name(entry.getKey()).value(entry.getValue());
+                                }
                             }
                             jsonWriter.endObject();
                             jsonWriter.close();
