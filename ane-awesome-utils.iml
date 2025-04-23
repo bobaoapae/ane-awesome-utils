@@ -4,7 +4,7 @@
     <configurations>
       <configuration name="ane-awesome-utils" target-platform="Desktop" pure-as="true" output-type="Library" output-file="ane-awesome-utils.swc" output-folder="$MODULE_DIR$/out/production/ane-awesome-utils">
         <dependencies>
-          <sdk name="AIRSDK_51.1.3" />
+          <sdk name="AIRSDK_51.2.1" />
         </dependencies>
         <compiler-options />
         <packaging-air-desktop />

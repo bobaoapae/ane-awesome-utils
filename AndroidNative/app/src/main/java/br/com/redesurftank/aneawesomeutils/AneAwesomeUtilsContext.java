@@ -57,6 +57,11 @@ public class AneAwesomeUtilsContext extends FREContext {
     private final Map<UUID, RealWebSocket> _webSockets = new HashMap<>();
     private final Queue<byte[]> _byteBufferQueue = new ConcurrentLinkedQueue<>();
 
+    // Add message queue and processor for WebSocket messages
+    private final Map<UUID, ConcurrentLinkedQueue<WebSocketMessage>> _webSocketMessageQueues = new HashMap<>();
+    private final Map<UUID, Thread> _webSocketSenderThreads = new HashMap<>();
+    private final Object _webSocketLock = new Object();
+
 
     @Override
     public Map<String, FREFunction> getFunctions() {
@@ -80,17 +85,92 @@ public class AneAwesomeUtilsContext extends FREContext {
 
     @Override
     public void dispose() {
-        // Cleanup logic if needed
+        // Clean up all WebSocket sender threads
+        synchronized (_webSocketLock) {
+            for (Thread thread : _webSocketSenderThreads.values()) {
+                thread.interrupt();
+            }
+            _webSocketSenderThreads.clear();
+            _webSocketMessageQueues.clear();
+        }
+
+        // Original dispose logic if any
+    }
+
+    private void startWebSocketSenderThread(UUID uuid) {
+        synchronized (_webSocketLock) {
+            if (_webSocketSenderThreads.containsKey(uuid)) {
+                return; // Thread already exists
+            }
+
+            // Create message queue if it doesn't exist
+            if (!_webSocketMessageQueues.containsKey(uuid)) {
+                _webSocketMessageQueues.put(uuid, new ConcurrentLinkedQueue<>());
+            }
+
+            Thread senderThread = new Thread(() -> {
+                AneAwesomeUtilsLogging.d(TAG, "Starting WebSocket sender thread for " + uuid);
+                ConcurrentLinkedQueue<WebSocketMessage> queue = _webSocketMessageQueues.get(uuid);
+
+                while (!Thread.currentThread().isInterrupted()) {
+                    try {
+                        WebSocketMessage message = queue.poll();
+                        if (message != null) {
+                            WebSocket webSocket = _webSockets.get(uuid);
+                            if (webSocket != null) {
+                                message.send(webSocket);
+                            } else {
+                                AneAwesomeUtilsLogging.w(TAG, "WebSocket not found for " + uuid);
+                                break; // Exit thread if WebSocket is gone
+                            }
+                        } else {
+                            // Sleep a bit when the queue is empty
+                            Thread.sleep(10);
+                        }
+                    } catch (Exception e) {
+                        AneAwesomeUtilsLogging.e(TAG, "Error in WebSocket sender thread", e);
+                        // Continue processing other messages even if one fails
+                    }
+                }
+
+                AneAwesomeUtilsLogging.d(TAG, "WebSocket sender thread ending for " + uuid);
+            });
+
+            senderThread.setName("WebSocketSender-" + uuid);
+            senderThread.setDaemon(true); // Make it a daemon thread so it doesn't prevent app exit
+            senderThread.start();
+
+            _webSocketSenderThreads.put(uuid, senderThread);
+        }
+    }
+
+    // Stop the WebSocket sender thread for a specific UUID
+    private void stopWebSocketSenderThread(UUID uuid) {
+        synchronized (_webSocketLock) {
+            Thread thread = _webSocketSenderThreads.remove(uuid);
+            if (thread != null) {
+                thread.interrupt();
+            }
+            _webSocketMessageQueues.remove(uuid);
+        }
     }
 
     public void dispatchWebSocketEvent(String guid, String code, String level) {
         String fullCode = "web-socket;" + code + ";" + guid;
-        dispatchStatusEventAsync(fullCode, level);
+        try {
+            dispatchStatusEventAsync(fullCode, level);
+        } catch (Exception e) {
+            AneAwesomeUtilsLogging.e(TAG, "Error dispatching web socket event", e);
+        }
     }
 
     public void dispatchUrlLoaderEvent(String guid, String code, String level) {
         String fullCode = "url-loader;" + code + ";" + guid;
-        dispatchStatusEventAsync(fullCode, level);
+        try {
+            dispatchStatusEventAsync(fullCode, level);
+        } catch (Exception e) {
+            AneAwesomeUtilsLogging.e(TAG, "Error dispatching url loader event", e);
+        }
     }
 
     public static class Initialize implements FREFunction {
@@ -193,6 +273,12 @@ public class AneAwesomeUtilsContext extends FREContext {
                     AneAwesomeUtilsLogging.e(TAG, "Web socket not found");
                     return null;
                 }
+                // Get or create the message queue for this WebSocket
+                ConcurrentLinkedQueue<WebSocketMessage> queue = ctx._webSocketMessageQueues.get(uuid);
+                if (queue == null) {
+                    AneAwesomeUtilsLogging.e(TAG, "Message queue not found for WebSocket");
+                    return null;
+                }
 
                 if (args[2] instanceof FREByteArray) {
                     FREByteArray byteArray = (FREByteArray) args[2];
@@ -200,10 +286,10 @@ public class AneAwesomeUtilsContext extends FREContext {
                     byte[] bytes = new byte[(int) byteArray.getLength()];
                     byteArray.getBytes().get(bytes);
                     byteArray.release();
-                    webSocket.send(ByteString.of(bytes));
+                    queue.add(new WebSocketMessage(bytes));
                 } else {
                     String message = args[2].getAsString();
-                    webSocket.send(message);
+                    queue.add(new WebSocketMessage(message));
                 }
 
             } catch (Exception e) {
@@ -228,6 +314,8 @@ public class AneAwesomeUtilsContext extends FREContext {
                     AneAwesomeUtilsLogging.e(TAG, "Web socket not found");
                     return null;
                 }
+                ctx.stopWebSocketSenderThread(uuid);
+
                 webSocket.close(1000, "User closed");
                 ctx._webSockets.remove(uuid);
             } catch (Exception e) {
@@ -374,6 +462,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                 });
 
                 ctx._webSockets.put(uuid, (RealWebSocket) webSocket);
+                ctx.startWebSocketSenderThread(uuid);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error connecting web socket", e);
             }

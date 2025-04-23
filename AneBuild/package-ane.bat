@@ -1,4 +1,14 @@
 @echo off
+:: —————— carrega o .env ——————
+for /f "usebackq tokens=1,* delims==" %%A in ("%~dp0.env") do (
+  if not "%%A"=="" (
+    set "%%A=%%B"
+  )
+)
+
+:: monta a variável com o jar
+set "ADT_JAR=%AIRSDK_PATH%\lib\adt.jar"
+
 REM Set the path to the 7z.exe file
 set PATH=%PATH%;"C:\Program Files\7-Zip\"
 
@@ -18,4 +28,4 @@ rmdir /S /Q temp
 call signtool sign /fd sha256 /tr http://ts.ssl.com /td sha256 /n "SURFTANK LTDA" "windows-32/AwesomeAneUtils.dll" "windows-32/AneAwesomeUtilsWindows.dll"
 
 REM Package the ANE
-adt -package -target ane br.com.redesurftank.aneawesomeutils.ane extension.xml -swc library.swc -platform default -C default . -platform Windows-x86 -C windows-32 . -platform MacOS-x86-64 -C macos . -platform iPhone-ARM -platformoptions platformIOS.xml -C ios . -platform Android -platformoptions platformAndroid.xml -C android .
+"%ADT_JAR%" -package -target ane br.com.redesurftank.aneawesomeutils.ane extension.xml -swc library.swc -platform default -C default . -platform Windows-x86 -C windows-32 . -platform MacOS-x86-64 -C macos . -platform iPhone-ARM -platformoptions platformIOS.xml -C ios . -platform Android -platformoptions platformAndroid.xml -C android .

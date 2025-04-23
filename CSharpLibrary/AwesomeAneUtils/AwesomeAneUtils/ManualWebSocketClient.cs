@@ -42,7 +42,7 @@ public static class ManualWebSocketClient
         ).ToList();
 
         var exceptions = new List<Exception>();
-        int latestResponseCode = 0;
+        var latestResponseCode = 0;
         Dictionary<string, string> latestHeaders = new();
 
         while (connectTasks.Count > 0)
