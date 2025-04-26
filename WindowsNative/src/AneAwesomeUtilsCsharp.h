@@ -27,5 +27,6 @@ extern "C" {
     DataArray __cdecl csharpLibrary_awesomeUtils_getWebSocketMessage(const void* guidPointer);
     void __cdecl csharpLibrary_awesomeUtils_addStaticHost(const char* host, const char* ip);
     void __cdecl csharpLibrary_awesomeUtils_removeStaticHost(const char* host);
+    bool __cdecl csharpLibrary_awesomeUtils_isRunningOnEmulator();
 }
 #endif //ANEAWESOMEUTILSCSHARP_H

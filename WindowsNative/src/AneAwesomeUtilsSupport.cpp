@@ -3,9 +3,9 @@
 #include <windows.h>
 #include <FlashRuntimeExtensions.h>
 #include "log.h"
-
+const int EXPORT_FUNCTIONS_COUNT = 12;
 static bool alreadyInitialized = false;
-static FRENamedFunction *exportedFunctions = new FRENamedFunction[11];
+static FRENamedFunction *exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 static FREContext context;
 
 static void dispatchWebSocketEvent(const char *guid, const char *code, const char *level) {
@@ -305,6 +305,14 @@ static FREObject awesomeUtils_getDeviceUniqueId(FREContext ctx, void *funcData, 
     return resultStr;
 }
 
+static FREObject awesomeUtils_isRunningOnEmulator(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("isRunningOnEmulator called");
+    auto result = csharpLibrary_awesomeUtils_isRunningOnEmulator();
+    FREObject resultBool;
+    FRENewObjectFromBool(result == 1, &resultBool);
+    return resultBool;
+}
+
 static void AneAwesomeUtilsSupportInitializer(
     void *extData,
     const uint8_t *ctxType,
@@ -336,9 +344,11 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[9].function = awesomeUtils_getWebSocketByteArrayMessage;
         exportedFunctions[10].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getDeviceUniqueId");
         exportedFunctions[10].function = awesomeUtils_getDeviceUniqueId;
+        exportedFunctions[11].name = reinterpret_cast<const uint8_t *>("awesomeUtils_isRunningOnEmulator");
+        exportedFunctions[11].function = awesomeUtils_isRunningOnEmulator;
         context = ctx;
     }
-    if (numFunctionsToSet) *numFunctionsToSet = 11;
+    if (numFunctionsToSet) *numFunctionsToSet = EXPORT_FUNCTIONS_COUNT;
     if (functionsToSet) *functionsToSet = exportedFunctions;
 }
 

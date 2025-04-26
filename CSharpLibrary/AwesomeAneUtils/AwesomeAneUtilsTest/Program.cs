@@ -10,6 +10,7 @@ foreach (var ip in allIps)
 }
 Console.WriteLine(DnsInternalResolver.Instance.IsIpv6Available());
 Console.WriteLine(HardwareID.GetDeviceUniqueIdHash(Console.WriteLine));
+Console.WriteLine(VMDetector.DetectVM());
 WebSocketClient webSocket = null;
 
 webSocket = new WebSocketClient((headers)=>

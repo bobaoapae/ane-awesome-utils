@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Buffers.Text;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -463,6 +462,20 @@ public static class ExportFunctions
         catch
         {
             return IntPtr.Zero;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_isRunningOnEmulator", CallConvs = [typeof(CallConvCdecl)])]
+    public static bool IsRunningOnEmulator()
+    {
+        try
+        {
+            var isEmulator = VMDetector.IsRunningInVM();
+            return isEmulator;
+        }
+        catch
+        {
+            return false;
         }
     }
 

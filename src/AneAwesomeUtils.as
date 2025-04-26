@@ -26,6 +26,26 @@ public class AneAwesomeUtils {
         }
     }
 
+    private static function IsWindows():Boolean {
+        var plataform:String = Capabilities.version.substr(0, 3);
+        return plataform == "WIN";
+    }
+
+    private static function IsMac():Boolean {
+        var plataform:String = Capabilities.version.substr(0, 3);
+        return plataform == "MAC";
+    }
+
+    private static function IsIOS():Boolean {
+        var plataform:String = Capabilities.version.substr(0, 3);
+        return plataform == "IOS";
+    }
+
+    private static function IsAndroid():Boolean {
+        var plataform:String = Capabilities.version.substr(0, 3);
+        return plataform == "AND";
+    }
+
     private static var _instance:AneAwesomeUtils;
 
     public static function get instance():AneAwesomeUtils {
@@ -185,6 +205,25 @@ public class AneAwesomeUtils {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
         return _extContext.call("awesomeUtils_getDeviceUniqueId") as String;
+    }
+
+    /**
+     * This method is used to check if the app is running on an emulator.
+     * On Android, it checks if the device is an emulator.
+     * On iOS, it checks if the device is a simulator.
+     * On Windows, it checks if the device is a Virtual Machine.
+     * On Mac, it checks if the device is a Virtual Machine.
+     * Currently, this method is only implemented for Windows.
+     * @return
+     */
+    public function isRunningOnEmulator():Boolean {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsWindows()) {
+            return true;
+        }
+        return _extContext.call("awesomeUtils_isRunningOnEmulator") as Boolean;
     }
 
     private function onStatusEvent(param1:StatusEvent):void {

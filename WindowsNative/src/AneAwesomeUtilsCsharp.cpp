@@ -287,3 +287,18 @@ void __cdecl csharpLibrary_awesomeUtils_removeStaticHost(const char *host) {
 
     func(host);
 }
+
+bool __cdecl csharpLibrary_awesomeUtils_isRunningOnEmulator() {
+    writeLog("isRunningOnEmulator called");
+    using IsRunningOnEmulatorFunction = bool(__cdecl *)();
+    auto func = reinterpret_cast<IsRunningOnEmulatorFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_isRunningOnEmulator"));
+
+    if (!func) {
+        writeLog("Could not load isRunningOnEmulator function");
+        return false;
+    }
+
+    bool result = func();
+    writeLog(("isRunningOnEmulator result: " + std::to_string(result)).c_str());
+    return result;
+}
