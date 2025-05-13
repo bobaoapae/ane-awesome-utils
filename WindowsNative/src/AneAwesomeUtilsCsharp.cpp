@@ -302,3 +302,35 @@ bool __cdecl csharpLibrary_awesomeUtils_isRunningOnEmulator() {
     writeLog(("isRunningOnEmulator result: " + std::to_string(result)).c_str());
     return result;
 }
+
+DataArray __cdecl csharpLibrary_awesomeUtils_decompressByteArray(const void *data, int length) {
+    writeLog("decompressByteArray called");
+    using DecompressByteArrayFunction = DataArray(__cdecl *)(const void *, int);
+    auto func = reinterpret_cast<DecompressByteArrayFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_decompressByteArray"));
+
+    if (!func) {
+        writeLog("Could not load decompressByteArray function");
+        return {};
+    }
+
+    DataArray result = func(data, length);
+    writeLog("decompressByteArray result: ");
+    writeLog(std::to_string(result.Size).c_str());
+    return result;
+}
+
+DataArray __cdecl csharpLibrary_awesomeUtils_readFileToByteArray(const char *filePath) {
+    writeLog("readFileToByteArray called");
+    using ReadFileToByteArrayFunction = DataArray(__cdecl *)(const char *);
+    auto func = reinterpret_cast<ReadFileToByteArrayFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_readFileToByteArray"));
+
+    if (!func) {
+        writeLog("Could not load readFileToByteArray function");
+        return {};
+    }
+
+    DataArray result = func(filePath);
+    writeLog("readFileToByteArray result: ");
+    writeLog(std::to_string(result.Size).c_str());
+    return result;
+}

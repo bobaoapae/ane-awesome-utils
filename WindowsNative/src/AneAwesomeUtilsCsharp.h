@@ -28,5 +28,7 @@ extern "C" {
     void __cdecl csharpLibrary_awesomeUtils_addStaticHost(const char* host, const char* ip);
     void __cdecl csharpLibrary_awesomeUtils_removeStaticHost(const char* host);
     bool __cdecl csharpLibrary_awesomeUtils_isRunningOnEmulator();
+    DataArray __cdecl csharpLibrary_awesomeUtils_decompressByteArray(const void* data, int length);
+    DataArray __cdecl csharpLibrary_awesomeUtils_readFileToByteArray(const char* filePath);
 }
 #endif //ANEAWESOMEUTILSCSHARP_H

@@ -3,7 +3,7 @@
 #include <windows.h>
 #include <FlashRuntimeExtensions.h>
 #include "log.h"
-const int EXPORT_FUNCTIONS_COUNT = 12;
+const int EXPORT_FUNCTIONS_COUNT = 14;
 static bool alreadyInitialized = false;
 static FRENamedFunction *exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 static FREContext context;
@@ -313,6 +313,69 @@ static FREObject awesomeUtils_isRunningOnEmulator(FREContext ctx, void *funcData
     return resultBool;
 }
 
+static FREObject awesomeUtils_decompressByteArray(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("decompressByteArray called");
+    if (argc < 2) return nullptr;
+
+    // 1) lê o Array de entrada
+    FREByteArray inBA;
+    FREAcquireByteArray(argv[0], &inBA);
+    auto result = csharpLibrary_awesomeUtils_decompressByteArray(inBA.bytes, static_cast<int>(inBA.length));
+    FREReleaseByteArray(argv[0]);
+
+    if (result.Size == 0) {
+        writeLog("no decompressed data found");
+        free(result.DataPointer);
+        return nullptr;
+    }
+
+    FREObject length;
+    FRENewObjectFromUint32(result.Size, &length);
+    FRESetObjectProperty(argv[1], (const uint8_t *) "length", length, nullptr);
+
+    FREByteArray targetBA;
+    FREAcquireByteArray(argv[1], &targetBA);
+    memcpy(targetBA.bytes, result.DataPointer, result.Size);
+    FREReleaseByteArray(argv[1]);
+
+    // 4) libera o buffer nativo e retorna null
+    free(result.DataPointer);
+    return nullptr;
+}
+
+static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("readFileToByteArray called");
+    if (argc < 2) return nullptr;
+
+    // 1) lê o Array de entrada
+    uint32_t filePathLength;
+    const uint8_t *filePath;
+    FREGetObjectAsUTF8(argv[0], &filePathLength, &filePath);
+    auto filePathChar = reinterpret_cast<const char *>(filePath);
+    writeLog("Calling readFileToByteArray with filePath: ");
+    writeLog(filePathChar);
+
+    auto result = csharpLibrary_awesomeUtils_readFileToByteArray(reinterpret_cast<const char *>(filePath));
+
+    if (result.Size == 0) {
+        writeLog("no decompressed data found");
+        return nullptr;
+    }
+
+    FREObject length;
+    FRENewObjectFromUint32(result.Size, &length);
+    FRESetObjectProperty(argv[1], (const uint8_t *) "length", length, nullptr);
+
+    FREByteArray targetBA;
+    FREAcquireByteArray(argv[1], &targetBA);
+    memcpy(targetBA.bytes, result.DataPointer, result.Size);
+    FREReleaseByteArray(argv[1]);
+
+    // 4) libera o buffer nativo e retorna null
+    free(result.DataPointer);
+    return nullptr;
+}
+
 static void AneAwesomeUtilsSupportInitializer(
     void *extData,
     const uint8_t *ctxType,
@@ -346,6 +409,10 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[10].function = awesomeUtils_getDeviceUniqueId;
         exportedFunctions[11].name = reinterpret_cast<const uint8_t *>("awesomeUtils_isRunningOnEmulator");
         exportedFunctions[11].function = awesomeUtils_isRunningOnEmulator;
+        exportedFunctions[12].name = reinterpret_cast<const uint8_t *>("awesomeUtils_decompressByteArray");
+        exportedFunctions[12].function = awesomeUtils_decompressByteArray;
+        exportedFunctions[13].name = reinterpret_cast<const uint8_t *>("awesomeUtils_readFileToByteArray");
+        exportedFunctions[13].function = awesomeUtils_readFileToByteArray;
         context = ctx;
     }
     if (numFunctionsToSet) *numFunctionsToSet = EXPORT_FUNCTIONS_COUNT;

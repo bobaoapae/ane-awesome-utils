@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -476,6 +477,66 @@ public static class ExportFunctions
         catch
         {
             return false;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_decompressByteArray", CallConvs = [typeof(CallConvCdecl)])]
+    public static unsafe DataArray DecompressByteArray(IntPtr data, int length)
+    {
+        var result = new DataArray();
+
+        try
+        {
+            // cria um stream que lê direto de data
+            using var srcStream = new UnmanagedMemoryStream((byte*)data.ToPointer(), length);
+            // chama a nova sobrecarga
+            using var ms = CompressUtil.Uncompress(srcStream);
+
+            result.Size = (int)ms.Length;
+            result.DataPointer = Marshal.AllocHGlobal(result.Size);
+            // copiar do MemoryStream para unmanaged
+            var buffer = ms.GetBuffer(); // não aloca: retorna o array interno
+            Marshal.Copy(buffer, 0, result.DataPointer, result.Size);
+
+            return result;
+        }
+        catch (Exception e)
+        {
+            LogAll(e, _writeLogWrapper);
+            return result;
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_readFileToByteArray", CallConvs = [typeof(CallConvCdecl)])]
+    public static DataArray ReadFileToByteArray(IntPtr path)
+    {
+        var result = new DataArray();
+
+        try
+        {
+            var filePath = Marshal.PtrToStringUTF8(path);
+            if (string.IsNullOrEmpty(filePath))
+                return result;
+
+            if (!File.Exists(filePath))
+                return result;
+
+            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+            using var ms = new MemoryStream();
+            fs.CopyTo(ms);
+
+            result.Size = (int)ms.Length;
+            result.DataPointer = Marshal.AllocHGlobal(result.Size);
+            // copiar do MemoryStream para unmanaged
+            var buffer = ms.GetBuffer(); // não aloca: retorna o array interno
+            Marshal.Copy(buffer, 0, result.DataPointer, result.Size);
+
+            return result;
+        }
+        catch (Exception e)
+        {
+            LogAll(e, _writeLogWrapper);
+            return result;
         }
     }
 

@@ -221,9 +221,24 @@ public class AneAwesomeUtils {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
         if (!IsWindows()) {
-            return true;
+            return false;
         }
         return _extContext.call("awesomeUtils_isRunningOnEmulator") as Boolean;
+    }
+
+    public function decompressByteArray(source:ByteArray, target:ByteArray):void {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        _extContext.call("awesomeUtils_decompressByteArray", source, target);
+    }
+
+    public function readFileToByteArray(path:String, target:ByteArray):void {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        _extContext.call("awesomeUtils_readFileToByteArray", path, target);
+        target.position = 0;
     }
 
     private function onStatusEvent(param1:StatusEvent):void {

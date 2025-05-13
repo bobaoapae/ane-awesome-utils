@@ -79,6 +79,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(GetLoaderResult.KEY, new GetLoaderResult());
         functionMap.put(GetWebSocketByteArrayMessage.KEY, new GetWebSocketByteArrayMessage());
         functionMap.put(GetDeviceUniqueId.KEY, new GetDeviceUniqueId());
+        functionMap.put(DecompressByteArray.KEY, new DecompressByteArray());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -676,6 +677,35 @@ public class AneAwesomeUtilsContext extends FREContext {
                 return FREObject.newObject(androidId);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error getting device unique id", e);
+            }
+            return null;
+        }
+    }
+
+    public static class DecompressByteArray implements FREFunction {
+        public static final String KEY = "awesomeUtils_decompressByteArray";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_decompressByteArray");
+            try {
+                FREByteArray byteArray = (FREByteArray) args[0];
+                byteArray.acquire();
+                byte[] bytes = new byte[(int) byteArray.getLength()];
+                byteArray.getBytes().get(bytes);
+                byteArray.release();
+
+                // Decompress the byte array (assuming it's GZIP compressed)
+                byte[] decompressedBytes = AneAwesomeUtilsDecompressor.decompress(bytes);
+
+                FREByteArray output = (FREByteArray) args[1];
+                output.setLength(decompressedBytes.length);
+                output.acquire();
+                output.getBytes().put(decompressedBytes);
+                output.release();
+
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error decompressing byte array", e);
             }
             return null;
         }
