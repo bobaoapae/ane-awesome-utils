@@ -56,12 +56,31 @@ namespace AwesomeAneUtils
         /// <summary>
         ///   Descomprime lendo de qualquer Stream (pode ser UnmanagedMemoryStream).
         /// </summary>
-        public static MemoryStream Uncompress(Stream sourceStream)
+        public static MemoryStream Uncompress(Stream source)
         {
+            if (!source.CanSeek)
+            {
+                var tmp = new MemoryStream();
+                source.CopyTo(tmp);
+                tmp.Position = 0;
+                source = tmp;
+            }
+
+            int b0 = source.ReadByte();
+            int b1 = source.ReadByte();
+            source.Seek(-2, SeekOrigin.Current);
+
             var output = new MemoryStream();
-            // mantendo sourceStream aberto após usar
-            using var decompression = new ZLibStream(sourceStream, CompressionMode.Decompress, leaveOpen: true);
-            decompression.CopyTo(output);
+            if (b0 == 0x1F && b1 == 0x8B)
+            {
+                using var dec = new GZipStream(source, CompressionMode.Decompress, true);
+                dec.CopyTo(output);
+            }
+            else
+            {
+                using var dec = new ZLibStream(source, CompressionMode.Decompress, true);
+                dec.CopyTo(output);
+            }
             output.Position = 0;
             return output;
         }
