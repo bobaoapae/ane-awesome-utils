@@ -3,6 +3,7 @@ package br.com.redesurftank.aneawesomeutils;
 import static br.com.redesurftank.aneawesomeutils.AneAwesomeUtilsExtension.TAG;
 
 import android.content.ContentResolver;
+import android.os.Build;
 import android.provider.Settings;
 import android.util.Base64;
 import android.util.JsonReader;
@@ -16,11 +17,15 @@ import com.adobe.fre.FREContext;
 import com.adobe.fre.FREFunction;
 import com.adobe.fre.FREObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.StringWriter;
 import java.net.InetAddress;
 import java.net.ProtocolException;
 import java.net.UnknownHostException;
+import java.nio.file.Files;
 import java.security.cert.CertificateException;
 import java.util.Collections;
 import java.util.HashMap;
@@ -80,6 +85,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(GetWebSocketByteArrayMessage.KEY, new GetWebSocketByteArrayMessage());
         functionMap.put(GetDeviceUniqueId.KEY, new GetDeviceUniqueId());
         functionMap.put(DecompressByteArray.KEY, new DecompressByteArray());
+        functionMap.put(ReadFileToByteArray.KEY, new ReadFileToByteArray());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -706,6 +712,48 @@ public class AneAwesomeUtilsContext extends FREContext {
 
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error decompressing byte array", e);
+            }
+            return null;
+        }
+    }
+
+    public static class ReadFileToByteArray implements FREFunction {
+        public static final String KEY = "awesomeUtils_readFileToByteArray";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_readFileToByteArray");
+            try {
+                String filePath = args[0].getAsString();
+                File file = new File(filePath);
+                if (!file.exists()) {
+                    AneAwesomeUtilsLogging.e(TAG, "File not found: " + filePath);
+                    return null;
+                }
+
+                byte[] bytes = null;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    bytes = Files.readAllBytes(file.toPath());
+                } else {
+                    FileInputStream fis = new FileInputStream(file);
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[1024];
+                    int bytesRead;
+                    while ((bytesRead = fis.read(buffer)) != -1) {
+                        bos.write(buffer, 0, bytesRead);
+                    }
+                    bytes = bos.toByteArray();
+                    fis.close();
+                }
+
+                FREByteArray output = (FREByteArray) args[1];
+                output.setLength(bytes.length);
+                output.acquire();
+                output.getBytes().put(bytes);
+                output.release();
+
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error reading file to byte array", e);
             }
             return null;
         }
