@@ -13,6 +13,11 @@ static std::unique_ptr<std::remove_pointer<HMODULE>::type, decltype(&FreeLibrary
 
 std::string GetLibraryLocation(int argc, char *argv[]) {
     std::string baseDirectory;
+#if defined(_WIN64)
+    const std::string arch = "Windows-x86-64";
+#else
+    const std::string arch = "Windows-x86";
+#endif
 
     // Check for -extdir argument
     for (int i = 0; i < argc; ++i) {
@@ -35,7 +40,7 @@ std::string GetLibraryLocation(int argc, char *argv[]) {
         baseDirectory += R"(\META-INF\AIR\extensions\br.com.redesurftank.aneawesomeutils)";
     }
 
-    return baseDirectory + R"(\META-INF\ANE\Windows-x86\AwesomeAneUtils.dll)";
+    return baseDirectory + R"(\META-INF\ANE\)" + arch + R"(\AwesomeAneUtils.dll)";
 }
 
 bool loadNativeLibrary() {

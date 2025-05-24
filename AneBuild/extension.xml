@@ -15,6 +15,13 @@
                 <finalizer>DestroyExtension</finalizer>
             </applicationDeployment>
         </platform>
+        <platform name="Windows-x86-64">
+            <applicationDeployment>
+                <nativeLibrary>AneAwesomeUtilsWindows.dll</nativeLibrary>
+                <initializer>InitExtension</initializer>
+                <finalizer>DestroyExtension</finalizer>
+            </applicationDeployment>
+        </platform>
         <platform name="MacOS-x86-64">
             <applicationDeployment>
                 <nativeLibrary>AneAwesomeUtils.framework</nativeLibrary>
