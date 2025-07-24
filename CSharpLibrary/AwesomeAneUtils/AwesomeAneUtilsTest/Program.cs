@@ -3,14 +3,16 @@ using System.Text;
 using System.Text.Json;
 using AwesomeAneUtils;
 
-var allIps = DnsInternalResolver.Instance.GetAllAvailableIPs();
+/*var allIps = DnsInternalResolver.Instance.GetAllAvailableIPs();
 foreach (var ip in allIps)
 {
     Console.WriteLine(ip);
 }
-Console.WriteLine(DnsInternalResolver.Instance.IsIpv6Available());
+Console.WriteLine(DnsInternalResolver.Instance.IsIpv6Available());*/
 Console.WriteLine(HardwareID.GetDeviceUniqueIdHash(Console.WriteLine));
 Console.WriteLine(VMDetector.DetectVM());
+Console.WriteLine(VMDetector.IsRunningInVM());
+return;
 WebSocketClient webSocket = null;
 
 webSocket = new WebSocketClient((headers)=>

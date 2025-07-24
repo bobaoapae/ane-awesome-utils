@@ -3,7 +3,7 @@
 #include <windows.h>
 #include <FlashRuntimeExtensions.h>
 #include "log.h"
-const int EXPORT_FUNCTIONS_COUNT = 14;
+const int EXPORT_FUNCTIONS_COUNT = 16;
 static bool alreadyInitialized = false;
 static FRENamedFunction *exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 static FREContext context;
@@ -376,6 +376,38 @@ static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData
     return nullptr;
 }
 
+static FREObject awesomeUtils_preventCapture(FREContext ctx, void* funcData, uint32_t argc, FREObject argv[]) {
+    HWND hWnd = GetActiveWindow();
+    bool success = false;
+    if (hWnd) {
+        RTL_OSVERSIONINFOW rovi = { sizeof(rovi) };
+        typedef LONG (WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
+        auto rtlGetVersion = reinterpret_cast<RtlGetVersionPtr>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+        if (rtlGetVersion)
+            rtlGetVersion(&rovi);
+        DWORD affinity = (rovi.dwMajorVersion == 10 && rovi.dwBuildNumber >= 17134)
+                        ? WDA_EXCLUDEFROMCAPTURE
+                        : WDA_MONITOR;
+        success = SetWindowDisplayAffinity(hWnd, affinity) != FALSE;
+    }
+    FREObject resultBool;
+    FRENewObjectFromBool(success, &resultBool);
+    return resultBool;
+}
+
+static FREObject awesomeUtils_isPreventCaptureEnabled(FREContext ctx, void* funcData, uint32_t argc, FREObject argv[]) {
+    HWND hWnd = GetActiveWindow();
+    bool isPrevented = false;
+    if (hWnd) {
+        DWORD affinity = 0;
+        if (GetWindowDisplayAffinity(hWnd, &affinity))
+            isPrevented = (affinity & (WDA_MONITOR | WDA_EXCLUDEFROMCAPTURE)) != 0;
+    }
+    FREObject resultBool;
+    FRENewObjectFromBool(isPrevented, &resultBool);
+    return resultBool;
+}
+
 static void AneAwesomeUtilsSupportInitializer(
     void *extData,
     const uint8_t *ctxType,
@@ -413,6 +445,10 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[12].function = awesomeUtils_decompressByteArray;
         exportedFunctions[13].name = reinterpret_cast<const uint8_t *>("awesomeUtils_readFileToByteArray");
         exportedFunctions[13].function = awesomeUtils_readFileToByteArray;
+        exportedFunctions[14].name = reinterpret_cast<const uint8_t *>("awesomeUtils_preventCapture");
+        exportedFunctions[14].function = awesomeUtils_preventCapture;
+        exportedFunctions[15].name = reinterpret_cast<const uint8_t *>("awesomeUtils_isPreventCaptureEnabled");
+        exportedFunctions[15].function = awesomeUtils_isPreventCaptureEnabled;
         context = ctx;
     }
     if (numFunctionsToSet) *numFunctionsToSet = EXPORT_FUNCTIONS_COUNT;

@@ -5,7 +5,8 @@ plugins {
 
 android {
     namespace = "br.com.redesurftank.aneawesomeutils"
-    compileSdk = 34
+    compileSdk = 36
+    ndkVersion= "28.1.13356709"
 
     defaultConfig {
         minSdk = 21
@@ -22,6 +23,12 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "4.0.2"
+        }
     }
 }
 

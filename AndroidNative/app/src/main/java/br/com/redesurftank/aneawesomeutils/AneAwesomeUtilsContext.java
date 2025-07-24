@@ -86,6 +86,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(GetDeviceUniqueId.KEY, new GetDeviceUniqueId());
         functionMap.put(DecompressByteArray.KEY, new DecompressByteArray());
         functionMap.put(ReadFileToByteArray.KEY, new ReadFileToByteArray());
+        functionMap.put(CheckRunningEmulator.KEY, new CheckRunningEmulator());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -754,6 +755,32 @@ public class AneAwesomeUtilsContext extends FREContext {
 
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error reading file to byte array", e);
+            }
+            return null;
+        }
+    }
+
+    public static class CheckRunningEmulator implements FREFunction {
+        public static final String KEY = "awesomeUtils_isRunningOnEmulator";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_isRunningOnEmulator");
+            try {
+                boolean isEmulator = false;
+                try {
+                    var emulatorDetection = new EmulatorDetection();
+                    isEmulator = emulatorDetection.isDetected();
+                    if (isEmulator) {
+                        var detectionList = emulatorDetection.getResult();
+                        AneAwesomeUtilsLogging.i(TAG, "Emulator detected: " + detectionList);
+                    }
+                } catch (UnsatisfiedLinkError e) {
+                    AneAwesomeUtilsLogging.e(TAG, "Emulator detection library not found, assuming not an emulator", e);
+                }
+                return FREObject.newObject(isEmulator);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error checking if running on emulator", e);
             }
             return null;
         }

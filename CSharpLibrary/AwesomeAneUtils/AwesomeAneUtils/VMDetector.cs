@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using Microsoft.Win32;
 
 namespace AwesomeAneUtils;
@@ -39,8 +40,25 @@ public class VMDetector
 
     public static bool IsRunningInVM()
     {
-        return DetectVM() != VMType.None;
+        return DetectVMWithTimeout() != VMType.None;
     }
+    
+    public static VMType DetectVMWithTimeout()
+    {
+        try
+        {
+            var task = Task.Run(DetectVM);
+            if (task.Wait(TimeSpan.FromSeconds(3)))
+                return task.Result;
+        }
+        catch
+        {
+            // Se ocorrer qualquer exceção ou timeout, retorna None
+        }
+
+        return VMType.None;
+    }
+
 
     public static VMType DetectVM()
     {

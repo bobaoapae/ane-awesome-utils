@@ -210,17 +210,16 @@ public class AneAwesomeUtils {
     /**
      * This method is used to check if the app is running on an emulator.
      * On Android, it checks if the device is an emulator.
-     * On iOS, it checks if the device is a simulator.
      * On Windows, it checks if the device is a Virtual Machine.
-     * On Mac, it checks if the device is a Virtual Machine.
-     * Currently, this method is only implemented for Windows.
+     * Currently, this method is only implemented for Windows and Android. On other platforms, it will return false.
      * @return
      */
     public function isRunningOnEmulator():Boolean {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
-        if (!IsWindows()) {
+        var isCurrentPlatformSupported:Boolean = IsAndroid() || IsWindows();
+        if (!isCurrentPlatformSupported) {
             return false;
         }
         return _extContext.call("awesomeUtils_isRunningOnEmulator") as Boolean;
@@ -239,6 +238,32 @@ public class AneAwesomeUtils {
         }
         _extContext.call("awesomeUtils_readFileToByteArray", path, target);
         target.position = 0;
+    }
+
+    public function preventCaptureScreen():Boolean {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsWindows()) {
+            trace("Warning: preventCaptureScreen is only supported on Windows.");
+            return false;
+        }
+        var result:Boolean = _extContext.call("awesomeUtils_preventCapture") as Boolean;
+        if (!result) {
+            trace("Warning: preventCaptureScreen failed. This may not be supported on this platform or device.");
+        }
+        return result;
+    }
+
+    public function isPreventCaptureEnabled():Boolean {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsWindows()) {
+            trace("Warning: isPreventCaptureEnabled is only supported on Windows.");
+            return false;
+        }
+        return _extContext.call("awesomeUtils_isPreventCaptureEnabled") as Boolean;
     }
 
     private function onStatusEvent(param1:StatusEvent):void {
