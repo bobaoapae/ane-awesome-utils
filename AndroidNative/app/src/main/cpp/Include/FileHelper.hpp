@@ -13,15 +13,30 @@
 #include <sys/system_properties.h>
 
 namespace FileHelper {
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <cstdio>
+#include <cstring>
+
     inline bool findStringInMaps(const std::string& targetLib, const std::string& targetString) {
         std::ifstream mapsFile("/proc/self/maps");
         if (!mapsFile.is_open()) {
-            perror("fopen");
+            perror("fopen maps");
+            return false;
+        }
+
+        int memFd = open("/proc/self/mem", O_RDONLY);
+        if (memFd == -1) {
+            perror("open mem");
             return false;
         }
 
         std::string line;
-        void *startAddr = nullptr, *endAddr = nullptr;
+        uintptr_t start, end;
 
         while (std::getline(mapsFile, line)) {
             std::istringstream iss(line);
@@ -29,12 +44,22 @@ namespace FileHelper {
 
             if (iss >> addressRange >> permissions >> offset >> dev >> inode) {
                 if (iss >> pathname && pathname.find(targetLib) != std::string::npos) {
-                    sscanf(addressRange.c_str(), "%p-%p", &startAddr, &endAddr);
-                    auto size = static_cast<size_t>(static_cast<char *>(endAddr) - static_cast<char *>(startAddr));
+                    if (sscanf(addressRange.c_str(), "%zx-%zx", &start, &end) != 2) {
+                        continue;
+                    }
+                    size_t size = end - start;
 
-                    if (permissions.find('r') != std::string::npos) {
-                        for (size_t off = 0; off <= size - targetString.size(); off++) {
-                            if (memcmp(static_cast<char *>(startAddr) + off, targetString.c_str(), targetString.size()) == 0) {
+                    if (permissions.find('r') != std::string::npos && size >= targetString.size()) {
+                        size_t len = targetString.size();
+                        char buffer[len];
+                        for (size_t off = 0; off <= size - len; ++off) {
+                            off_t seekPos = static_cast<off_t>(start + off);
+                            if (lseek(memFd, seekPos, SEEK_SET) == -1) {
+                                continue;
+                            }
+                            ssize_t bytesRead = read(memFd, buffer, len);
+                            if (bytesRead == static_cast<ssize_t>(len) && memcmp(buffer, targetString.c_str(), len) == 0) {
+                                close(memFd);
                                 return true;
                             }
                         }
@@ -43,6 +68,7 @@ namespace FileHelper {
             }
         }
 
+        close(memFd);
         return false;
     }
 

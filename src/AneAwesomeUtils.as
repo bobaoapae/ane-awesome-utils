@@ -1,5 +1,6 @@
 package {
 import aneAwesomeUtils.Base64;
+import aneAwesomeUtils.ILogging;
 
 import flash.events.StatusEvent;
 import flash.external.ExtensionContext;
@@ -59,6 +60,7 @@ public class AneAwesomeUtils {
     private var _websockets:Dictionary;
     private var _loaders:Dictionary;
     private var _successInit:Boolean;
+    private var _logging:ILogging;
 
     function AneAwesomeUtils() {
         _extContext = ExtensionContext.createExtensionContext("br.com.redesurftank.aneawesomeutils", "");
@@ -68,6 +70,18 @@ public class AneAwesomeUtils {
         _extContext.addEventListener("status", onStatusEvent);
         _websockets = new Dictionary();
         _loaders = new Dictionary();
+    }
+
+    private function doLogging(level:String, message:String):void {
+        if (_logging) {
+            _logging.onLog(level, message);
+        } else {
+            trace("AneAwesomeUtils: " + level + ": " + message);
+        }
+    }
+
+    public function set logging(value:ILogging):void {
+        _logging = value;
     }
 
     public function get successInit():Boolean {
@@ -156,7 +170,17 @@ public class AneAwesomeUtils {
         if (i > -1) {
             var qs:String = url.substring(i + 1);
             url = url.substring(0, i);
-            var queryVars:URLVariables = new URLVariables(qs);
+            //if url start with & remove the first &
+            if (qs.charAt(0) == "&") {
+                qs = qs.substring(1);
+            }
+            var queryVars:URLVariables;
+            try {
+                queryVars = new URLVariables(qs);
+            } catch (e:Error) {
+                doLogging("ERROR", "Error parsing query string: " + e.message + " - query string: " + qs + " - stack: " + e.getStackTrace());
+                queryVars = new URLVariables();
+            }
             if (!variables) {
                 variables = {};
             }
