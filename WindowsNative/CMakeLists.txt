@@ -37,6 +37,8 @@ add_library(AneAwesomeUtilsWindows SHARED
         src/AneAwesomeUtilsCsharp.h
         src/AneAwesomeUtilsSupport.cpp
         src/DataArray.h
+        src/WindowsFilterInputs.h
+        src/WindowsFilterInputs.cpp
 )
 
 target_link_libraries(AneAwesomeUtilsWindows PRIVATE ${LIBRARY_PATH}/FlashRuntimeExtensions.lib)

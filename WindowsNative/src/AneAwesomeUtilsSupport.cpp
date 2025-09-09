@@ -3,7 +3,9 @@
 #include <windows.h>
 #include <FlashRuntimeExtensions.h>
 #include "log.h"
-const int EXPORT_FUNCTIONS_COUNT = 16;
+#include "WindowsFilterInputs.h"
+
+constexpr int EXPORT_FUNCTIONS_COUNT = 18;
 static bool alreadyInitialized = false;
 static FRENamedFunction *exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 static FREContext context;
@@ -408,6 +410,16 @@ static FREObject awesomeUtils_isPreventCaptureEnabled(FREContext ctx, void* func
     return resultBool;
 }
 
+static FREObject awesomeUtils_filterWindowsInputs(FREContext ctx, void* funcData, uint32_t argc, FREObject argv[]) {
+    StartHooksIfNeeded();
+    FREObject resultBool; FRENewObjectFromBool(true, &resultBool); return resultBool;
+}
+
+static FREObject awesomeUtils_stopFilterWindowsInputs(FREContext ctx, void* funcData, uint32_t argc, FREObject argv[]) {
+    StopHooks();
+    FREObject resultBool; FRENewObjectFromBool(true, &resultBool); return resultBool;
+}
+
 static void AneAwesomeUtilsSupportInitializer(
     void *extData,
     const uint8_t *ctxType,
@@ -449,6 +461,10 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[14].function = awesomeUtils_preventCapture;
         exportedFunctions[15].name = reinterpret_cast<const uint8_t *>("awesomeUtils_isPreventCaptureEnabled");
         exportedFunctions[15].function = awesomeUtils_isPreventCaptureEnabled;
+        exportedFunctions[16].name = reinterpret_cast<const uint8_t *>("awesomeUtils_filterWindowsInputs");
+        exportedFunctions[16].function = awesomeUtils_filterWindowsInputs;
+        exportedFunctions[17].name = reinterpret_cast<const uint8_t *>("awesomeUtils_stopFilterWindowsInputs");
+        exportedFunctions[17].function = awesomeUtils_stopFilterWindowsInputs;
         context = ctx;
     }
     if (numFunctionsToSet) *numFunctionsToSet = EXPORT_FUNCTIONS_COUNT;

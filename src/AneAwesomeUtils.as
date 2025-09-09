@@ -290,6 +290,36 @@ public class AneAwesomeUtils {
         return _extContext.call("awesomeUtils_isPreventCaptureEnabled") as Boolean;
     }
 
+    public function filterWindowsInputs():Boolean {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsWindows()) {
+            trace("Warning: filterWindowsInputs is only supported on Windows.");
+            return false;
+        }
+        var result:Boolean = _extContext.call("awesomeUtils_filterWindowsInputs") as Boolean;
+        if (!result) {
+            trace("Warning: filterWindowsInputs failed. This may not be supported on this platform or device.");
+        }
+        return result;
+    }
+
+    public function stopWindowsFilterInputs():Boolean {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsWindows()) {
+            trace("Warning: stopWindowsFilterInputs is only supported on Windows.");
+            return false;
+        }
+        var result:Boolean = _extContext.call("awesomeUtils_stopFilterWindowsInputs") as Boolean;
+        if (!result) {
+            trace("Warning: stopWindowsFilterInputs failed. This may not be supported on this platform or device.");
+        }
+        return result;
+    }
+
     private function onStatusEvent(param1:StatusEvent):void {
         var dataSplit:Array = param1.code.split(";");
         var type:String = dataSplit[0];
