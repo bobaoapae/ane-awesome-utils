@@ -110,22 +110,6 @@ int __cdecl csharpLibrary_awesomeUtils_initialize(
     return result;
 }
 
-char * __cdecl csharpLibrary_awesomeUtils_uuid() {
-    writeLog("uuid called");
-    using UuidFunction = char *(__cdecl *)();
-    auto func = reinterpret_cast<UuidFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_uuid"));
-
-    if (!func) {
-        writeLog("Could not load uuid function");
-        return nullptr;
-    }
-
-    char *result = func();
-    writeLog("uuid result: ");
-    writeLog(result);
-    return result;
-}
-
 char * __cdecl csharpLibrary_awesomeUtils_deviceUniqueId() {
     writeLog("deviceUniqueId called");
     using DeviceUniqueIdFunction = char *(__cdecl *)();
@@ -202,22 +186,6 @@ int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void *guidPointer,
 
     int result = func(guidPointer, host, headers);
     writeLog(("connectWebSocket result: " + std::to_string(result)).c_str());
-    return result;
-}
-
-char * __cdecl csharpLibrary_awesomeUtils_getReceivedHeaders(const void *guidPointer) {
-    writeLog("getReceivedHeaders called");
-    using GetReceivedHeadersFunction = char *(__cdecl *)(const void *);
-    auto func = reinterpret_cast<GetReceivedHeadersFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_getReceivedHeaders"));
-
-    if (!func) {
-        writeLog("Could not load getReceivedHeaders function");
-        return nullptr;
-    }
-
-    char *result = func(guidPointer);
-    writeLog("getReceivedHeaders result: ");
-    writeLog(result);
     return result;
 }
 
@@ -338,4 +306,11 @@ DataArray __cdecl csharpLibrary_awesomeUtils_readFileToByteArray(const char *fil
     writeLog("readFileToByteArray result: ");
     writeLog(std::to_string(result.Size).c_str());
     return result;
+}
+
+void* __cdecl csharpLibrary_awesomeUtils_mapXmlToObject(const char* xmlChar, void* freeNewObject, void* freeNewBool, void* freeNewInt, void* freeNewUint, void* freeNewDouble, void* freeNewUtf8, void* freeSetObjProperty) {
+    writeLog("mapXmlToObject called");
+    using MapXmlToObjectFunction = void*(__cdecl *)(const char *, void*, void*, void*, void*, void*, void*, void*);
+    auto func = reinterpret_cast<MapXmlToObjectFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_mapXmlToObject"));
+    return func(xmlChar, freeNewObject, freeNewBool, freeNewInt, freeNewUint, freeNewDouble, freeNewUtf8, freeSetObjProperty);
 }

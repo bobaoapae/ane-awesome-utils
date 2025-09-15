@@ -12,11 +12,25 @@ import android.util.JsonWriter;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.adobe.fre.FREASErrorException;
 import com.adobe.fre.FREByteArray;
 import com.adobe.fre.FREContext;
 import com.adobe.fre.FREFunction;
+import com.adobe.fre.FREInvalidObjectException;
+import com.adobe.fre.FRENoSuchNameException;
 import com.adobe.fre.FREObject;
+import com.adobe.fre.FREReadOnlyException;
+import com.adobe.fre.FRETypeMismatchException;
+import com.adobe.fre.FREWrongThreadException;
 
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -25,8 +39,10 @@ import java.io.StringWriter;
 import java.net.InetAddress;
 import java.net.ProtocolException;
 import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.cert.CertificateException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -43,6 +59,8 @@ import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
 
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -87,6 +105,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(DecompressByteArray.KEY, new DecompressByteArray());
         functionMap.put(ReadFileToByteArray.KEY, new ReadFileToByteArray());
         functionMap.put(CheckRunningEmulator.KEY, new CheckRunningEmulator());
+        functionMap.put(MapXmlToObject.KEY, new MapXmlToObject());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -783,6 +802,115 @@ public class AneAwesomeUtilsContext extends FREContext {
                 AneAwesomeUtilsLogging.e(TAG, "Error checking if running on emulator", e);
             }
             return null;
+        }
+    }
+
+    public static class MapXmlToObject implements FREFunction {
+        public static final String KEY = "awesomeUtils_mapXmlToObject";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String xml = args[0].getAsString();
+                if (xml == null || xml.isEmpty()) return null;
+
+                DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+                DocumentBuilder builder = factory.newDocumentBuilder();
+                ByteArrayInputStream is = new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8));
+                Document doc = builder.parse(is);
+                Element root = doc.getDocumentElement();
+
+                return convert(root);
+            } catch (Exception e) {
+                // Log if needed
+                return null;
+            }
+        }
+
+        private static FREObject convert(Element elem) throws FREWrongThreadException, FREInvalidObjectException, FRETypeMismatchException, FRENoSuchNameException, FREASErrorException, FREReadOnlyException {
+            String value = elem.getTextContent().trim();
+            if (!hasChildElements(elem) && elem.getAttributes().getLength() == 0) {
+                return valueToFre(value);
+            }
+
+            FREObject obj = FREObject.newObject("Object", null);
+
+            NamedNodeMap attrs = elem.getAttributes();
+            for (int i = 0; i < attrs.getLength(); i++) {
+                Attr attr = (Attr) attrs.item(i);
+                obj.setProperty(attr.getName(), valueToFre(attr.getValue()));
+            }
+
+            Map<String, List<Element>> groups = new HashMap<>();
+            NodeList children = elem.getChildNodes();
+            for (int i = 0; i < children.getLength(); i++) {
+                Node node = children.item(i);
+                if (node instanceof Element) {
+                    Element child = (Element) node;
+                    List<Element> list = groups.get(child.getTagName());
+                    if (list == null) {
+                        list = new ArrayList<>();
+                        groups.put(child.getTagName(), list);
+                    }
+                    list.add(child);
+                }
+            }
+
+            for (Map.Entry<String, List<Element>> entry : groups.entrySet()) {
+                String key = entry.getKey();
+                List<Element> list = entry.getValue();
+                FREObject propVal;
+                if (list.size() == 1) {
+                    propVal = convert(list.get(0));
+                } else {
+                    FREObject arr = FREObject.newObject("Array", null);
+                    for (int j = 0; j < list.size(); j++) {
+                        arr.setProperty(String.valueOf(j), convert(list.get(j)));
+                    }
+                    propVal = arr;
+                }
+                obj.setProperty(key, propVal);
+            }
+
+            return obj;
+        }
+
+        private static boolean hasChildElements(Element elem) {
+            NodeList nodes = elem.getChildNodes();
+            for (int i = 0; i < nodes.getLength(); i++) {
+                if (nodes.item(i) instanceof Element) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static FREObject valueToFre(String value) throws FREWrongThreadException {
+            value = value.trim();
+            if (value.equalsIgnoreCase("true")) return FREObject.newObject(true);
+            if (value.equalsIgnoreCase("false")) return FREObject.newObject(false);
+
+            try {
+                int i = Integer.parseInt(value);
+                return FREObject.newObject(i);
+            } catch (NumberFormatException ignored) {
+            }
+
+            try {
+                long l = Long.parseLong(value);
+                if (l >= 0 && l <= 4294967295L) {
+                    return FREObject.newObject((double) l);
+                }
+            } catch (NumberFormatException ignored) {
+            }
+
+            try {
+                double d = Double.parseDouble(value);
+                return FREObject.newObject(d);
+            } catch (NumberFormatException ignored) {
+            }
+
+            return FREObject.newObject(value);
         }
     }
 }

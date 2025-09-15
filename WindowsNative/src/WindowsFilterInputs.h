@@ -4,6 +4,8 @@
 
 #ifndef ANEAWESOMEUTILSWINDOWS_WINDOWSFILTERINPUTS_H
 #define ANEAWESOMEUTILSWINDOWS_WINDOWSFILTERINPUTS_H
-void StartHooksIfNeeded();
+void StartHooksIfNeeded(bool filterAll, const std::vector<DWORD> &filteredKeys);
 void StopHooks();
+void SubclassMainWindow();
+void UnsubclassMainWindow();
 #endif //ANEAWESOMEUTILSWINDOWS_WINDOWSFILTERINPUTS_H

@@ -2,11 +2,13 @@
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Xml.Linq;
 
 namespace AwesomeAneUtils;
 
@@ -32,6 +34,27 @@ public static class ExportFunctions
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void WriteLogCallBackDelegate(IntPtr pointerMessage);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint FRENewObjectDelegate(IntPtr className, uint argc, IntPtr argv, out IntPtr obj, out IntPtr exception);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint FRENewObjectFromBoolDelegate(uint value, out IntPtr obj);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint FRENewObjectFromInt32Delegate(int value, out IntPtr obj);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint FRENewObjectFromUint32Delegate(uint value, out IntPtr obj);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint FRENewObjectFromDoubleDelegate(double value, out IntPtr obj);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint FRENewObjectFromUTF8Delegate(uint length, IntPtr value, out IntPtr obj);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint FRESetObjectPropertyDelegate(IntPtr obj, IntPtr propName, IntPtr propValue, out IntPtr exception);
 
     private static UrlLoaderSuccessCallBackDelegate _urlLoaderSuccessCallBackDelegate;
     private static UrlLoaderFailureCallBackDelegate _urlLoaderFailureCallBackDelegate;
@@ -241,32 +264,6 @@ public static class ExportFunctions
 
             client.Connect(uri, headersDictionary);
             return 1;
-        }
-        catch (Exception e)
-        {
-            LogAll(e, _writeLogWrapper);
-            return 0;
-        }
-    }
-
-    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_getReceivedHeaders", CallConvs = [typeof(CallConvCdecl)])]
-    public static IntPtr GetReceivedHeaders(IntPtr guidPointer)
-    {
-        try
-        {
-            var guidString = Marshal.PtrToStringAnsi(guidPointer);
-            if (!Guid.TryParse(guidString, out var guid))
-            {
-                return Marshal.StringToCoTaskMemAnsi("{}");
-            }
-
-            if (!WebSocketClients.TryGetValue(guid, out var client))
-            {
-                return Marshal.StringToCoTaskMemAnsi("{}");
-            }
-
-            var headers = JsonSerializer.Serialize(client.ReceivedHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString);
-            return Marshal.StringToCoTaskMemAnsi(headers);
         }
         catch (Exception e)
         {
@@ -540,6 +537,149 @@ public static class ExportFunctions
         }
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_mapXmlToObject", CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static IntPtr MapXmlToObject(
+        IntPtr xmlPtr, 
+        IntPtr pFRENewObject, 
+        IntPtr pFRENewObjectFromBool, 
+        IntPtr pFRENewObjectFromInt32, 
+        IntPtr pFRENewObjectFromUint32, 
+        IntPtr pFRENewObjectFromDouble, 
+        IntPtr pFRENewObjectFromUTF8,
+        IntPtr pFRESetObjectProperty)
+    {
+        var result = IntPtr.Zero;
+        try
+        {
+            var xml = Marshal.PtrToStringUTF8(xmlPtr);
+            if (string.IsNullOrEmpty(xml)) return result;
+
+            var doc = XDocument.Parse(xml);
+            var root = doc.Root;
+
+            var freNewObject = Marshal.GetDelegateForFunctionPointer<FRENewObjectDelegate>(pFRENewObject);
+            var freNewFromBool = Marshal.GetDelegateForFunctionPointer<FRENewObjectFromBoolDelegate>(pFRENewObjectFromBool);
+            var freNewFromInt32 = Marshal.GetDelegateForFunctionPointer<FRENewObjectFromInt32Delegate>(pFRENewObjectFromInt32);
+            var freNewFromUint32 = Marshal.GetDelegateForFunctionPointer<FRENewObjectFromUint32Delegate>(pFRENewObjectFromUint32);
+            var freNewFromDouble = Marshal.GetDelegateForFunctionPointer<FRENewObjectFromDoubleDelegate>(pFRENewObjectFromDouble);
+            var freNewFromUtf8 = Marshal.GetDelegateForFunctionPointer<FRENewObjectFromUTF8Delegate>(pFRENewObjectFromUTF8);
+            var freSetProp = Marshal.GetDelegateForFunctionPointer<FRESetObjectPropertyDelegate>(pFRESetObjectProperty);
+
+            IntPtr Convert(XElement elem)
+            {
+                if (!elem.HasElements && !elem.HasAttributes)
+                {
+                    return ValueToFre(elem.Value.Trim(), freNewFromBool, freNewFromInt32, freNewFromUint32, freNewFromDouble, freNewFromUtf8);
+                }
+
+                var classPtr = Utf8Ptr("Object");
+                freNewObject(classPtr, 0, IntPtr.Zero, out var obj, out _);
+                Marshal.FreeHGlobal(classPtr);
+                if (obj == IntPtr.Zero) return IntPtr.Zero;
+
+                foreach (var attr in elem.Attributes())
+                {
+                    var namePtr = Utf8Ptr(attr.Name.LocalName);
+                    var valObj = ValueToFre(attr.Value, freNewFromBool, freNewFromInt32, freNewFromUint32, freNewFromDouble, freNewFromUtf8);
+                    freSetProp(obj, namePtr, valObj, out _);
+                    Marshal.FreeHGlobal(namePtr);
+                }
+
+                var groups = elem.Elements().GroupBy(e => e.Name.LocalName);
+                foreach (var g in groups)
+                {
+                    var propPtr = Utf8Ptr(g.Key);
+                    IntPtr propVal;
+                    if (g.Count() == 1)
+                    {
+                        propVal = Convert(g.First());
+                    }
+                    else
+                    {
+                        var arrClassPtr = Utf8Ptr("Array");
+                        IntPtr arr;
+                        freNewObject(arrClassPtr, 0, IntPtr.Zero, out arr, out _);
+                        Marshal.FreeHGlobal(arrClassPtr);
+                        if (arr == IntPtr.Zero) continue;
+
+                        uint idx = 0;
+                        foreach (var child in g)
+                        {
+                            var childObj = Convert(child);
+                            var idxPtr = Utf8Ptr(idx.ToString());
+                            freSetProp(arr, idxPtr, childObj, out _);
+                            Marshal.FreeHGlobal(idxPtr);
+                            idx++;
+                        }
+
+                        propVal = arr;
+                    }
+
+                    freSetProp(obj, propPtr, propVal, out _);
+                    Marshal.FreeHGlobal(propPtr);
+                }
+
+                return obj;
+            }
+
+            result = Convert(root);
+            return result;
+        }
+        catch (Exception e)
+        {
+            LogAll(e, _writeLogWrapper); // Assuming log function
+            return result;
+        }
+    }
+
+    private static IntPtr ValueToFre(string val, FRENewObjectFromBoolDelegate fromBool, FRENewObjectFromInt32Delegate fromInt, FRENewObjectFromUint32Delegate fromUint, FRENewObjectFromDoubleDelegate fromDouble,
+        FRENewObjectFromUTF8Delegate fromUtf8)
+    {
+        if (bool.TryParse(val, out var b))
+        {
+            IntPtr obj;
+            fromBool((uint)(b ? 1 : 0), out obj);
+            return obj;
+        }
+
+        if (int.TryParse(val, out var i))
+        {
+            IntPtr obj;
+            fromInt(i, out obj);
+            return obj;
+        }
+
+        if (uint.TryParse(val, out var u))
+        {
+            IntPtr obj;
+            fromUint(u, out obj);
+            return obj;
+        }
+
+        if (double.TryParse(val, out var d))
+        {
+            IntPtr obj;
+            fromDouble(d, out obj);
+            return obj;
+        }
+
+        var bytes = Encoding.UTF8.GetBytes(val);
+        var buf = Marshal.AllocHGlobal(bytes.Length);
+        Marshal.Copy(bytes, 0, buf, bytes.Length);
+        IntPtr strObj;
+        fromUtf8((uint)bytes.Length, buf, out strObj);
+        Marshal.FreeHGlobal(buf);
+        return strObj;
+    }
+
+    private static IntPtr Utf8Ptr(string s)
+    {
+        var bytes = Encoding.UTF8.GetBytes(s + '\0');
+        var ptr = Marshal.AllocHGlobal(bytes.Length);
+        Marshal.Copy(bytes, 0, ptr, bytes.Length);
+        return ptr;
+    }
+
     private static void LogAll(Exception exception, Action<string> callback)
     {
         if (exception == null)
@@ -563,6 +703,21 @@ public static class ExportFunctions
 
             // Call _writeLog once with the complete log string
             callback(logBuilder.ToString());
+        }
+        catch (Exception)
+        {
+            // ignored
+        }
+    }
+    private static void LogAll(string exception, Action<string> callback)
+    {
+        if (exception == null)
+            return;
+
+        try
+        {
+            // Call _writeLog once with the complete log string
+            callback(exception);
         }
         catch (Exception)
         {

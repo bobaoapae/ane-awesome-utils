@@ -290,7 +290,7 @@ public class AneAwesomeUtils {
         return _extContext.call("awesomeUtils_isPreventCaptureEnabled") as Boolean;
     }
 
-    public function filterWindowsInputs():Boolean {
+    public function filterWindowsInputs(filteredKeys:Array = null):Boolean {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
@@ -298,7 +298,7 @@ public class AneAwesomeUtils {
             trace("Warning: filterWindowsInputs is only supported on Windows.");
             return false;
         }
-        var result:Boolean = _extContext.call("awesomeUtils_filterWindowsInputs") as Boolean;
+        var result:Boolean = _extContext.call("awesomeUtils_filterWindowsInputs", filteredKeys) as Boolean;
         if (!result) {
             trace("Warning: filterWindowsInputs failed. This may not be supported on this platform or device.");
         }
@@ -317,6 +317,29 @@ public class AneAwesomeUtils {
         if (!result) {
             trace("Warning: stopWindowsFilterInputs failed. This may not be supported on this platform or device.");
         }
+        return result;
+    }
+
+    public function blockWindowsLeaveMouseEvent():Boolean {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsWindows()) {
+            trace("Warning: blockWindowsLeaveMouseEvent is only supported on Windows.");
+            return false;
+        }
+        var result:Boolean = _extContext.call("awesomeUtils_blockWindowsLeaveMouseEvent") as Boolean;
+        if (!result) {
+            trace("Warning: blockWindowsLeaveMouseEvent failed. This may not be supported on this platform or device.");
+        }
+        return result;
+    }
+
+    public function mapXmlToObject(xmlString:String):Object {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        var result:Object = _extContext.call("awesomeUtils_mapXmlToObject", xmlString);
         return result;
     }
 
