@@ -663,11 +663,12 @@ public static class ExportFunctions
             return obj;
         }
 
-        var bytes = Encoding.UTF8.GetBytes(val);
-        var buf = Marshal.AllocHGlobal(bytes.Length);
+        var bytes = Encoding.UTF8.GetBytes(val!);
+        var totalLength = bytes.Length + 1;
+        var buf = Marshal.AllocHGlobal(totalLength);
         Marshal.Copy(bytes, 0, buf, bytes.Length);
-        IntPtr strObj;
-        fromUtf8((uint)bytes.Length, buf, out strObj);
+        Marshal.WriteByte(buf + bytes.Length, 0);
+        fromUtf8((uint)totalLength, buf, out var strObj);
         Marshal.FreeHGlobal(buf);
         return strObj;
     }

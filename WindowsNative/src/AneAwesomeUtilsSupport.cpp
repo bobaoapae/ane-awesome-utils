@@ -97,7 +97,7 @@ static FREObject awesomeUtils_createWebSocket(FREContext ctx, void *funcData, ui
     writeLog("createWebSocket called");
     const char *idWebSocketPtr = csharpLibrary_awesomeUtils_createWebSocket();
     FREObject resultStr;
-    if (FRENewObjectFromUTF8(strlen(idWebSocketPtr), reinterpret_cast<const uint8_t *>(idWebSocketPtr), &resultStr) != FRE_OK) {
+    if (FRENewObjectFromUTF8(strlen(idWebSocketPtr) + 1, reinterpret_cast<const uint8_t *>(idWebSocketPtr), &resultStr) != FRE_OK) {
         writeLog("Failed to create string object");
         return nullptr;
     }
@@ -396,7 +396,7 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
     writeLog(("Result: " + resultString).c_str());
 
     FREObject resultStr;
-    if (FRENewObjectFromUTF8(resultString.length(), reinterpret_cast<const uint8_t *>(resultString.c_str()), &resultStr) != FRE_OK) {
+    if (FRENewObjectFromUTF8(resultString.length() + 1, reinterpret_cast<const uint8_t *>(resultString.c_str()), &resultStr) != FRE_OK) {
         writeLog("Failed to create string object");
         free(result);
         return nullptr;
@@ -515,7 +515,7 @@ static FREObject awesomeUtils_getDeviceUniqueId(FREContext ctx, void *funcData, 
     writeLog("getDeviceId called");
     const char *id = csharpLibrary_awesomeUtils_deviceUniqueId();
     FREObject resultStr;
-    if (FRENewObjectFromUTF8(strlen(id), reinterpret_cast<const uint8_t *>(id), &resultStr) != FRE_OK) {
+    if (FRENewObjectFromUTF8(strlen(id) + 1, reinterpret_cast<const uint8_t *>(id), &resultStr) != FRE_OK) {
         writeLog("Failed to create string object");
         free(const_cast<char *>(id));
         return nullptr;
