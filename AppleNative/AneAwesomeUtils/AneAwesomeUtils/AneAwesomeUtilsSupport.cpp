@@ -11,19 +11,19 @@ typedef void* NSWindow; // don't need this..
 
 constexpr int EXPORT_FUNCTIONS_COUNT = 15;
 static bool alreadyInitialized = false;
-static FRENamedFunction *exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
+static auto exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 static FREContext context;
-static std::mutex dispatchMutex; // Added for thread-safe dispatch
+static std::mutex dispatchMutex;
 
 static void dispatchWebSocketEvent(const char *guid, const char *code, const char *level) {
-    std::string fullCode = std::string("web-socket;") + code + std::string(";") + guid;
-    std::lock_guard<std::mutex> lock(dispatchMutex); // Lock for thread safety
+    std::string fullCode = std::string("web-socket;") + code + ";" + guid;
+    std::lock_guard lock(dispatchMutex);
     FREDispatchStatusEventAsync(context, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
 }
 
 static void dispatchUrlLoaderEvent(const char *guid, const char *code, const char *level) {
-    std::string fullCode = std::string("url-loader;") + code + std::string(";") + guid;
-    std::lock_guard<std::mutex> lock(dispatchMutex); // Lock for thread safety
+    std::string fullCode = std::string("url-loader;") + code + ";" + guid;
+    std::lock_guard lock(dispatchMutex);
     FREDispatchStatusEventAsync(context, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
 }
 
@@ -39,41 +39,31 @@ static void __cdecl webSocketDataCallBack(char *guid) {
 
 static void __cdecl webSocketErrorCallBack(char *guid, int closeCode, const char *reason, int responseCode, const char *headersEncoded) {
     writeLog("disconnectCallback called");
-
-    auto closeCodeReason = std::to_string(closeCode) + ";" + std::string(reason) + ";" + std::to_string(responseCode) + ";" + std::string(headersEncoded);
-
+    std::string closeCodeReason = std::to_string(closeCode) + ";" + std::string(reason) + ";" + std::to_string(responseCode) + ";" + std::string(headersEncoded);
     writeLog(closeCodeReason.c_str());
-
     dispatchWebSocketEvent(guid, "disconnected", closeCodeReason.c_str());
 }
 
 static void __cdecl urlLoaderSuccessCallBack(const char *id) {
     writeLog("Calling SuccessCallback");
-
-    // Prepare data outside the lock to minimize locked duration
     std::string id_str(id);
-
     writeLog(("ID: " + id_str).c_str());
-
     dispatchUrlLoaderEvent(id_str.c_str(), "success", "");
-
-    // Notify and log the success event outside the lock
     writeLog("Dispatched success event");
 }
 
 static void __cdecl urlLoaderProgressCallBack(const char *id, const char *message) {
-    dispatchUrlLoaderEvent(std::string(id).c_str(), "progress", message);
+    dispatchUrlLoaderEvent(id, "progress", message);
 }
 
 static void __cdecl urlLoaderErrorCallBack(const char *id, const char *message) {
-    dispatchUrlLoaderEvent(std::string(id).c_str(), "error", message);
+    dispatchUrlLoaderEvent(id, "error", message);
 }
 
 static void writeLogCallback(const char *message) {
     writeLog(message);
 }
 
-// Exported functions:
 static FREObject awesomeUtils_initialize(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("initialize called");
     auto initResult = csharpLibrary_awesomeUtils_initialize(
@@ -97,11 +87,18 @@ static FREObject awesomeUtils_initialize(FREContext ctx, void *funcData, uint32_
 static FREObject awesomeUtils_createWebSocket(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("createWebSocket called");
     const char *idWebSocketPtr = csharpLibrary_awesomeUtils_createWebSocket();
-    FREObject resultStr;
-    if (FRENewObjectFromUTF8(strlen(idWebSocketPtr) + 1, reinterpret_cast<const uint8_t *>(idWebSocketPtr), &resultStr) != FRE_OK) {
-        writeLog("Failed to create string object");
+    if (!idWebSocketPtr) {
+        writeLog("createWebSocket returned null");
         return nullptr;
     }
+    FREObject resultStr;
+    auto len = strlen(idWebSocketPtr);
+    if (FRENewObjectFromUTF8(len, reinterpret_cast<const uint8_t *>(idWebSocketPtr), &resultStr) != FRE_OK) {
+        writeLog("Failed to create string object");
+        free(const_cast<char *>(idWebSocketPtr));
+        return nullptr;
+    }
+    free(const_cast<char *>(idWebSocketPtr));
     return resultStr;
 }
 
@@ -109,7 +106,6 @@ static FREObject awesomeUtils_connectWebSocket(FREContext ctx, void *funcData, u
     writeLog("connectWebSocket called");
     if (argc < 2) return nullptr;
 
-    // Added type check
     FREObjectType idType;
     if (FREGetObjectType(argv[0], &idType) != FRE_OK || idType != FRE_TYPE_STRING) {
         writeLog("Invalid id type");
@@ -119,11 +115,10 @@ static FREObject awesomeUtils_connectWebSocket(FREContext ctx, void *funcData, u
     uint32_t idLength;
     const uint8_t *id;
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
-    char *idChar = new char[idLength + 1];
+    auto idChar = new char[idLength + 1];
     memcpy(idChar, id, idLength);
     idChar[idLength] = '\0';
 
-    // Added type check
     FREObjectType uriType;
     if (FREGetObjectType(argv[1], &uriType) != FRE_OK || uriType != FRE_TYPE_STRING) {
         writeLog("Invalid uri type");
@@ -134,7 +129,7 @@ static FREObject awesomeUtils_connectWebSocket(FREContext ctx, void *funcData, u
     uint32_t uriLength;
     const uint8_t *uri;
     FREGetObjectAsUTF8(argv[1], &uriLength, &uri);
-    char *uriChar = new char[uriLength + 1];
+    auto uriChar = new char[uriLength + 1];
     memcpy(uriChar, uri, uriLength);
     uriChar[uriLength] = '\0';
 
@@ -142,7 +137,6 @@ static FREObject awesomeUtils_connectWebSocket(FREContext ctx, void *funcData, u
     const uint8_t *headers = nullptr;
     char *headersChar = nullptr;
     if (argc > 2) {
-        // Added type check
         FREObjectType headersType;
         if (FREGetObjectType(argv[2], &headersType) != FRE_OK || headersType != FRE_TYPE_STRING) {
             writeLog("Invalid headers type");
@@ -175,7 +169,6 @@ static FREObject awesomeUtils_closeWebSocket(FREContext ctx, void *funcData, uin
     writeLog("closeWebSocket called");
     if (argc < 1) return nullptr;
 
-    // Added type check
     FREObjectType idType;
     if (FREGetObjectType(argv[0], &idType) != FRE_OK || idType != FRE_TYPE_STRING) {
         writeLog("Invalid id type");
@@ -185,13 +178,12 @@ static FREObject awesomeUtils_closeWebSocket(FREContext ctx, void *funcData, uin
     uint32_t idLength;
     const uint8_t *id;
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
-    char *idChar = new char[idLength + 1];
+    auto idChar = new char[idLength + 1];
     memcpy(idChar, id, idLength);
     idChar[idLength] = '\0';
 
-    uint32_t closeCode = 1000; // Default close code
+    uint32_t closeCode = 1000;
     if (argc > 1) {
-        // Added type check
         FREObjectType codeType;
         if (FREGetObjectType(argv[1], &codeType) != FRE_OK || codeType != FRE_TYPE_NUMBER) {
             writeLog("Invalid closeCode type");
@@ -215,7 +207,6 @@ static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcDat
     writeLog("sendMessageWebSocket called");
     if (argc < 3) return nullptr;
 
-    // Added type check
     FREObjectType idType;
     if (FREGetObjectType(argv[0], &idType) != FRE_OK || idType != FRE_TYPE_STRING) {
         writeLog("Invalid id type");
@@ -225,11 +216,10 @@ static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcDat
     uint32_t idLength;
     const uint8_t *id;
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
-    char *idChar = new char[idLength + 1];
+    auto idChar = new char[idLength + 1];
     memcpy(idChar, id, idLength);
     idChar[idLength] = '\0';
 
-    // Added type check
     FREObjectType typeType;
     if (FREGetObjectType(argv[1], &typeType) != FRE_OK || typeType != FRE_TYPE_NUMBER) {
         writeLog("Invalid messageType type");
@@ -252,10 +242,9 @@ static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcDat
     }
 
     if (objectType == FRE_TYPE_STRING) {
-        // Implement string message or handle error
         writeLog("String message not implemented");
         delete[] idChar;
-        return nullptr; // Or dispatch error event
+        return nullptr;
     } else if (objectType == FRE_TYPE_BYTEARRAY) {
         FREByteArray byteArray;
         if (FREAcquireByteArray(argv[2], &byteArray) != FRE_OK) {
@@ -279,10 +268,8 @@ static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcDat
 
 static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("getByteArrayMessage called");
-
     if (argc < 1) return nullptr;
 
-    // Added type check
     FREObjectType idType;
     if (FREGetObjectType(argv[0], &idType) != FRE_OK || idType != FRE_TYPE_STRING) {
         writeLog("Invalid id type");
@@ -292,7 +279,7 @@ static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void 
     uint32_t idLength;
     const uint8_t *id;
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
-    char *idChar = new char[idLength + 1];
+    auto idChar = new char[idLength + 1];
     memcpy(idChar, id, idLength);
     idChar[idLength] = '\0';
 
@@ -300,33 +287,47 @@ static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void 
 
     delete[] idChar;
 
-    if (nextMessageResult.Size == 0) {
+    if (nextMessageResult.Size == 0 || nextMessageResult.DataPointer == nullptr) {
         writeLog("no messages found");
-        // DataPointer should be null, safe to skip free
         return nullptr;
     }
 
     FREObject byteArrayObject;
-    FREByteArray byteArray;
-    byteArray.length = nextMessageResult.Size;
-    byteArray.bytes = nextMessageResult.DataPointer;
-
-    if (FRENewByteArray(&byteArray, &byteArrayObject) != FRE_OK) {
-        writeLog("Failed to create byte array");
+    if (FRENewObject(reinterpret_cast<const uint8_t *>("flash.utils::ByteArray"), 0, nullptr, &byteArrayObject, nullptr) != FRE_OK) {
+        writeLog("Failed to create ByteArray");
         free(nextMessageResult.DataPointer);
         return nullptr;
     }
 
-    free(nextMessageResult.DataPointer);
+    FREObject length;
+    if (FRENewObjectFromUint32(nextMessageResult.Size, &length) != FRE_OK) {
+        writeLog("Failed to create length object");
+        free(nextMessageResult.DataPointer);
+        return nullptr;
+    }
+    if (FRESetObjectProperty(byteArrayObject, reinterpret_cast<const uint8_t *>("length"), length, nullptr) != FRE_OK) {
+        writeLog("Failed to set length property");
+        free(nextMessageResult.DataPointer);
+        return nullptr;
+    }
 
+    FREByteArray ba;
+    if (FREAcquireByteArray(byteArrayObject, &ba) != FRE_OK) {
+        writeLog("Failed to acquire target byte array");
+        free(nextMessageResult.DataPointer);
+        return nullptr;
+    }
+    memcpy(ba.bytes, nextMessageResult.DataPointer, nextMessageResult.Size);
+    FREReleaseByteArray(byteArrayObject);
+
+    free(nextMessageResult.DataPointer);
     return byteArrayObject;
 }
 
 static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("Calling loadUrl");
-    if (argc < 4) return nullptr; // Added argc check
+    if (argc < 4) return nullptr;
 
-    // Added type checks
     FREObjectType urlType;
     if (FREGetObjectType(argv[0], &urlType) != FRE_OK || urlType != FRE_TYPE_STRING) {
         writeLog("Invalid url type");
@@ -351,7 +352,7 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
     uint32_t urlLength;
     const uint8_t *url;
     FREGetObjectAsUTF8(argv[0], &urlLength, &url);
-    char *urlChar = new char[urlLength + 1];
+    auto urlChar = new char[urlLength + 1];
     memcpy(urlChar, url, urlLength);
     urlChar[urlLength] = '\0';
     writeLog(("URL: " + std::string(urlChar)).c_str());
@@ -359,7 +360,7 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
     uint32_t methodLength;
     const uint8_t *method;
     FREGetObjectAsUTF8(argv[1], &methodLength, &method);
-    char *methodChar = new char[methodLength + 1];
+    auto methodChar = new char[methodLength + 1];
     memcpy(methodChar, method, methodLength);
     methodChar[methodLength] = '\0';
     writeLog(("Method: " + std::string(methodChar)).c_str());
@@ -367,7 +368,7 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
     uint32_t variableLength;
     const uint8_t *variable;
     FREGetObjectAsUTF8(argv[2], &variableLength, &variable);
-    char *variableChar = new char[variableLength + 1];
+    auto variableChar = new char[variableLength + 1];
     memcpy(variableChar, variable, variableLength);
     variableChar[variableLength] = '\0';
     writeLog(("Variable: " + std::string(variableChar)).c_str());
@@ -375,7 +376,7 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
     uint32_t headersLength;
     const uint8_t *headers;
     FREGetObjectAsUTF8(argv[3], &headersLength, &headers);
-    char *headersChar = new char[headersLength + 1];
+    auto headersChar = new char[headersLength + 1];
     memcpy(headersChar, headers, headersLength);
     headersChar[headersLength] = '\0';
     writeLog(("Headers: " + std::string(headersChar)).c_str());
@@ -392,12 +393,12 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
         return nullptr;
     }
 
-    auto resultString = std::string(result);
-
+    std::string resultString(result);
     writeLog(("Result: " + resultString).c_str());
 
     FREObject resultStr;
-    if (FRENewObjectFromUTF8(resultString.length() + 1, reinterpret_cast<const uint8_t *>(resultString.c_str()), &resultStr) != FRE_OK) {
+    uint32_t len = resultString.length();
+    if (FRENewObjectFromUTF8(len, reinterpret_cast<const uint8_t *>(resultString.c_str()), &resultStr) != FRE_OK) {
         writeLog("Failed to create string object");
         free(result);
         return nullptr;
@@ -408,9 +409,8 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
 
 static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData, uint32_t argc, FREObject argv[]) {
     writeLog("Calling getResult");
-    if (argc < 1) return nullptr; // Added argc check
+    if (argc < 1) return nullptr;
 
-    // Added type check
     FREObjectType uuidType;
     if (FREGetObjectType(argv[0], &uuidType) != FRE_OK || uuidType != FRE_TYPE_STRING) {
         writeLog("Invalid uuid type");
@@ -420,7 +420,7 @@ static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData
     uint32_t uuidLength;
     const uint8_t *uuid;
     FREGetObjectAsUTF8(argv[0], &uuidLength, &uuid);
-    char *uuidChar = new char[uuidLength + 1];
+    auto uuidChar = new char[uuidLength + 1];
     memcpy(uuidChar, uuid, uuidLength);
     uuidChar[uuidLength] = '\0';
 
@@ -428,18 +428,39 @@ static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData
 
     delete[] uuidChar;
 
-    FREObject byteArrayObject = nullptr;
-    if (result.Size > 0) {
-        FREByteArray byteArray;
-        byteArray.length = result.Size;
-        byteArray.bytes = result.DataPointer;
-        if (FRENewByteArray(&byteArray, &byteArrayObject) != FRE_OK) {
-            writeLog("Failed to create byte array");
-            free(result.DataPointer);
-            return nullptr;
-        }
-        free(result.DataPointer);
+    if (result.Size == 0 || result.DataPointer == nullptr) {
+        return nullptr;
     }
+
+    FREObject byteArrayObject;
+    if (FRENewObject(reinterpret_cast<const uint8_t *>("flash.utils::ByteArray"), 0, nullptr, &byteArrayObject, nullptr) != FRE_OK) {
+        writeLog("Failed to create ByteArray");
+        free(result.DataPointer);
+        return nullptr;
+    }
+
+    FREObject length;
+    if (FRENewObjectFromUint32(result.Size, &length) != FRE_OK) {
+        writeLog("Failed to create length object");
+        free(result.DataPointer);
+        return nullptr;
+    }
+    if (FRESetObjectProperty(byteArrayObject, reinterpret_cast<const uint8_t *>("length"), length, nullptr) != FRE_OK) {
+        writeLog("Failed to set length property");
+        free(result.DataPointer);
+        return nullptr;
+    }
+
+    FREByteArray byteArray;
+    if (FREAcquireByteArray(byteArrayObject, &byteArray) != FRE_OK) {
+        writeLog("Failed to acquire byte array");
+        free(result.DataPointer);
+        return nullptr;
+    }
+    memcpy(byteArray.bytes, result.DataPointer, result.Size);
+    FREReleaseByteArray(byteArrayObject);
+
+    free(result.DataPointer);
     return byteArrayObject;
 }
 
@@ -447,7 +468,6 @@ static FREObject awesomeUtils_addStaticHost(FREContext ctx, void *funcData, uint
     writeLog("addStaticHost called");
     if (argc < 2) return nullptr;
 
-    // Added type checks
     FREObjectType hostType;
     if (FREGetObjectType(argv[0], &hostType) != FRE_OK || hostType != FRE_TYPE_STRING) {
         writeLog("Invalid host type");
@@ -462,14 +482,14 @@ static FREObject awesomeUtils_addStaticHost(FREContext ctx, void *funcData, uint
     uint32_t hostLength;
     const uint8_t *host;
     FREGetObjectAsUTF8(argv[0], &hostLength, &host);
-    char *hostChar = new char[hostLength + 1];
+    auto hostChar = new char[hostLength + 1];
     memcpy(hostChar, host, hostLength);
     hostChar[hostLength] = '\0';
 
     uint32_t ipLength;
     const uint8_t *ip;
     FREGetObjectAsUTF8(argv[1], &ipLength, &ip);
-    char *ipChar = new char[ipLength + 1];
+    auto ipChar = new char[ipLength + 1];
     memcpy(ipChar, ip, ipLength);
     ipChar[ipLength] = '\0';
 
@@ -489,7 +509,6 @@ static FREObject awesomeUtils_removeStaticHost(FREContext ctx, void *funcData, u
     writeLog("removeStaticHost called");
     if (argc < 1) return nullptr;
 
-    // Added type check
     FREObjectType hostType;
     if (FREGetObjectType(argv[0], &hostType) != FRE_OK || hostType != FRE_TYPE_STRING) {
         writeLog("Invalid host type");
@@ -499,7 +518,7 @@ static FREObject awesomeUtils_removeStaticHost(FREContext ctx, void *funcData, u
     uint32_t hostLength;
     const uint8_t *host;
     FREGetObjectAsUTF8(argv[0], &hostLength, &host);
-    char *hostChar = new char[hostLength + 1];
+    auto hostChar = new char[hostLength + 1];
     memcpy(hostChar, host, hostLength);
     hostChar[hostLength] = '\0';
 
@@ -514,15 +533,25 @@ static FREObject awesomeUtils_removeStaticHost(FREContext ctx, void *funcData, u
 
 static FREObject awesomeUtils_getDeviceUniqueId(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("getDeviceId called");
+#if TARGET_OS_IOS
+    const char* uniqueIdCString = getDeviceUniqueId();
+    
+    FREObject freUniqueId;
+    FRENewObjectFromUTF8((uint32_t)strlen(uniqueIdCString) + 1, (const uint8_t*)uniqueIdCString, &freUniqueId);
+    return freUniqueId;
+#else
     const char *id = csharpLibrary_awesomeUtils_deviceUniqueId();
+    if (!id) return nullptr;
     FREObject resultStr;
-    if (FRENewObjectFromUTF8(strlen(id) + 1, reinterpret_cast<const uint8_t *>(id), &resultStr) != FRE_OK) {
+    auto len = strlen(id);
+    if (FRENewObjectFromUTF8(len, reinterpret_cast<const uint8_t *>(id), &resultStr) != FRE_OK) {
         writeLog("Failed to create string object");
         free(const_cast<char *>(id));
         return nullptr;
     }
     free(const_cast<char *>(id));
     return resultStr;
+#endif
 }
 
 static FREObject awesomeUtils_isRunningOnEmulator(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
@@ -540,7 +569,6 @@ static FREObject awesomeUtils_decompressByteArray(FREContext ctx, void *funcData
     writeLog("decompressByteArray called");
     if (argc < 2) return nullptr;
 
-    // Added type checks
     FREObjectType inType;
     if (FREGetObjectType(argv[0], &inType) != FRE_OK || inType != FRE_TYPE_BYTEARRAY) {
         writeLog("Invalid input byte array type");
@@ -560,9 +588,8 @@ static FREObject awesomeUtils_decompressByteArray(FREContext ctx, void *funcData
     auto result = csharpLibrary_awesomeUtils_decompressByteArray(inBA.bytes, static_cast<int>(inBA.length));
     FREReleaseByteArray(argv[0]);
 
-    if (result.Size == 0) {
+    if (result.Size == 0 || result.DataPointer == nullptr) {
         writeLog("no decompressed data found");
-        // DataPointer is null, no free needed
         return nullptr;
     }
 
@@ -595,7 +622,6 @@ static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData
     writeLog("readFileToByteArray called");
     if (argc < 2) return nullptr;
 
-    // Added type checks
     FREObjectType pathType;
     if (FREGetObjectType(argv[0], &pathType) != FRE_OK || pathType != FRE_TYPE_STRING) {
         writeLog("Invalid file path type");
@@ -610,7 +636,7 @@ static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData
     uint32_t filePathLength;
     const uint8_t *filePath;
     FREGetObjectAsUTF8(argv[0], &filePathLength, &filePath);
-    char *filePathChar = new char[filePathLength + 1];
+    auto filePathChar = new char[filePathLength + 1];
     memcpy(filePathChar, filePath, filePathLength);
     filePathChar[filePathLength] = '\0';
     writeLog("Calling readFileToByteArray with filePath: ");
@@ -620,9 +646,8 @@ static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData
 
     delete[] filePathChar;
 
-    if (result.Size == 0) {
-        writeLog("no file data found"); // Fixed log message
-        // DataPointer is null, no free needed
+    if (result.Size == 0 || result.DataPointer == nullptr) {
+        writeLog("no file data found");
         return nullptr;
     }
 
@@ -632,7 +657,7 @@ static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData
         free(result.DataPointer);
         return nullptr;
     }
-    if (FRESetObjectProperty(argv[1], (const uint8_t *) "length", length, nullptr) != FRE_OK) {
+    if (FRESetObjectProperty(argv[1], reinterpret_cast<const uint8_t *>("length"), length, nullptr) != FRE_OK) {
         writeLog("Failed to set length property");
         free(result.DataPointer);
         return nullptr;
@@ -654,7 +679,6 @@ static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData
 static FREObject awesomeUtils_mapXmlToObject(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     if (argc < 1) return nullptr;
 
-    // Added type check
     FREObjectType xmlType;
     if (FREGetObjectType(argv[0], &xmlType) != FRE_OK || xmlType != FRE_TYPE_STRING) {
         writeLog("Invalid xml type");
@@ -665,8 +689,7 @@ static FREObject awesomeUtils_mapXmlToObject(FREContext ctx, void *funcData, uin
     const uint8_t *xml;
     FREGetObjectAsUTF8(argv[0], &xmlLength, &xml);
 
-    // Allocate null-terminated buffer
-    char *xmlChar = new char[xmlLength + 1];
+    auto xmlChar = new char[xmlLength + 1];
     memcpy(xmlChar, xml, xmlLength);
     xmlChar[xmlLength] = '\0';
 
@@ -731,11 +754,11 @@ static void AneAwesomeUtilsSupportInitializer(
 }
 
 static void AneAwesomeUtilsSupportFinalizer(FREContext ctx) {
+    csharpLibrary_awesomeUtils_finalize();
 }
 
 extern "C" {
-__attribute__ ((visibility ("default")))
-void InitExtension(void** extDataToSet, FREContextInitializer* ctxInitializerToSet, FREContextFinalizer* ctxFinalizerToSet) {
+__attribute__((visibility("default"))) void InitExtension(void **extDataToSet, FREContextInitializer *ctxInitializerToSet, FREContextFinalizer *ctxFinalizerToSet) {
     writeLog("InitExtension called");
     if (extDataToSet) *extDataToSet = nullptr;
     if (ctxInitializerToSet) *ctxInitializerToSet = AneAwesomeUtilsSupportInitializer;
@@ -743,9 +766,9 @@ void InitExtension(void** extDataToSet, FREContextInitializer* ctxInitializerToS
     writeLog("InitExtension completed");
 }
 
-__attribute__ ((visibility ("default")))
-void DestroyExtension(void* extData) {
+__attribute__((visibility("default"))) void DestroyExtension(void *extData) {
     writeLog("DestroyExtension called");
+    delete[] exportedFunctions;
     closeLog();
 }
-} // end of extern "C"
+}

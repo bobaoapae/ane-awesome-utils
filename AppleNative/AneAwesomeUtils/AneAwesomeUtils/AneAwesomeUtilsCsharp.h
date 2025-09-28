@@ -15,6 +15,7 @@ extern "C" {
                                                       const void *webSocketErrorCallBack,
                                                       const void *webSocketDataCallBack,
                                                       const void *writeLogCallBack);
+    void __cdecl csharpLibrary_awesomeUtils_finalize();
     char* __cdecl csharpLibrary_awesomeUtils_deviceUniqueId();
     char* __cdecl csharpLibrary_awesomeUtils_loadUrl(const char* url, const char* method, const char* variables, const char* headers);
     DataArray __cdecl csharpLibrary_awesomeUtils_getLoaderResult(const void* guidPointer);
