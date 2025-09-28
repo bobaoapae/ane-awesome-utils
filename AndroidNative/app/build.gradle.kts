@@ -38,5 +38,7 @@ dependencies {
     api(libs.appcompat)
     api(libs.sentry.android)
     api(libs.dnsjava)
+    api(libs.fastXml)
+    api(libs.staxApi)
     compileOnly(files("C:/AIRSdks/AIRSDK_51.1.3.10/lib/android/FlashRuntimeExtensions.jar"))
 }

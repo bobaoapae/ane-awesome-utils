@@ -98,6 +98,18 @@ public class AneAwesomeUtils {
         return result;
     }
 
+    public function dispose():void {
+        if (_extContext) {
+            _extContext.removeEventListener("status", onStatusEvent);
+            _extContext.dispose();
+            _extContext = null;
+        }
+        _websockets = null;
+        _loaders = null;
+        _successInit = false;
+        _logging = null;
+    }
+
     private function getWebSocket(id:String):AneWebSocket {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");

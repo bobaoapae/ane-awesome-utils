@@ -104,28 +104,22 @@ public static class ExportFunctions
             _writeLogWrapper = message =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(message);
-
                 _writeLogCallBackDelegate(ptr1);
-
                 SafeFreeCoTaskMem(ptr1);
             };
 
-            _urlLoaderSuccessWrapper = (guid) =>
+            _urlLoaderSuccessWrapper = guid =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-
                 _urlLoaderSuccessCallBackDelegate(ptr1);
-
                 SafeFreeCoTaskMem(ptr1);
             };
 
             _urlLoaderFailureWrapper = (guid, error) =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(error.ToString());
-
+                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(error ?? string.Empty);
                 _urlLoaderFailureCallBackDelegate(ptr1, ptr2);
-
                 SafeFreeCoTaskMem(ptr1);
                 SafeFreeCoTaskMem(ptr2);
             };
@@ -133,10 +127,8 @@ public static class ExportFunctions
             _urlLoaderProgressWrapper = (guid, progress) =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(progress.ToString());
-
+                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(progress ?? string.Empty);
                 _urlLoaderProgressCallBackDelegate(ptr1, ptr2);
-
                 SafeFreeCoTaskMem(ptr1);
                 SafeFreeCoTaskMem(ptr2);
             };
@@ -144,10 +136,8 @@ public static class ExportFunctions
             _webSocketConnectWrapper = (guid, headers) =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(headers);
-
+                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(headers ?? string.Empty);
                 _webSocketConnectCallBackDelegate(ptr1, ptr2);
-
                 SafeFreeCoTaskMem(ptr1);
                 SafeFreeCoTaskMem(ptr2);
             };
@@ -155,22 +145,18 @@ public static class ExportFunctions
             _webSocketErrorWrapper = (guid, errorCode, error, responseCode, headersEncoded) =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(error);
-                IntPtr ptr3 = Marshal.StringToCoTaskMemAnsi(headersEncoded);
-
+                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(error ?? string.Empty);
+                IntPtr ptr3 = Marshal.StringToCoTaskMemAnsi(headersEncoded ?? string.Empty);
                 _webSocketErrorCallBackDelegate(ptr1, errorCode, ptr2, responseCode, ptr3);
-
                 SafeFreeCoTaskMem(ptr1);
                 SafeFreeCoTaskMem(ptr2);
                 SafeFreeCoTaskMem(ptr3);
             };
 
-            _webSocketDataWrapper = (guid) =>
+            _webSocketDataWrapper = guid =>
             {
                 IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-
                 _webSocketDataCallBackDelegate(ptr1);
-
                 SafeFreeCoTaskMem(ptr1);
             };
         }
@@ -191,6 +177,15 @@ public static class ExportFunctions
         return 1;
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_finalize", CallConvs = [typeof(CallConvCdecl)])]
+    public static void FinalizeAne()
+    {
+        foreach (var (_, ws) in WebSocketClients.ToList())
+        {
+            ws.Disconnect(1000);
+        }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_uuid", CallConvs = [typeof(CallConvCdecl)])]
     public static IntPtr GetUuid()
     {
@@ -209,7 +204,7 @@ public static class ExportFunctions
         var lockError = new Lock();
 
         var webSocketClient = new WebSocketClient(
-            (responseHeaders) =>
+            responseHeaders =>
             {
                 var headersEncoded64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString)));
                 _webSocketConnectWrapper(guidString, headersEncoded64);
@@ -223,7 +218,6 @@ public static class ExportFunctions
                         return;
                     var headersEncoded64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString)));
                     _webSocketErrorWrapper(guidString, errorCode, error, responseCode, headersEncoded64);
-                    SafeFreeCoTaskMem(stringPtr);
                     if (WebSocketClients.TryRemove(guid, out var removed))
                         removed.Dispose();
                     alreadyDispatchError = true;
@@ -351,10 +345,8 @@ public static class ExportFunctions
             }
 
             result.Size = message.Length;
-
-            result.DataPointer = Marshal.AllocHGlobal(result.Size);
+            result.DataPointer = Marshal.AllocCoTaskMem(result.Size);
             Marshal.Copy(message, 0, result.DataPointer, result.Size);
-
             return result;
         }
         catch (Exception e)
@@ -371,12 +363,10 @@ public static class ExportFunctions
         {
             var host = Marshal.PtrToStringAnsi(hostPtr);
             var ip = Marshal.PtrToStringAnsi(ipPtr);
-
             DnsInternalResolver.Instance.AddStaticHost(host, ip);
         }
         catch
         {
-            // ignored
         }
     }
 
@@ -386,12 +376,10 @@ public static class ExportFunctions
         try
         {
             var host = Marshal.PtrToStringAnsi(hostPtr);
-
             DnsInternalResolver.Instance.RemoveStaticHost(host);
         }
         catch
         {
-            // ignored
         }
     }
 
@@ -411,8 +399,9 @@ public static class ExportFunctions
             var randomId = LoaderManager.Instance.StartLoad(url, method, variablesDictionary, headersDictionary);
             return Marshal.StringToCoTaskMemAnsi(randomId);
         }
-        catch
+        catch (Exception e)
         {
+            LogAll(e, _writeLogWrapper);
             return IntPtr.Zero;
         }
     }
@@ -437,10 +426,8 @@ public static class ExportFunctions
             }
 
             result.Size = data.Length;
-
-            result.DataPointer = Marshal.AllocHGlobal(result.Size);
+            result.DataPointer = Marshal.AllocCoTaskMem(result.Size);
             Marshal.Copy(data, 0, result.DataPointer, result.Size);
-
             return result;
         }
         catch (Exception e)
@@ -455,7 +442,8 @@ public static class ExportFunctions
     {
         try
         {
-            return Marshal.StringToHGlobalAnsi(HardwareID.GetDeviceUniqueIdHash(e => LogAll(e, _writeLogWrapper)));
+            var s = HardwareID.GetDeviceUniqueIdHash(e => LogAll(e, _writeLogWrapper));
+            return Marshal.StringToCoTaskMemAnsi(s);
         }
         catch
         {
@@ -484,15 +472,12 @@ public static class ExportFunctions
 
         try
         {
-            // cria um stream que lê direto de data
             using var srcStream = new UnmanagedMemoryStream((byte*)data.ToPointer(), length);
-            // chama a nova sobrecarga
             using var ms = CompressUtil.Uncompress(srcStream);
 
             result.Size = (int)ms.Length;
-            result.DataPointer = Marshal.AllocHGlobal(result.Size);
-            // copiar do MemoryStream para unmanaged
-            var buffer = ms.GetBuffer(); // não aloca: retorna o array interno
+            result.DataPointer = Marshal.AllocCoTaskMem(result.Size);
+            var buffer = ms.GetBuffer();
             Marshal.Copy(buffer, 0, result.DataPointer, result.Size);
 
             return result;
@@ -523,9 +508,8 @@ public static class ExportFunctions
             fs.CopyTo(ms);
 
             result.Size = (int)ms.Length;
-            result.DataPointer = Marshal.AllocHGlobal(result.Size);
-            // copiar do MemoryStream para unmanaged
-            var buffer = ms.GetBuffer(); // não aloca: retorna o array interno
+            result.DataPointer = Marshal.AllocCoTaskMem(result.Size);
+            var buffer = ms.GetBuffer();
             Marshal.Copy(buffer, 0, result.DataPointer, result.Size);
 
             return result;
@@ -539,12 +523,12 @@ public static class ExportFunctions
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_mapXmlToObject", CallConvs = new[] { typeof(CallConvCdecl) })]
     public static IntPtr MapXmlToObject(
-        IntPtr xmlPtr, 
-        IntPtr pFRENewObject, 
-        IntPtr pFRENewObjectFromBool, 
-        IntPtr pFRENewObjectFromInt32, 
-        IntPtr pFRENewObjectFromUint32, 
-        IntPtr pFRENewObjectFromDouble, 
+        IntPtr xmlPtr,
+        IntPtr pFRENewObject,
+        IntPtr pFRENewObjectFromBool,
+        IntPtr pFRENewObjectFromInt32,
+        IntPtr pFRENewObjectFromUint32,
+        IntPtr pFRENewObjectFromDouble,
         IntPtr pFRENewObjectFromUTF8,
         IntPtr pFRESetObjectProperty)
     {
@@ -627,7 +611,7 @@ public static class ExportFunctions
         }
         catch (Exception e)
         {
-            LogAll(e, _writeLogWrapper); // Assuming log function
+            LogAll(e, _writeLogWrapper);
             return result;
         }
     }
@@ -663,12 +647,11 @@ public static class ExportFunctions
             return obj;
         }
 
-        var bytes = Encoding.UTF8.GetBytes(val!);
-        var totalLength = bytes.Length + 1;
-        var buf = Marshal.AllocHGlobal(totalLength);
+        var bytes = Encoding.UTF8.GetBytes(val ?? string.Empty);
+        var buf = Marshal.AllocHGlobal(bytes.Length + 1);
         Marshal.Copy(bytes, 0, buf, bytes.Length);
         Marshal.WriteByte(buf + bytes.Length, 0);
-        fromUtf8((uint)totalLength, buf, out var strObj);
+        fromUtf8((uint)bytes.Length, buf, out var strObj);
         Marshal.FreeHGlobal(buf);
         return strObj;
     }
@@ -689,11 +672,8 @@ public static class ExportFunctions
         try
         {
             var logBuilder = new StringBuilder();
-
-            // Log the main exception
             logBuilder.AppendLine($"Exception: {exception.Message}");
             logBuilder.AppendLine($"Stack Trace: {exception.StackTrace}");
-
             var inner = exception.InnerException;
             while (inner != null)
             {
@@ -702,14 +682,13 @@ public static class ExportFunctions
                 inner = inner.InnerException;
             }
 
-            // Call _writeLog once with the complete log string
             callback(logBuilder.ToString());
         }
-        catch (Exception)
+        catch
         {
-            // ignored
         }
     }
+
     private static void LogAll(string exception, Action<string> callback)
     {
         if (exception == null)
@@ -717,12 +696,10 @@ public static class ExportFunctions
 
         try
         {
-            // Call _writeLog once with the complete log string
             callback(exception);
         }
-        catch (Exception)
+        catch
         {
-            // ignored
         }
     }
 
@@ -730,11 +707,11 @@ public static class ExportFunctions
     {
         try
         {
-            Marshal.FreeCoTaskMem(ptr);
+            if (ptr != IntPtr.Zero)
+                Marshal.FreeCoTaskMem(ptr);
         }
         catch
         {
-            //ignored
         }
     }
 }

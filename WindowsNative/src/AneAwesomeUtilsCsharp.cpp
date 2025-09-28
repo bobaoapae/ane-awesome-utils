@@ -8,8 +8,10 @@
 #include <string>
 #include <Windows.h>
 #include <log.h>
+#include <unordered_map>
 // Use a unique_ptr with a custom deleter to manage the library handle
 static std::unique_ptr<std::remove_pointer<HMODULE>::type, decltype(&FreeLibrary)> library(nullptr, FreeLibrary);
+static std::unordered_map<std::string, void *> functionCache;
 
 std::string GetLibraryLocation(int argc, char *argv[]) {
     std::string baseDirectory;
@@ -65,6 +67,12 @@ bool loadNativeLibrary() {
 }
 
 void *getFunctionPointer(const char *functionName) {
+    std::string name(functionName);
+    auto it = functionCache.find(name);
+    if (it != functionCache.end()) {
+        return it->second;
+    }
+
     if (!library && !loadNativeLibrary()) {
         return nullptr;
     }
@@ -74,7 +82,8 @@ void *getFunctionPointer(const char *functionName) {
         std::cerr << "Could not load function: " << GetLastError() << std::endl;
         writeLog("Could not load function");
     } else {
-        writeLog(("Function loaded: " + std::string(functionName)).c_str());
+        writeLog(("Function loaded: " + name).c_str());
+        functionCache[name] = func;
     }
 
     return func;
@@ -108,6 +117,20 @@ int __cdecl csharpLibrary_awesomeUtils_initialize(
 
     writeLog(("initialize result: " + std::to_string(result)).c_str());
     return result;
+}
+
+void __cdecl csharpLibrary_awesomeUtils_finalize() {
+    writeLog("finalize called");
+    using FinalizeFunction = void(__cdecl *)();
+    auto func = reinterpret_cast<FinalizeFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_finalize"));
+
+    if (!func) {
+        writeLog("Could not load finalize function");
+        return;
+    }
+
+    func();
+    writeLog("finalize completed");
 }
 
 char * __cdecl csharpLibrary_awesomeUtils_deviceUniqueId() {
@@ -308,9 +331,9 @@ DataArray __cdecl csharpLibrary_awesomeUtils_readFileToByteArray(const char *fil
     return result;
 }
 
-void* __cdecl csharpLibrary_awesomeUtils_mapXmlToObject(const char* xmlChar, void* freeNewObject, void* freeNewBool, void* freeNewInt, void* freeNewUint, void* freeNewDouble, void* freeNewUtf8, void* freeSetObjProperty) {
+void * __cdecl csharpLibrary_awesomeUtils_mapXmlToObject(const char *xmlChar, void *freeNewObject, void *freeNewBool, void *freeNewInt, void *freeNewUint, void *freeNewDouble, void *freeNewUtf8, void *freeSetObjProperty) {
     writeLog("mapXmlToObject called");
-    using MapXmlToObjectFunction = void*(__cdecl *)(const char *, void*, void*, void*, void*, void*, void*, void*);
+    using MapXmlToObjectFunction = void*(__cdecl *)(const char *, void *, void *, void *, void *, void *, void *, void *);
     auto func = reinterpret_cast<MapXmlToObjectFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_mapXmlToObject"));
     return func(xmlChar, freeNewObject, freeNewBool, freeNewInt, freeNewUint, freeNewDouble, freeNewUtf8, freeSetObjProperty);
 }

@@ -13,6 +13,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.adobe.fre.FREASErrorException;
+import com.adobe.fre.FREArray;
 import com.adobe.fre.FREByteArray;
 import com.adobe.fre.FREContext;
 import com.adobe.fre.FREFunction;
@@ -22,6 +23,7 @@ import com.adobe.fre.FREObject;
 import com.adobe.fre.FREReadOnlyException;
 import com.adobe.fre.FRETypeMismatchException;
 import com.adobe.fre.FREWrongThreadException;
+import com.fasterxml.aalto.stax.InputFactoryImpl;
 
 import org.w3c.dom.Attr;
 import org.w3c.dom.Document;
@@ -35,6 +37,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.StringReader;
 import java.io.StringWriter;
 import java.net.InetAddress;
 import java.net.ProtocolException;
@@ -61,6 +64,10 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
 
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -814,58 +821,77 @@ public class AneAwesomeUtilsContext extends FREContext {
                 String xml = args[0].getAsString();
                 if (xml == null || xml.isEmpty()) return null;
 
-                DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-                DocumentBuilder builder = factory.newDocumentBuilder();
-                ByteArrayInputStream is = new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8));
-                Document doc = builder.parse(is);
-                Element root = doc.getDocumentElement();
+                XMLInputFactory factory = new InputFactoryImpl();
+                factory.setProperty(XMLInputFactory.IS_COALESCING, true);
+                XMLStreamReader reader = factory.createXMLStreamReader(new StringReader(xml));
 
-                return convert(root);
+                while (reader.hasNext()) {
+                    if (reader.next() == XMLStreamConstants.START_ELEMENT) {
+                        return parseElement(reader);
+                    }
+                }
+                return null;
             } catch (Exception e) {
-                // Log if needed
+                AneAwesomeUtilsLogging.e(TAG, "Error mapping XML to object", e);
                 return null;
             }
         }
 
-        private static FREObject convert(Element elem) throws FREWrongThreadException, FREInvalidObjectException, FRETypeMismatchException, FRENoSuchNameException, FREASErrorException, FREReadOnlyException {
-            String value = elem.getTextContent().trim();
-            if (!hasChildElements(elem) && elem.getAttributes().getLength() == 0) {
+        private static FREObject parseElement(XMLStreamReader reader) throws XMLStreamException, FREWrongThreadException, FREInvalidObjectException, FRETypeMismatchException, FRENoSuchNameException, FREASErrorException, FREReadOnlyException {
+            String elemName = reader.getLocalName();
+            int attrCount = reader.getAttributeCount();
+
+            Map<String, String> attrs = new HashMap<>();
+            for (int i = 0; i < attrCount; i++) {
+                attrs.put(reader.getAttributeLocalName(i), reader.getAttributeValue(i));
+            }
+
+            boolean hasChildren = false;
+            StringBuilder text = new StringBuilder();
+            Map<String, List<FREObject>> groups = new HashMap<>();
+
+            while (reader.hasNext()) {
+                int event = reader.next();
+                if (event == XMLStreamConstants.END_ELEMENT) {
+                    break;
+                } else if (event == XMLStreamConstants.START_ELEMENT) {
+                    hasChildren = true;
+                    String childName = reader.getLocalName();
+                    FREObject childObj = parseElement(reader);
+                    List<FREObject> list = groups.get(childName);
+                    if (list == null) {
+                        list = new ArrayList<>();
+                        groups.put(childName, list);
+                    }
+                    list.add(childObj);
+                } else if (event == XMLStreamConstants.CHARACTERS || event == XMLStreamConstants.CDATA) {
+                    text.append(reader.getText());
+                }
+            }
+
+            String value = text.toString().trim();
+
+            if (!hasChildren && attrCount == 0) {
                 return valueToFre(value);
             }
 
             FREObject obj = FREObject.newObject("Object", null);
 
-            NamedNodeMap attrs = elem.getAttributes();
-            for (int i = 0; i < attrs.getLength(); i++) {
-                Attr attr = (Attr) attrs.item(i);
-                obj.setProperty(attr.getName(), valueToFre(attr.getValue()));
+            for (Map.Entry<String, String> entry : attrs.entrySet()) {
+                obj.setProperty(entry.getKey(), valueToFre(entry.getValue()));
             }
 
-            Map<String, List<Element>> groups = new HashMap<>();
-            NodeList children = elem.getChildNodes();
-            for (int i = 0; i < children.getLength(); i++) {
-                Node node = children.item(i);
-                if (node instanceof Element) {
-                    Element child = (Element) node;
-                    List<Element> list = groups.get(child.getTagName());
-                    if (list == null) {
-                        list = new ArrayList<>();
-                        groups.put(child.getTagName(), list);
-                    }
-                    list.add(child);
-                }
-            }
-
-            for (Map.Entry<String, List<Element>> entry : groups.entrySet()) {
+            for (Map.Entry<String, List<FREObject>> entry : groups.entrySet()) {
                 String key = entry.getKey();
-                List<Element> list = entry.getValue();
+                List<FREObject> list = entry.getValue();
                 FREObject propVal;
-                if (list.size() == 1) {
-                    propVal = convert(list.get(0));
+                int size = list.size();
+                if (size == 1) {
+                    propVal = list.get(0);
                 } else {
-                    FREObject arr = FREObject.newObject("Array", null);
-                    for (int j = 0; j < list.size(); j++) {
-                        arr.setProperty(String.valueOf(j), convert(list.get(j)));
+                    FREArray arr = FREArray.newArray(size);
+                    for (int j = 0; j < size; j++) {
+                        arr.setObjectAt(j, list.get(j));
                     }
                     propVal = arr;
                 }
@@ -873,16 +899,6 @@ public class AneAwesomeUtilsContext extends FREContext {
             }
 
             return obj;
-        }
-
-        private static boolean hasChildElements(Element elem) {
-            NodeList nodes = elem.getChildNodes();
-            for (int i = 0; i < nodes.getLength(); i++) {
-                if (nodes.item(i) instanceof Element) {
-                    return true;
-                }
-            }
-            return false;
         }
 
         private static FREObject valueToFre(String value) throws FREWrongThreadException {
