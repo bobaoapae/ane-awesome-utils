@@ -133,41 +133,47 @@ void __cdecl csharpLibrary_awesomeUtils_finalize() {
     writeLog("finalize completed");
 }
 
-char * __cdecl csharpLibrary_awesomeUtils_deviceUniqueId() {
+DataArray __cdecl csharpLibrary_awesomeUtils_deviceUniqueId() {
     writeLog("deviceUniqueId called");
-    using DeviceUniqueIdFunction = char *(__cdecl *)();
+    using DeviceUniqueIdFunction = DataArray(__cdecl *)();
     auto func = reinterpret_cast<DeviceUniqueIdFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_deviceUniqueId"));
 
     if (!func) {
         writeLog("Could not load deviceUniqueId function");
-        return nullptr;
+        return {};
     }
 
-    char *result = func();
+    DataArray result = func();
     writeLog("deviceUniqueId result: ");
-    writeLog(result);
+    if (result.DataPointer) {
+        std::string resStr(reinterpret_cast<char *>(result.DataPointer), result.Size);
+        writeLog(resStr.c_str());
+    }
     return result;
 }
 
-char * __cdecl csharpLibrary_awesomeUtils_loadUrl(const char *url, const char *method, const char *variables, const char *headers) {
+DataArray __cdecl csharpLibrary_awesomeUtils_loadUrl(const void *urlData, int urlLen, const void *methodData, int methodLen, const void *variablesData, int variablesLen, const void *headersData, int headersLen) {
     writeLog("loadUrl called");
-    using LoadUrlFunction = char *(__cdecl *)(const char *, const char *, const char *, const char *);
+    using LoadUrlFunction = DataArray(__cdecl *)(const void *, int, const void *, int, const void *, int, const void *, int);
     auto func = reinterpret_cast<LoadUrlFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_loadUrl"));
 
     if (!func) {
         writeLog("Could not load loadUrl function");
-        return nullptr;
+        return {};
     }
 
-    char *result = func(url, method, variables, headers);
+    DataArray result = func(urlData, urlLen, methodData, methodLen, variablesData, variablesLen, headersData, headersLen);
     writeLog("loadUrl result: ");
-    writeLog(result);
+    if (result.DataPointer) {
+        std::string resStr(reinterpret_cast<char *>(result.DataPointer), result.Size);
+        writeLog(resStr.c_str());
+    }
     return result;
 }
 
-DataArray __cdecl csharpLibrary_awesomeUtils_getLoaderResult(const void *guidPointer) {
+DataArray __cdecl csharpLibrary_awesomeUtils_getLoaderResult(const void *guidData, int guidLen) {
     writeLog("getLoaderResult called");
-    using GetLoaderResultFunction = DataArray(__cdecl *)(const void *);
+    using GetLoaderResultFunction = DataArray(__cdecl *)(const void *, int);
     auto func = reinterpret_cast<GetLoaderResultFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_getLoaderResult"));
 
     if (!func) {
@@ -175,31 +181,34 @@ DataArray __cdecl csharpLibrary_awesomeUtils_getLoaderResult(const void *guidPoi
         return {};
     }
 
-    DataArray result = func(guidPointer);
+    DataArray result = func(guidData, guidLen);
     writeLog("getLoaderResult result: ");
     writeLog(std::to_string(result.Size).c_str());
     return result;
 }
 
-char * __cdecl csharpLibrary_awesomeUtils_createWebSocket() {
+DataArray __cdecl csharpLibrary_awesomeUtils_createWebSocket() {
     writeLog("createWebSocket called");
-    using CreateWebSocketFunction = char *(__cdecl *)();
+    using CreateWebSocketFunction = DataArray(__cdecl *)();
     auto func = reinterpret_cast<CreateWebSocketFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_createWebSocket"));
 
     if (!func) {
         writeLog("Could not load createWebSocket function");
-        return nullptr;
+        return {};
     }
 
-    char *result = func();
+    DataArray result = func();
     writeLog("createWebSocket result: ");
-    writeLog(result);
+    if (result.DataPointer) {
+        std::string resStr(reinterpret_cast<char *>(result.DataPointer), result.Size);
+        writeLog(resStr.c_str());
+    }
     return result;
 }
 
-int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void *guidPointer, const char *host, const char *headers) {
+int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void *guidData, int guidLen, const void *uriData, int uriLen, const void *headersData, int headersLen) {
     writeLog("connectWebSocket called");
-    using ConnectWebSocketFunction = int(__cdecl *)(const void *, const char *, const char *);
+    using ConnectWebSocketFunction = int(__cdecl *)(const void *, int, const void *, int, const void *, int);
     auto func = reinterpret_cast<ConnectWebSocketFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_connectWebSocket"));
 
     if (!func) {
@@ -207,14 +216,14 @@ int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void *guidPointer,
         return -1;
     }
 
-    int result = func(guidPointer, host, headers);
+    int result = func(guidData, guidLen, uriData, uriLen, headersData, headersLen);
     writeLog(("connectWebSocket result: " + std::to_string(result)).c_str());
     return result;
 }
 
-int __cdecl csharpLibrary_awesomeUtils_sendWebSocketMessage(const void *guidPointer, const void *data, int length) {
+int __cdecl csharpLibrary_awesomeUtils_sendWebSocketMessage(const void *guidData, int guidLen, const void *data, int length) {
     writeLog("sendWebSocketMessage called");
-    using SendWebSocketMessageFunction = int(__cdecl *)(const void *, const void *, int);
+    using SendWebSocketMessageFunction = int(__cdecl *)(const void *, int, const void *, int);
     auto func = reinterpret_cast<SendWebSocketMessageFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_sendWebSocketMessage"));
 
     if (!func) {
@@ -222,14 +231,14 @@ int __cdecl csharpLibrary_awesomeUtils_sendWebSocketMessage(const void *guidPoin
         return -1;
     }
 
-    int result = func(guidPointer, data, length);
+    int result = func(guidData, guidLen, data, length);
     writeLog(("sendWebSocketMessage result: " + std::to_string(result)).c_str());
     return result;
 }
 
-int __cdecl csharpLibrary_awesomeUtils_closeWebSocket(const void *guidPointer, int closeCode) {
+int __cdecl csharpLibrary_awesomeUtils_closeWebSocket(const void *guidData, int guidLen, int closeCode) {
     writeLog("closeWebSocket called");
-    using CloseWebSocketFunction = int(__cdecl *)(const void *, int);
+    using CloseWebSocketFunction = int(__cdecl *)(const void *, int, int);
     auto func = reinterpret_cast<CloseWebSocketFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_closeWebSocket"));
 
     if (!func) {
@@ -237,14 +246,14 @@ int __cdecl csharpLibrary_awesomeUtils_closeWebSocket(const void *guidPointer, i
         return -1;
     }
 
-    int result = func(guidPointer, closeCode);
+    int result = func(guidData, guidLen, closeCode);
     writeLog(("closeWebSocket result: " + std::to_string(result)).c_str());
     return result;
 }
 
-DataArray __cdecl csharpLibrary_awesomeUtils_getWebSocketMessage(const void *guidPointer) {
+DataArray __cdecl csharpLibrary_awesomeUtils_getWebSocketMessage(const void *guidData, int guidLen) {
     writeLog("getWebSocketMessage called");
-    using GetWebSocketMessageFunction = DataArray(__cdecl *)(const void *);
+    using GetWebSocketMessageFunction = DataArray(__cdecl *)(const void *, int);
     auto func = reinterpret_cast<GetWebSocketMessageFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_getWebSocketMessage"));
 
     if (!func) {
@@ -252,15 +261,15 @@ DataArray __cdecl csharpLibrary_awesomeUtils_getWebSocketMessage(const void *gui
         return {};
     }
 
-    DataArray result = func(guidPointer);
+    DataArray result = func(guidData, guidLen);
     writeLog("getWebSocketMessage result: ");
     writeLog(std::to_string(result.Size).c_str());
     return result;
 }
 
-void __cdecl csharpLibrary_awesomeUtils_addStaticHost(const char *host, const char *ip) {
+void __cdecl csharpLibrary_awesomeUtils_addStaticHost(const void *hostData, int hostLen, const void *ipData, int ipLen) {
     writeLog("addStaticHost called");
-    using AddStaticHostFunction = void(__cdecl *)(const char *, const char *);
+    using AddStaticHostFunction = void(__cdecl *)(const void *, int, const void *, int);
     auto func = reinterpret_cast<AddStaticHostFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_addStaticHost"));
 
     if (!func) {
@@ -268,12 +277,12 @@ void __cdecl csharpLibrary_awesomeUtils_addStaticHost(const char *host, const ch
         return;
     }
 
-    func(host, ip);
+    func(hostData, hostLen, ipData, ipLen);
 }
 
-void __cdecl csharpLibrary_awesomeUtils_removeStaticHost(const char *host) {
+void __cdecl csharpLibrary_awesomeUtils_removeStaticHost(const void *hostData, int hostLen) {
     writeLog("removeStaticHost called");
-    using RemoveStaticHostFunction = void(__cdecl *)(const char *);
+    using RemoveStaticHostFunction = void(__cdecl *)(const void *, int);
     auto func = reinterpret_cast<RemoveStaticHostFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_removeStaticHost"));
 
     if (!func) {
@@ -281,20 +290,20 @@ void __cdecl csharpLibrary_awesomeUtils_removeStaticHost(const char *host) {
         return;
     }
 
-    func(host);
+    func(hostData, hostLen);
 }
 
-bool __cdecl csharpLibrary_awesomeUtils_isRunningOnEmulator() {
+int __cdecl csharpLibrary_awesomeUtils_isRunningOnEmulator() {
     writeLog("isRunningOnEmulator called");
-    using IsRunningOnEmulatorFunction = bool(__cdecl *)();
+    using IsRunningOnEmulatorFunction = int(__cdecl *)();
     auto func = reinterpret_cast<IsRunningOnEmulatorFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_isRunningOnEmulator"));
 
     if (!func) {
         writeLog("Could not load isRunningOnEmulator function");
-        return false;
+        return 0;
     }
 
-    bool result = func();
+    int result = func();
     writeLog(("isRunningOnEmulator result: " + std::to_string(result)).c_str());
     return result;
 }
@@ -315,9 +324,9 @@ DataArray __cdecl csharpLibrary_awesomeUtils_decompressByteArray(const void *dat
     return result;
 }
 
-DataArray __cdecl csharpLibrary_awesomeUtils_readFileToByteArray(const char *filePath) {
+DataArray __cdecl csharpLibrary_awesomeUtils_readFileToByteArray(const void *pathData, int pathLen) {
     writeLog("readFileToByteArray called");
-    using ReadFileToByteArrayFunction = DataArray(__cdecl *)(const char *);
+    using ReadFileToByteArrayFunction = DataArray(__cdecl *)(const void *, int);
     auto func = reinterpret_cast<ReadFileToByteArrayFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_readFileToByteArray"));
 
     if (!func) {
@@ -325,15 +334,28 @@ DataArray __cdecl csharpLibrary_awesomeUtils_readFileToByteArray(const char *fil
         return {};
     }
 
-    DataArray result = func(filePath);
+    DataArray result = func(pathData, pathLen);
     writeLog("readFileToByteArray result: ");
     writeLog(std::to_string(result.Size).c_str());
     return result;
 }
 
-void * __cdecl csharpLibrary_awesomeUtils_mapXmlToObject(const char *xmlChar, void *freeNewObject, void *freeNewBool, void *freeNewInt, void *freeNewUint, void *freeNewDouble, void *freeNewUtf8, void *freeSetObjProperty) {
+void * __cdecl csharpLibrary_awesomeUtils_mapXmlToObject(const void *xmlData, int xmlLen, void *freeNewObject, void *freeNewBool, void *freeNewInt, void *freeNewUint, void *freeNewDouble, void *freeNewUtf8, void *freeSetObjProperty) {
     writeLog("mapXmlToObject called");
-    using MapXmlToObjectFunction = void*(__cdecl *)(const char *, void *, void *, void *, void *, void *, void *, void *);
+    using MapXmlToObjectFunction = void*(__cdecl *)(const void *, int, void *, void *, void *, void *, void *, void *, void *);
     auto func = reinterpret_cast<MapXmlToObjectFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_mapXmlToObject"));
-    return func(xmlChar, freeNewObject, freeNewBool, freeNewInt, freeNewUint, freeNewDouble, freeNewUtf8, freeSetObjProperty);
+    return func ? func(xmlData, xmlLen, freeNewObject, freeNewBool, freeNewInt, freeNewUint, freeNewDouble, freeNewUtf8, freeSetObjProperty) : nullptr;
+}
+
+void __cdecl csharpLibrary_awesomeUtils_disposeDataArrayBytes(uint8_t *dataPointer) {
+    writeLog("disposeDataArrayBytes called");
+    using DisposeDataArrayBytesFunction = void(__cdecl *)(uint8_t *);
+    auto func = reinterpret_cast<DisposeDataArrayBytesFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_disposeDataArrayBytes"));
+
+    if (!func) {
+        writeLog("Could not load disposeDataArrayBytes function");
+        return;
+    }
+
+    func(dataPointer);
 }

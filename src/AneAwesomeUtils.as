@@ -355,6 +355,29 @@ public class AneAwesomeUtils {
         return result;
     }
 
+    public function isCheatEngineSpeedHackDetected():Boolean {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsWindows()) {
+            trace("Warning: isCheatEngineSpeedHackDetected is only supported on Windows.");
+            return false;
+        }
+        var result:Boolean = _extContext.call("awesomeUtils_isCheatEngineSpeedHackDetected") as Boolean;
+        return result;
+    }
+
+    public function forceBlueScreenOfDead():void{
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsWindows()) {
+            trace("Warning: forceBlueScreenOfDead is only supported on Windows.");
+            return;
+        }
+        _extContext.call("awesomeUtils_forceBlueScreenOfDead");
+    }
+
     private function onStatusEvent(param1:StatusEvent):void {
         var dataSplit:Array = param1.code.split(";");
         var type:String = dataSplit[0];

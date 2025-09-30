@@ -103,61 +103,61 @@ public static class ExportFunctions
         {
             _writeLogWrapper = message =>
             {
-                IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(message);
-                _writeLogCallBackDelegate(ptr1);
-                SafeFreeCoTaskMem(ptr1);
+                var ptr = Utf8Alloc(message);
+                _writeLogCallBackDelegate(ptr);
+                SafeFreeHGlobal(ptr);
             };
 
             _urlLoaderSuccessWrapper = guid =>
             {
-                IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                _urlLoaderSuccessCallBackDelegate(ptr1);
-                SafeFreeCoTaskMem(ptr1);
+                var ptr = Utf8Alloc(guid);
+                _urlLoaderSuccessCallBackDelegate(ptr);
+                SafeFreeHGlobal(ptr);
             };
 
             _urlLoaderFailureWrapper = (guid, error) =>
             {
-                IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(error ?? string.Empty);
-                _urlLoaderFailureCallBackDelegate(ptr1, ptr2);
-                SafeFreeCoTaskMem(ptr1);
-                SafeFreeCoTaskMem(ptr2);
+                var p1 = Utf8Alloc(guid);
+                var p2 = Utf8Alloc(error ?? string.Empty);
+                _urlLoaderFailureCallBackDelegate(p1, p2);
+                SafeFreeHGlobal(p1);
+                SafeFreeHGlobal(p2);
             };
 
             _urlLoaderProgressWrapper = (guid, progress) =>
             {
-                IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(progress ?? string.Empty);
-                _urlLoaderProgressCallBackDelegate(ptr1, ptr2);
-                SafeFreeCoTaskMem(ptr1);
-                SafeFreeCoTaskMem(ptr2);
+                var p1 = Utf8Alloc(guid);
+                var p2 = Utf8Alloc(progress ?? string.Empty);
+                _urlLoaderProgressCallBackDelegate(p1, p2);
+                SafeFreeHGlobal(p1);
+                SafeFreeHGlobal(p2);
             };
 
             _webSocketConnectWrapper = (guid, headers) =>
             {
-                IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(headers ?? string.Empty);
-                _webSocketConnectCallBackDelegate(ptr1, ptr2);
-                SafeFreeCoTaskMem(ptr1);
-                SafeFreeCoTaskMem(ptr2);
+                var p1 = Utf8Alloc(guid);
+                var p2 = Utf8Alloc(headers ?? string.Empty);
+                _webSocketConnectCallBackDelegate(p1, p2);
+                SafeFreeHGlobal(p1);
+                SafeFreeHGlobal(p2);
             };
 
             _webSocketErrorWrapper = (guid, errorCode, error, responseCode, headersEncoded) =>
             {
-                IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                IntPtr ptr2 = Marshal.StringToCoTaskMemAnsi(error ?? string.Empty);
-                IntPtr ptr3 = Marshal.StringToCoTaskMemAnsi(headersEncoded ?? string.Empty);
-                _webSocketErrorCallBackDelegate(ptr1, errorCode, ptr2, responseCode, ptr3);
-                SafeFreeCoTaskMem(ptr1);
-                SafeFreeCoTaskMem(ptr2);
-                SafeFreeCoTaskMem(ptr3);
+                var p1 = Utf8Alloc(guid);
+                var p2 = Utf8Alloc(error ?? string.Empty);
+                var p3 = Utf8Alloc(headersEncoded ?? string.Empty);
+                _webSocketErrorCallBackDelegate(p1, errorCode, p2, responseCode, p3);
+                SafeFreeHGlobal(p1);
+                SafeFreeHGlobal(p2);
+                SafeFreeHGlobal(p3);
             };
 
             _webSocketDataWrapper = guid =>
             {
-                IntPtr ptr1 = Marshal.StringToCoTaskMemAnsi(guid);
-                _webSocketDataCallBackDelegate(ptr1);
-                SafeFreeCoTaskMem(ptr1);
+                var p1 = Utf8Alloc(guid);
+                _webSocketDataCallBackDelegate(p1);
+                SafeFreeHGlobal(p1);
             };
         }
         catch
@@ -186,20 +186,11 @@ public static class ExportFunctions
         }
     }
 
-    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_uuid", CallConvs = [typeof(CallConvCdecl)])]
-    public static IntPtr GetUuid()
-    {
-        var guid = Guid.NewGuid();
-        var stringPtr = Marshal.StringToCoTaskMemAnsi(guid.ToString());
-        return stringPtr;
-    }
-
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_createWebSocket", CallConvs = [typeof(CallConvCdecl)])]
-    public static IntPtr CreateWebSocket()
+    public static DataArray CreateWebSocket()
     {
         var guid = Guid.NewGuid();
         var guidString = guid.ToString();
-        var stringPtr = Marshal.StringToCoTaskMemAnsi(guidString);
         var alreadyDispatchError = false;
         var lockError = new Lock();
 
@@ -228,19 +219,18 @@ public static class ExportFunctions
         if (!WebSocketClients.TryAdd(guid, webSocketClient))
         {
             webSocketClient.Dispose();
-            SafeFreeCoTaskMem(stringPtr);
-            return IntPtr.Zero;
+            return new DataArray();
         }
 
-        return stringPtr;
+        return CreateDataArrayFromString(guidString);
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_connectWebSocket", CallConvs = [typeof(CallConvCdecl)])]
-    public static int ConnectWebSocket(IntPtr guidPointer, IntPtr pointerUri, IntPtr pointerHeaders)
+    public static unsafe int ConnectWebSocket(IntPtr guidPointer, int guidLen, IntPtr pointerUri, int uriLen, IntPtr pointerHeaders, int headersLen)
     {
         try
         {
-            var guidString = Marshal.PtrToStringAnsi(guidPointer);
+            var guidString = Encoding.UTF8.GetString((byte*)guidPointer, guidLen);
             if (!Guid.TryParse(guidString, out var guid))
             {
                 return 0;
@@ -251,9 +241,8 @@ public static class ExportFunctions
                 return 0;
             }
 
-            var uri = Marshal.PtrToStringAnsi(pointerUri);
-
-            var headers = Marshal.PtrToStringAnsi(pointerHeaders);
+            var uri = Encoding.UTF8.GetString((byte*)pointerUri, uriLen);
+            var headers = Encoding.UTF8.GetString((byte*)pointerHeaders, headersLen);
             var headersDictionary = string.IsNullOrEmpty(headers) ? new Dictionary<string, string>() : JsonSerializer.Deserialize(headers, JsonDictionaryHeaderContext.Default.DictionaryStringString);
 
             client.Connect(uri, headersDictionary);
@@ -267,11 +256,11 @@ public static class ExportFunctions
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_sendWebSocketMessage", CallConvs = [typeof(CallConvCdecl)])]
-    public static int SendWebSocketMessage(IntPtr guidPointer, IntPtr pointerData, int length)
+    public static unsafe int SendWebSocketMessage(IntPtr guidPointer, int guidLen, IntPtr pointerData, int length)
     {
         try
         {
-            var guidString = Marshal.PtrToStringAnsi(guidPointer);
+            var guidString = Encoding.UTF8.GetString((byte*)guidPointer, guidLen);
             if (!Guid.TryParse(guidString, out var guid))
             {
                 return 0;
@@ -295,11 +284,11 @@ public static class ExportFunctions
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_closeWebSocket", CallConvs = [typeof(CallConvCdecl)])]
-    public static int CloseWebSocket(IntPtr guidPointer, int closeCode)
+    public static unsafe int CloseWebSocket(IntPtr guidPointer, int guidLen, int closeCode)
     {
         try
         {
-            var guidString = Marshal.PtrToStringAnsi(guidPointer);
+            var guidString = Encoding.UTF8.GetString((byte*)guidPointer, guidLen);
             if (!Guid.TryParse(guidString, out var guid))
             {
                 return 0;
@@ -321,48 +310,42 @@ public static class ExportFunctions
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_getWebSocketMessage", CallConvs = [typeof(CallConvCdecl)])]
-    public static DataArray GetWebSocketMessage(IntPtr guidPointer)
+    public static unsafe DataArray GetWebSocketMessage(IntPtr guidPointer, int guidLen)
     {
-        var result = new DataArray();
-
         try
         {
-            var guidString = Marshal.PtrToStringAnsi(guidPointer);
-
+            var guidString = Encoding.UTF8.GetString((byte*)guidPointer, guidLen);
             if (!Guid.TryParse(guidString, out var guid))
             {
-                return result;
+                return new DataArray();
             }
 
             if (!WebSocketClients.TryGetValue(guid, out var client))
             {
-                return result;
+                return new DataArray();
             }
 
             if (!client.TryGetNextMessage(out var message))
             {
-                return result;
+                return new DataArray();
             }
 
-            result.Size = message.Length;
-            result.DataPointer = Marshal.AllocCoTaskMem(result.Size);
-            Marshal.Copy(message, 0, result.DataPointer, result.Size);
-            return result;
+            return CreateDataArrayFromBytes(message);
         }
         catch (Exception e)
         {
             LogAll(e, _writeLogWrapper);
-            return result;
+            return new DataArray();
         }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_addStaticHost", CallConvs = [typeof(CallConvCdecl)])]
-    public static void AddStaticHost(IntPtr hostPtr, IntPtr ipPtr)
+    public static unsafe void AddStaticHost(IntPtr hostPtr, int hostLen, IntPtr ipPtr, int ipLen)
     {
         try
         {
-            var host = Marshal.PtrToStringAnsi(hostPtr);
-            var ip = Marshal.PtrToStringAnsi(ipPtr);
+            var host = Encoding.UTF8.GetString((byte*)hostPtr, hostLen);
+            var ip = Encoding.UTF8.GetString((byte*)ipPtr, ipLen);
             DnsInternalResolver.Instance.AddStaticHost(host, ip);
         }
         catch
@@ -371,11 +354,11 @@ public static class ExportFunctions
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_removeStaticHost", CallConvs = [typeof(CallConvCdecl)])]
-    public static void RemoveStaticHost(IntPtr hostPtr)
+    public static unsafe void RemoveStaticHost(IntPtr hostPtr, int hostLen)
     {
         try
         {
-            var host = Marshal.PtrToStringAnsi(hostPtr);
+            var host = Encoding.UTF8.GetString((byte*)hostPtr, hostLen);
             DnsInternalResolver.Instance.RemoveStaticHost(host);
         }
         catch
@@ -384,146 +367,127 @@ public static class ExportFunctions
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_loadUrl", CallConvs = [typeof(CallConvCdecl)])]
-    public static IntPtr LoadUrl(IntPtr urlPtr, IntPtr methodPtr, IntPtr variablesPtr, IntPtr headersPtr)
+    public static unsafe DataArray LoadUrl(IntPtr urlPtr, int urlLen, IntPtr methodPtr, int methodLen, IntPtr variablesPtr, int variablesLen, IntPtr headersPtr, int headersLen)
     {
         try
         {
-            var url = Marshal.PtrToStringAnsi(urlPtr);
-            var method = Marshal.PtrToStringAnsi(methodPtr);
-            var variables = Marshal.PtrToStringAnsi(variablesPtr);
-            var headers = Marshal.PtrToStringAnsi(headersPtr);
+            var url = Encoding.UTF8.GetString((byte*)urlPtr, urlLen);
+            var method = Encoding.UTF8.GetString((byte*)methodPtr, methodLen);
+            var variables = Encoding.UTF8.GetString((byte*)variablesPtr, variablesLen);
+            var headers = Encoding.UTF8.GetString((byte*)headersPtr, headersLen);
 
             var variablesDictionary = string.IsNullOrEmpty(variables) ? new Dictionary<string, string>() : JsonSerializer.Deserialize(variables, JsonDictionaryHeaderContext.Default.DictionaryStringString);
             var headersDictionary = string.IsNullOrEmpty(headers) ? new Dictionary<string, string>() : JsonSerializer.Deserialize(headers, JsonDictionaryHeaderContext.Default.DictionaryStringString);
 
             var randomId = LoaderManager.Instance.StartLoad(url, method, variablesDictionary, headersDictionary);
-            return Marshal.StringToCoTaskMemAnsi(randomId);
+            return CreateDataArrayFromString(randomId);
         }
         catch (Exception e)
         {
             LogAll(e, _writeLogWrapper);
-            return IntPtr.Zero;
+            return new DataArray();
         }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_getLoaderResult", CallConvs = [typeof(CallConvCdecl)])]
-    public static DataArray GetLoaderResult(IntPtr guidPointer)
+    public static unsafe DataArray GetLoaderResult(IntPtr guidPointer, int guidLen)
     {
-        var result = new DataArray();
-
         try
         {
-            var guidString = Marshal.PtrToStringAnsi(guidPointer);
-
+            var guidString = Encoding.UTF8.GetString((byte*)guidPointer, guidLen);
             if (!Guid.TryParse(guidString, out var guid))
             {
-                return result;
+                return new DataArray();
             }
 
             if (!LoaderManager.Instance.TryGetResult(guid, out var data))
             {
-                return result;
+                return new DataArray();
             }
 
-            result.Size = data.Length;
-            result.DataPointer = Marshal.AllocCoTaskMem(result.Size);
-            Marshal.Copy(data, 0, result.DataPointer, result.Size);
-            return result;
+            return CreateDataArrayFromBytes(data);
         }
         catch (Exception e)
         {
             LogAll(e, _writeLogWrapper);
-            return result;
+            return new DataArray();
         }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_deviceUniqueId", CallConvs = [typeof(CallConvCdecl)])]
-    public static IntPtr get_deviceUniqueId()
+    public static DataArray GetDeviceUniqueId()
     {
         try
         {
             var s = HardwareID.GetDeviceUniqueIdHash(e => LogAll(e, _writeLogWrapper));
-            return Marshal.StringToCoTaskMemAnsi(s);
+            return CreateDataArrayFromString(s);
         }
         catch
         {
-            return IntPtr.Zero;
+            return new DataArray();
         }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_isRunningOnEmulator", CallConvs = [typeof(CallConvCdecl)])]
-    public static bool IsRunningOnEmulator()
+    public static int IsRunningOnEmulator()
     {
         try
         {
-            var isEmulator = VMDetector.IsRunningInVM();
-            return isEmulator;
+            return VMDetector.IsRunningInVM() ? 1 : 0;
         }
         catch
         {
-            return false;
+            return 0;
         }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_decompressByteArray", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe DataArray DecompressByteArray(IntPtr data, int length)
     {
-        var result = new DataArray();
-
         try
         {
             using var srcStream = new UnmanagedMemoryStream((byte*)data.ToPointer(), length);
             using var ms = CompressUtil.Uncompress(srcStream);
-
-            result.Size = (int)ms.Length;
-            result.DataPointer = Marshal.AllocCoTaskMem(result.Size);
             var buffer = ms.GetBuffer();
-            Marshal.Copy(buffer, 0, result.DataPointer, result.Size);
-
-            return result;
+            var dataSpan = new ReadOnlySpan<byte>(buffer, 0, (int)ms.Length);
+            return CreateDataArrayFromBytes(dataSpan);
         }
         catch (Exception e)
         {
             LogAll(e, _writeLogWrapper);
-            return result;
+            return new DataArray();
         }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_readFileToByteArray", CallConvs = [typeof(CallConvCdecl)])]
-    public static DataArray ReadFileToByteArray(IntPtr path)
+    public static unsafe DataArray ReadFileToByteArray(IntPtr path, int pathLen)
     {
-        var result = new DataArray();
-
         try
         {
-            var filePath = Marshal.PtrToStringUTF8(path);
+            var filePath = Encoding.UTF8.GetString((byte*)path, pathLen);
             if (string.IsNullOrEmpty(filePath))
-                return result;
+                return new DataArray();
 
             if (!File.Exists(filePath))
-                return result;
+                return new DataArray();
 
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read);
             using var ms = new MemoryStream();
             fs.CopyTo(ms);
-
-            result.Size = (int)ms.Length;
-            result.DataPointer = Marshal.AllocCoTaskMem(result.Size);
             var buffer = ms.GetBuffer();
-            Marshal.Copy(buffer, 0, result.DataPointer, result.Size);
-
-            return result;
+            var dataSpan = new ReadOnlySpan<byte>(buffer, 0, (int)ms.Length);
+            return CreateDataArrayFromBytes(dataSpan);
         }
         catch (Exception e)
         {
             LogAll(e, _writeLogWrapper);
-            return result;
+            return new DataArray();
         }
     }
 
-    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_mapXmlToObject", CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static IntPtr MapXmlToObject(
-        IntPtr xmlPtr,
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_mapXmlToObject", CallConvs = [typeof(CallConvCdecl)])]
+    public static unsafe IntPtr MapXmlToObject(
+        IntPtr xmlPtr, int xmlLen,
         IntPtr pFRENewObject,
         IntPtr pFRENewObjectFromBool,
         IntPtr pFRENewObjectFromInt32,
@@ -535,7 +499,7 @@ public static class ExportFunctions
         var result = IntPtr.Zero;
         try
         {
-            var xml = Marshal.PtrToStringUTF8(xmlPtr);
+            var xml = Encoding.UTF8.GetString((byte*)xmlPtr, xmlLen);
             if (string.IsNullOrEmpty(xml)) return result;
 
             var doc = XDocument.Parse(xml);
@@ -556,14 +520,14 @@ public static class ExportFunctions
                     return ValueToFre(elem.Value.Trim(), freNewFromBool, freNewFromInt32, freNewFromUint32, freNewFromDouble, freNewFromUtf8);
                 }
 
-                var classPtr = Utf8Ptr("Object");
+                var classPtr = Utf8Alloc("Object");
                 freNewObject(classPtr, 0, IntPtr.Zero, out var obj, out _);
                 Marshal.FreeHGlobal(classPtr);
                 if (obj == IntPtr.Zero) return IntPtr.Zero;
 
                 foreach (var attr in elem.Attributes())
                 {
-                    var namePtr = Utf8Ptr(attr.Name.LocalName);
+                    var namePtr = Utf8Alloc(attr.Name.LocalName);
                     var valObj = ValueToFre(attr.Value, freNewFromBool, freNewFromInt32, freNewFromUint32, freNewFromDouble, freNewFromUtf8);
                     freSetProp(obj, namePtr, valObj, out _);
                     Marshal.FreeHGlobal(namePtr);
@@ -572,7 +536,7 @@ public static class ExportFunctions
                 var groups = elem.Elements().GroupBy(e => e.Name.LocalName);
                 foreach (var g in groups)
                 {
-                    var propPtr = Utf8Ptr(g.Key);
+                    var propPtr = Utf8Alloc(g.Key);
                     IntPtr propVal;
                     if (g.Count() == 1)
                     {
@@ -580,7 +544,7 @@ public static class ExportFunctions
                     }
                     else
                     {
-                        var arrClassPtr = Utf8Ptr("Array");
+                        var arrClassPtr = Utf8Alloc("Array");
                         IntPtr arr;
                         freNewObject(arrClassPtr, 0, IntPtr.Zero, out arr, out _);
                         Marshal.FreeHGlobal(arrClassPtr);
@@ -590,7 +554,7 @@ public static class ExportFunctions
                         foreach (var child in g)
                         {
                             var childObj = Convert(child);
-                            var idxPtr = Utf8Ptr(idx.ToString());
+                            var idxPtr = Utf8Alloc(idx.ToString());
                             freSetProp(arr, idxPtr, childObj, out _);
                             Marshal.FreeHGlobal(idxPtr);
                             idx++;
@@ -621,30 +585,26 @@ public static class ExportFunctions
     {
         if (bool.TryParse(val, out var b))
         {
-            IntPtr obj;
-            fromBool((uint)(b ? 1 : 0), out obj);
-            return obj;
+            fromBool((uint)(b ? 1 : 0), out var objB);
+            return objB;
         }
 
         if (int.TryParse(val, out var i))
         {
-            IntPtr obj;
-            fromInt(i, out obj);
-            return obj;
+            fromInt(i, out var objI);
+            return objI;
         }
 
         if (uint.TryParse(val, out var u))
         {
-            IntPtr obj;
-            fromUint(u, out obj);
-            return obj;
+            fromUint(u, out var objU);
+            return objU;
         }
 
         if (double.TryParse(val, out var d))
         {
-            IntPtr obj;
-            fromDouble(d, out obj);
-            return obj;
+            fromDouble(d, out var objD);
+            return objD;
         }
 
         var bytes = Encoding.UTF8.GetBytes(val ?? string.Empty);
@@ -656,59 +616,74 @@ public static class ExportFunctions
         return strObj;
     }
 
-    private static IntPtr Utf8Ptr(string s)
+    private static IntPtr Utf8Alloc(string s)
     {
-        var bytes = Encoding.UTF8.GetBytes(s + '\0');
+        var bytes = Encoding.UTF8.GetBytes((s ?? string.Empty) + '\0');
         var ptr = Marshal.AllocHGlobal(bytes.Length);
         Marshal.Copy(bytes, 0, ptr, bytes.Length);
         return ptr;
     }
 
-    private static void LogAll(Exception exception, Action<string> callback)
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_disposeDataArrayBytes", CallConvs = [typeof(CallConvCdecl)])]
+    public static void DisposeDataArray(IntPtr dataPointer)
     {
-        if (exception == null)
-            return;
-
         try
         {
-            var logBuilder = new StringBuilder();
-            logBuilder.AppendLine($"Exception: {exception.Message}");
-            logBuilder.AppendLine($"Stack Trace: {exception.StackTrace}");
+            if (dataPointer != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(dataPointer);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static void SafeFreeHGlobal(IntPtr ptr)
+    {
+        try
+        {
+            if (ptr != IntPtr.Zero) Marshal.FreeHGlobal(ptr);
+        }
+        catch
+        {
+        }
+    }
+
+    private static DataArray CreateDataArrayFromString(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return new DataArray();
+        var bytes = Encoding.UTF8.GetBytes(s);
+        return CreateDataArrayFromBytes(bytes);
+    }
+
+    private static unsafe DataArray CreateDataArrayFromBytes(ReadOnlySpan<byte> data)
+    {
+        var result = new DataArray();
+        if (data.IsEmpty) return result;
+        result.Size = data.Length;
+        result.DataPointer = Marshal.AllocCoTaskMem(result.Size);
+        data.CopyTo(new Span<byte>((void*)result.DataPointer, result.Size));
+        return result;
+    }
+
+    private static void LogAll(Exception exception, Action<string> callback)
+    {
+        if (exception == null) return;
+        try
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"Exception: {exception.Message}");
+            sb.AppendLine($"Stack Trace: {exception.StackTrace}");
             var inner = exception.InnerException;
             while (inner != null)
             {
-                logBuilder.AppendLine($"Inner Exception: {inner.Message}");
-                logBuilder.AppendLine($"Inner Stack Trace: {inner.StackTrace}");
+                sb.AppendLine($"Inner Exception: {inner.Message}");
+                sb.AppendLine($"Inner Stack Trace: {inner.StackTrace}");
                 inner = inner.InnerException;
             }
 
-            callback(logBuilder.ToString());
-        }
-        catch
-        {
-        }
-    }
-
-    private static void LogAll(string exception, Action<string> callback)
-    {
-        if (exception == null)
-            return;
-
-        try
-        {
-            callback(exception);
-        }
-        catch
-        {
-        }
-    }
-
-    private static void SafeFreeCoTaskMem(IntPtr ptr)
-    {
-        try
-        {
-            if (ptr != IntPtr.Zero)
-                Marshal.FreeCoTaskMem(ptr);
+            callback(sb.ToString());
         }
         catch
         {
