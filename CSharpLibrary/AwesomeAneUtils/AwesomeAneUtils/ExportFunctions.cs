@@ -589,19 +589,22 @@ public static class ExportFunctions
             return objB;
         }
 
-        if (int.TryParse(val, out var i))
+        // Check for leading zero numeric strings to treat as string
+        var isLeadingZeroNumeric = val != null && val.Length > 1 && val[0] == '0' && val.All(char.IsDigit);
+
+        if (!isLeadingZeroNumeric && int.TryParse(val, out var i))
         {
             fromInt(i, out var objI);
             return objI;
         }
 
-        if (uint.TryParse(val, out var u))
+        if (!isLeadingZeroNumeric && uint.TryParse(val, out var u))
         {
             fromUint(u, out var objU);
             return objU;
         }
 
-        if (double.TryParse(val, out var d))
+        if (!isLeadingZeroNumeric && double.TryParse(val, out var d))
         {
             fromDouble(d, out var objD);
             return objD;
