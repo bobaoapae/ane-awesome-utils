@@ -838,7 +838,6 @@ public class AneAwesomeUtilsContext extends FREContext {
         }
 
         private static FREObject parseElement(XMLStreamReader reader) throws XMLStreamException, FREWrongThreadException, FREInvalidObjectException, FRETypeMismatchException, FRENoSuchNameException, FREASErrorException, FREReadOnlyException {
-            String elemName = reader.getLocalName();
             int attrCount = reader.getAttributeCount();
 
             Map<String, String> attrs = new HashMap<>();
@@ -906,24 +905,27 @@ public class AneAwesomeUtilsContext extends FREContext {
             if (value.equalsIgnoreCase("true")) return FREObject.newObject(true);
             if (value.equalsIgnoreCase("false")) return FREObject.newObject(false);
 
-            try {
-                int i = Integer.parseInt(value);
-                return FREObject.newObject(i);
-            } catch (NumberFormatException ignored) {
-            }
+            // Check for leading zero numeric strings to treat as string
+            boolean isLeadingZeroNumeric = value.length() > 1 && value.charAt(0) == '0' && value.matches("\\d+");
 
-            try {
-                long l = Long.parseLong(value);
-                if (l >= 0 && l <= 4294967295L) {
-                    return FREObject.newObject((double) l);
+            if (!isLeadingZeroNumeric) {
+                try {
+                    int i = Integer.parseInt(value);
+                    return FREObject.newObject(i);
+                } catch (NumberFormatException ignored) {
                 }
-            } catch (NumberFormatException ignored) {
-            }
-
-            try {
-                double d = Double.parseDouble(value);
-                return FREObject.newObject(d);
-            } catch (NumberFormatException ignored) {
+                try {
+                    long l = Long.parseLong(value);
+                    if (l >= 0 && l <= 4294967295L) {
+                        return FREObject.newObject((double) l);
+                    }
+                } catch (NumberFormatException ignored) {
+                }
+                try {
+                    double d = Double.parseDouble(value);
+                    return FREObject.newObject(d);
+                } catch (NumberFormatException ignored) {
+                }
             }
 
             return FREObject.newObject(value);
