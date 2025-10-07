@@ -74,6 +74,71 @@ public static class ExportFunctions
 
     private static readonly ConcurrentDictionary<Guid, WebSocketClient> WebSocketClients = new();
 
+    // Flag de descarte: 0 = ativo, 1 = disposed
+    private static int _isDisposed;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsDisposed() => Volatile.Read(ref _isDisposed) != 0;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void MarkDisposed() => Interlocked.Exchange(ref _isDisposed, 1);
+
+    // ====== SafeInvoke overloads por tipo de delegate (corrige o erro de conversão para Action<...>) ======
+    private static void SafeInvoke(WriteLogCallBackDelegate invoker, IntPtr p1)
+    {
+        if (IsDisposed() || invoker == null) return;
+        try { invoker(p1); } catch { }
+    }
+    private static void SafeInvoke(UrlLoaderSuccessCallBackDelegate invoker, IntPtr p1)
+    {
+        if (IsDisposed() || invoker == null) return;
+        try { invoker(p1); } catch { }
+    }
+    private static void SafeInvoke(UrlLoaderFailureCallBackDelegate invoker, IntPtr p1, IntPtr p2)
+    {
+        if (IsDisposed() || invoker == null) return;
+        try { invoker(p1, p2); } catch { }
+    }
+    private static void SafeInvoke(UrlLoaderProgressCallBackDelegate invoker, IntPtr p1, IntPtr p2)
+    {
+        if (IsDisposed() || invoker == null) return;
+        try { invoker(p1, p2); } catch { }
+    }
+    private static void SafeInvoke(WebSocketConnectCallBackDelegate invoker, IntPtr p1, IntPtr p2)
+    {
+        if (IsDisposed() || invoker == null) return;
+        try { invoker(p1, p2); } catch { }
+    }
+    private static void SafeInvoke(WebSocketErrorCallBackDelegate invoker, IntPtr a, int b, IntPtr c, int d, IntPtr e)
+    {
+        if (IsDisposed() || invoker == null) return;
+        try { invoker(a, b, c, d, e); } catch { }
+    }
+    private static void SafeInvoke(WebSocketDataCallBackDelegate invoker, IntPtr p1)
+    {
+        if (IsDisposed() || invoker == null) return;
+        try { invoker(p1); } catch { }
+    }
+
+    private static void ClearCallbacks()
+    {
+        _urlLoaderSuccessCallBackDelegate = null;
+        _urlLoaderFailureCallBackDelegate = null;
+        _urlLoaderProgressCallBackDelegate = null;
+        _webSocketConnectCallBackDelegate = null;
+        _webSocketErrorCallBackDelegate = null;
+        _webSocketDataCallBackDelegate = null;
+        _writeLogCallBackDelegate = null;
+
+        _urlLoaderSuccessWrapper = null;
+        _urlLoaderFailureWrapper = null;
+        _urlLoaderProgressWrapper = null;
+        _webSocketConnectWrapper = null;
+        _webSocketErrorWrapper = null;
+        _webSocketDataWrapper = null;
+        _writeLogWrapper = null;
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_initialize", CallConvs = [typeof(CallConvCdecl)])]
     public static int Initialize(
         IntPtr urlLoaderSuccessCallBack,
@@ -103,61 +168,64 @@ public static class ExportFunctions
         {
             _writeLogWrapper = message =>
             {
-                var ptr = Utf8Alloc(message);
-                _writeLogCallBackDelegate(ptr);
-                SafeFreeHGlobal(ptr);
+                if (IsDisposed() || _writeLogCallBackDelegate == null) return;
+                IntPtr ptr = IntPtr.Zero;
+                try { ptr = Utf8Alloc(message); SafeInvoke(_writeLogCallBackDelegate, ptr); }
+                finally { SafeFreeHGlobal(ptr); }
             };
 
             _urlLoaderSuccessWrapper = guid =>
             {
-                var ptr = Utf8Alloc(guid);
-                _urlLoaderSuccessCallBackDelegate(ptr);
-                SafeFreeHGlobal(ptr);
+                if (IsDisposed() || _urlLoaderSuccessCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
+                IntPtr p = IntPtr.Zero;
+                try { p = Utf8Alloc(guid); SafeInvoke(_urlLoaderSuccessCallBackDelegate, p); }
+                finally { SafeFreeHGlobal(p); }
             };
 
             _urlLoaderFailureWrapper = (guid, error) =>
             {
-                var p1 = Utf8Alloc(guid);
-                var p2 = Utf8Alloc(error ?? string.Empty);
-                _urlLoaderFailureCallBackDelegate(p1, p2);
-                SafeFreeHGlobal(p1);
-                SafeFreeHGlobal(p2);
+                if (IsDisposed() || _urlLoaderFailureCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
+                IntPtr p1 = IntPtr.Zero, p2 = IntPtr.Zero;
+                try { p1 = Utf8Alloc(guid); p2 = Utf8Alloc(error ?? string.Empty); SafeInvoke(_urlLoaderFailureCallBackDelegate, p1, p2); }
+                finally { SafeFreeHGlobal(p1); SafeFreeHGlobal(p2); }
             };
 
             _urlLoaderProgressWrapper = (guid, progress) =>
             {
-                var p1 = Utf8Alloc(guid);
-                var p2 = Utf8Alloc(progress ?? string.Empty);
-                _urlLoaderProgressCallBackDelegate(p1, p2);
-                SafeFreeHGlobal(p1);
-                SafeFreeHGlobal(p2);
+                if (IsDisposed() || _urlLoaderProgressCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
+                IntPtr p1 = IntPtr.Zero, p2 = IntPtr.Zero;
+                try { p1 = Utf8Alloc(guid); p2 = Utf8Alloc(progress ?? string.Empty); SafeInvoke(_urlLoaderProgressCallBackDelegate, p1, p2); }
+                finally { SafeFreeHGlobal(p1); SafeFreeHGlobal(p2); }
             };
 
             _webSocketConnectWrapper = (guid, headers) =>
             {
-                var p1 = Utf8Alloc(guid);
-                var p2 = Utf8Alloc(headers ?? string.Empty);
-                _webSocketConnectCallBackDelegate(p1, p2);
-                SafeFreeHGlobal(p1);
-                SafeFreeHGlobal(p2);
+                if (IsDisposed() || _webSocketConnectCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
+                IntPtr p1 = IntPtr.Zero, p2 = IntPtr.Zero;
+                try { p1 = Utf8Alloc(guid); p2 = Utf8Alloc(headers ?? string.Empty); SafeInvoke(_webSocketConnectCallBackDelegate, p1, p2); }
+                finally { SafeFreeHGlobal(p1); SafeFreeHGlobal(p2); }
             };
 
             _webSocketErrorWrapper = (guid, errorCode, error, responseCode, headersEncoded) =>
             {
-                var p1 = Utf8Alloc(guid);
-                var p2 = Utf8Alloc(error ?? string.Empty);
-                var p3 = Utf8Alloc(headersEncoded ?? string.Empty);
-                _webSocketErrorCallBackDelegate(p1, errorCode, p2, responseCode, p3);
-                SafeFreeHGlobal(p1);
-                SafeFreeHGlobal(p2);
-                SafeFreeHGlobal(p3);
+                if (IsDisposed() || _webSocketErrorCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
+                IntPtr p1 = IntPtr.Zero, p2 = IntPtr.Zero, p3 = IntPtr.Zero;
+                try
+                {
+                    p1 = Utf8Alloc(guid);
+                    p2 = Utf8Alloc(error ?? string.Empty);
+                    p3 = Utf8Alloc(headersEncoded ?? string.Empty);
+                    SafeInvoke(_webSocketErrorCallBackDelegate, p1, errorCode, p2, responseCode, p3);
+                }
+                finally { SafeFreeHGlobal(p1); SafeFreeHGlobal(p2); SafeFreeHGlobal(p3); }
             };
 
             _webSocketDataWrapper = guid =>
             {
-                var p1 = Utf8Alloc(guid);
-                _webSocketDataCallBackDelegate(p1);
-                SafeFreeHGlobal(p1);
+                if (IsDisposed() || _webSocketDataCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
+                IntPtr p1 = IntPtr.Zero;
+                try { p1 = Utf8Alloc(guid); SafeInvoke(_webSocketDataCallBackDelegate, p1); }
+                finally { SafeFreeHGlobal(p1); }
             };
         }
         catch
@@ -180,15 +248,25 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_finalize", CallConvs = [typeof(CallConvCdecl)])]
     public static void FinalizeAne()
     {
-        foreach (var (_, ws) in WebSocketClients.ToList())
+        // 1) bloquear novas invocações
+        MarkDisposed();
+        // 3) desconectar/limpar websockets
+        foreach (var (guid, ws) in WebSocketClients.ToList())
         {
-            ws.Disconnect(1000);
+            try { ws.Disconnect(1000); } catch { }
+            try { ws.Dispose(); } catch { }
+            WebSocketClients.TryRemove(guid, out _);
         }
+
+        // 4) zerar delegates
+        ClearCallbacks();
     }
 
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_createWebSocket", CallConvs = [typeof(CallConvCdecl)])]
     public static DataArray CreateWebSocket()
     {
+        if (IsDisposed()) return new DataArray();
+
         var guid = Guid.NewGuid();
         var guidString = guid.ToString();
         var alreadyDispatchError = false;
@@ -197,20 +275,19 @@ public static class ExportFunctions
         var webSocketClient = new WebSocketClient(
             responseHeaders =>
             {
+                if (IsDisposed()) return;
                 var headersEncoded64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString)));
-                _webSocketConnectWrapper(guidString, headersEncoded64);
+                _webSocketConnectWrapper?.Invoke(guidString, headersEncoded64);
             },
-            () => { _webSocketDataWrapper(guidString); },
+            () => { if (!IsDisposed()) _webSocketDataWrapper?.Invoke(guidString); },
             (errorCode, error, responseCode, responseHeaders) =>
             {
                 using (lockError.EnterScope())
                 {
-                    if (alreadyDispatchError)
-                        return;
+                    if (alreadyDispatchError) return;
                     var headersEncoded64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString)));
-                    _webSocketErrorWrapper(guidString, errorCode, error, responseCode, headersEncoded64);
-                    if (WebSocketClients.TryRemove(guid, out var removed))
-                        removed.Dispose();
+                    if (!IsDisposed()) _webSocketErrorWrapper?.Invoke(guidString, errorCode, error, responseCode, headersEncoded64);
+                    if (WebSocketClients.TryRemove(guid, out var removed)) removed.Dispose();
                     alreadyDispatchError = true;
                 }
             },
@@ -228,18 +305,12 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_connectWebSocket", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe int ConnectWebSocket(IntPtr guidPointer, int guidLen, IntPtr pointerUri, int uriLen, IntPtr pointerHeaders, int headersLen)
     {
+        if (IsDisposed()) return 0;
         try
         {
             var guidString = Encoding.UTF8.GetString((byte*)guidPointer, guidLen);
-            if (!Guid.TryParse(guidString, out var guid))
-            {
-                return 0;
-            }
-
-            if (!WebSocketClients.TryGetValue(guid, out var client))
-            {
-                return 0;
-            }
+            if (!Guid.TryParse(guidString, out var guid)) return 0;
+            if (!WebSocketClients.TryGetValue(guid, out var client)) return 0;
 
             var uri = Encoding.UTF8.GetString((byte*)pointerUri, uriLen);
             var headers = Encoding.UTF8.GetString((byte*)pointerHeaders, headersLen);
@@ -258,18 +329,12 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_sendWebSocketMessage", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe int SendWebSocketMessage(IntPtr guidPointer, int guidLen, IntPtr pointerData, int length)
     {
+        if (IsDisposed()) return 0;
         try
         {
             var guidString = Encoding.UTF8.GetString((byte*)guidPointer, guidLen);
-            if (!Guid.TryParse(guidString, out var guid))
-            {
-                return 0;
-            }
-
-            if (!WebSocketClients.TryGetValue(guid, out var client))
-            {
-                return 0;
-            }
+            if (!Guid.TryParse(guidString, out var guid)) return 0;
+            if (!WebSocketClients.TryGetValue(guid, out var client)) return 0;
 
             var data = new byte[length];
             Marshal.Copy(pointerData, data, 0, length);
@@ -286,18 +351,12 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_closeWebSocket", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe int CloseWebSocket(IntPtr guidPointer, int guidLen, int closeCode)
     {
+        if (IsDisposed()) return 0;
         try
         {
             var guidString = Encoding.UTF8.GetString((byte*)guidPointer, guidLen);
-            if (!Guid.TryParse(guidString, out var guid))
-            {
-                return 0;
-            }
-
-            if (!WebSocketClients.TryGetValue(guid, out var client))
-            {
-                return 0;
-            }
+            if (!Guid.TryParse(guidString, out var guid)) return 0;
+            if (!WebSocketClients.TryGetValue(guid, out var client)) return 0;
 
             client.Disconnect(closeCode);
             return 1;
@@ -312,24 +371,14 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_getWebSocketMessage", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe DataArray GetWebSocketMessage(IntPtr guidPointer, int guidLen)
     {
+        if (IsDisposed()) return new DataArray();
         try
         {
             var guidString = Encoding.UTF8.GetString((byte*)guidPointer, guidLen);
-            if (!Guid.TryParse(guidString, out var guid))
-            {
-                return new DataArray();
-            }
+            if (!Guid.TryParse(guidString, out var guid)) return new DataArray();
+            if (!WebSocketClients.TryGetValue(guid, out var client)) return new DataArray();
 
-            if (!WebSocketClients.TryGetValue(guid, out var client))
-            {
-                return new DataArray();
-            }
-
-            if (!client.TryGetNextMessage(out var message))
-            {
-                return new DataArray();
-            }
-
+            if (!client.TryGetNextMessage(out var message)) return new DataArray();
             return CreateDataArrayFromBytes(message);
         }
         catch (Exception e)
@@ -342,6 +391,7 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_addStaticHost", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe void AddStaticHost(IntPtr hostPtr, int hostLen, IntPtr ipPtr, int ipLen)
     {
+        if (IsDisposed()) return;
         try
         {
             var host = Encoding.UTF8.GetString((byte*)hostPtr, hostLen);
@@ -356,6 +406,7 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_removeStaticHost", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe void RemoveStaticHost(IntPtr hostPtr, int hostLen)
     {
+        if (IsDisposed()) return;
         try
         {
             var host = Encoding.UTF8.GetString((byte*)hostPtr, hostLen);
@@ -369,6 +420,7 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_loadUrl", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe DataArray LoadUrl(IntPtr urlPtr, int urlLen, IntPtr methodPtr, int methodLen, IntPtr variablesPtr, int variablesLen, IntPtr headersPtr, int headersLen)
     {
+        if (IsDisposed()) return new DataArray();
         try
         {
             var url = Encoding.UTF8.GetString((byte*)urlPtr, urlLen);
@@ -392,18 +444,12 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_getLoaderResult", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe DataArray GetLoaderResult(IntPtr guidPointer, int guidLen)
     {
+        if (IsDisposed()) return new DataArray();
         try
         {
             var guidString = Encoding.UTF8.GetString((byte*)guidPointer, guidLen);
-            if (!Guid.TryParse(guidString, out var guid))
-            {
-                return new DataArray();
-            }
-
-            if (!LoaderManager.Instance.TryGetResult(guid, out var data))
-            {
-                return new DataArray();
-            }
+            if (!Guid.TryParse(guidString, out var guid)) return new DataArray();
+            if (!LoaderManager.Instance.TryGetResult(guid, out var data)) return new DataArray();
 
             return CreateDataArrayFromBytes(data);
         }
@@ -417,6 +463,7 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_deviceUniqueId", CallConvs = [typeof(CallConvCdecl)])]
     public static DataArray GetDeviceUniqueId()
     {
+        if (IsDisposed()) return new DataArray();
         try
         {
             var s = HardwareID.GetDeviceUniqueIdHash(e => LogAll(e, _writeLogWrapper));
@@ -431,6 +478,7 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_isRunningOnEmulator", CallConvs = [typeof(CallConvCdecl)])]
     public static int IsRunningOnEmulator()
     {
+        if (IsDisposed()) return 0;
         try
         {
             return VMDetector.IsRunningInVM() ? 1 : 0;
@@ -444,6 +492,7 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_decompressByteArray", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe DataArray DecompressByteArray(IntPtr data, int length)
     {
+        if (IsDisposed()) return new DataArray();
         try
         {
             using var srcStream = new UnmanagedMemoryStream((byte*)data.ToPointer(), length);
@@ -462,14 +511,13 @@ public static class ExportFunctions
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_readFileToByteArray", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe DataArray ReadFileToByteArray(IntPtr path, int pathLen)
     {
+        if (IsDisposed()) return new DataArray();
         try
         {
             var filePath = Encoding.UTF8.GetString((byte*)path, pathLen);
-            if (string.IsNullOrEmpty(filePath))
-                return new DataArray();
+            if (string.IsNullOrEmpty(filePath)) return new DataArray();
 
-            if (!File.Exists(filePath))
-                return new DataArray();
+            if (!File.Exists(filePath)) return new DataArray();
 
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read);
             using var ms = new MemoryStream();
@@ -496,6 +544,7 @@ public static class ExportFunctions
         IntPtr pFRENewObjectFromUTF8,
         IntPtr pFRESetObjectProperty)
     {
+        if (IsDisposed()) return IntPtr.Zero;
         var result = IntPtr.Zero;
         try
         {
@@ -548,7 +597,7 @@ public static class ExportFunctions
                         IntPtr arr;
                         freNewObject(arrClassPtr, 0, IntPtr.Zero, out arr, out _);
                         Marshal.FreeHGlobal(arrClassPtr);
-                        if (arr == IntPtr.Zero) continue;
+                        if (arr == IntPtr.Zero) { Marshal.FreeHGlobal(propPtr); continue; }
 
                         uint idx = 0;
                         foreach (var child in g)
@@ -686,7 +735,7 @@ public static class ExportFunctions
                 inner = inner.InnerException;
             }
 
-            callback(sb.ToString());
+            callback?.Invoke(sb.ToString());
         }
         catch
         {
