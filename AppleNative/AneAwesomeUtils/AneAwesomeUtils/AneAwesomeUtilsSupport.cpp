@@ -9,63 +9,89 @@ typedef void* NSWindow; // don't need this..
 #include "DeviceUtils.h"
 #endif
 
-constexpr int EXPORT_FUNCTIONS_COUNT = 15;
+constexpr int EXPORT_FUNCTIONS_COUNT = 22;
 static bool alreadyInitialized = false;
 static auto exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
-static FREContext context;
+
+static FREContext g_ctx = nullptr;
 static std::mutex dispatchMutex;
+static std::atomic<bool> g_finalized{false};
+static std::atomic<bool> g_inited{false};
+static std::atomic<bool> g_subclassed{false};
+static std::atomic<bool> g_hooksStarted{false};
+
+static std::string viewToString(const uint8_t *p, uint32_t len) {
+    if (!p || len == 0) return {};
+    return {reinterpret_cast<const char *>(p), len};
+}
+
+static const uint8_t *const EMPTY_CSTR = reinterpret_cast<const uint8_t *>("");
 
 static void dispatchWebSocketEvent(const char *guid, const char *code, const char *level) {
+    if (g_finalized.load(std::memory_order_acquire)) return;
+    FREContext ctx = g_ctx;
+    if (!ctx) return;
     std::string fullCode = std::string("web-socket;") + code + ";" + guid;
     std::lock_guard lock(dispatchMutex);
-    FREDispatchStatusEventAsync(context, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
+    FREDispatchStatusEventAsync(ctx, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
 }
 
 static void dispatchUrlLoaderEvent(const char *guid, const char *code, const char *level) {
+    if (g_finalized.load(std::memory_order_acquire)) return;
+    FREContext ctx = g_ctx;
+    if (!ctx) return;
     std::string fullCode = std::string("url-loader;") + code + ";" + guid;
     std::lock_guard lock(dispatchMutex);
-    FREDispatchStatusEventAsync(context, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
+    FREDispatchStatusEventAsync(ctx, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
 }
 
-static void __cdecl webSocketConnectCallBack(char *guid, const char *headersEncoded) {
+static void __cdecl webSocketConnectCallBack(const char *guid, const char *headersEncoded) {
     writeLog("connectCallback called");
     dispatchWebSocketEvent(guid, "connected", headersEncoded);
 }
 
-static void __cdecl webSocketDataCallBack(char *guid) {
+static void __cdecl webSocketDataCallBack(const char *guid) {
     writeLog("dataCallback called");
     dispatchWebSocketEvent(guid, "nextMessage", "");
 }
 
-static void __cdecl webSocketErrorCallBack(char *guid, int closeCode, const char *reason, int responseCode, const char *headersEncoded) {
+static void __cdecl webSocketErrorCallBack(const char *guid, int closeCode, const char *reason, int responseCode, const char *headersEncoded) {
     writeLog("disconnectCallback called");
-    std::string closeCodeReason = std::to_string(closeCode) + ";" + std::string(reason) + ";" + std::to_string(responseCode) + ";" + std::string(headersEncoded);
+    std::string closeCodeReason = std::to_string(closeCode) + ";" + std::string(reason ? reason : "") + ";" + std::to_string(responseCode) + ";" + std::string(headersEncoded ? headersEncoded : "");
     writeLog(closeCodeReason.c_str());
     dispatchWebSocketEvent(guid, "disconnected", closeCodeReason.c_str());
 }
 
 static void __cdecl urlLoaderSuccessCallBack(const char *id) {
     writeLog("Calling SuccessCallback");
-    std::string id_str(id);
+    std::string id_str(id ? id : "");
     writeLog(("ID: " + id_str).c_str());
     dispatchUrlLoaderEvent(id_str.c_str(), "success", "");
     writeLog("Dispatched success event");
 }
 
 static void __cdecl urlLoaderProgressCallBack(const char *id, const char *message) {
-    dispatchUrlLoaderEvent(id, "progress", message);
+    dispatchUrlLoaderEvent(id ? id : "", "progress", message ? message : "");
 }
 
 static void __cdecl urlLoaderErrorCallBack(const char *id, const char *message) {
-    dispatchUrlLoaderEvent(id, "error", message);
+    dispatchUrlLoaderEvent(id ? id : "", "error", message ? message : "");
 }
 
 static void writeLogCallback(const char *message) {
-    writeLog(message);
+    writeLog(message ? message : "");
 }
 
 static FREObject awesomeUtils_initialize(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("initialize called");
+    if (g_inited.exchange(true, std::memory_order_acq_rel)) {
+        FREObject resultBool;
+        FRENewObjectFromBool(true, &resultBool);
+        return resultBool;
+    }
+    g_finalized.store(false, std::memory_order_release);
+    g_ctx = ctx;
+
     auto initResult = csharpLibrary_awesomeUtils_initialize(
         (void *) &urlLoaderSuccessCallBack,
         (void *) &urlLoaderProgressCallBack,
@@ -86,6 +112,7 @@ static FREObject awesomeUtils_initialize(FREContext ctx, void *funcData, uint32_
 
 static FREObject awesomeUtils_createWebSocket(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("createWebSocket called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     auto da = csharpLibrary_awesomeUtils_createWebSocket();
     if (da.Size == 0 || da.DataPointer == nullptr) {
         writeLog("createWebSocket returned empty");
@@ -93,7 +120,7 @@ static FREObject awesomeUtils_createWebSocket(FREContext ctx, void *funcData, ui
     }
     auto daDeleter = std::unique_ptr<uint8_t, decltype(&csharpLibrary_awesomeUtils_disposeDataArrayBytes)>(da.DataPointer, &csharpLibrary_awesomeUtils_disposeDataArrayBytes);
     FREObject resultStr;
-    if (FRENewObjectFromUTF8(da.Size, da.DataPointer, &resultStr) != FRE_OK) {
+    if (FRENewObjectFromUTF8(static_cast<uint32_t>(da.Size), da.DataPointer, &resultStr) != FRE_OK) {
         writeLog("Failed to create string object");
         return nullptr;
     }
@@ -102,6 +129,7 @@ static FREObject awesomeUtils_createWebSocket(FREContext ctx, void *funcData, ui
 
 static FREObject awesomeUtils_connectWebSocket(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("connectWebSocket called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 2) return nullptr;
 
     FREObjectType idType;
@@ -110,9 +138,10 @@ static FREObject awesomeUtils_connectWebSocket(FREContext ctx, void *funcData, u
         return nullptr;
     }
 
-    uint32_t idLength;
-    const uint8_t *id;
+    uint32_t idLength = 0;
+    const uint8_t *id = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
+    if (!id) id = EMPTY_CSTR;
 
     FREObjectType uriType;
     if (FREGetObjectType(argv[1], &uriType) != FRE_OK || uriType != FRE_TYPE_STRING) {
@@ -120,32 +149,40 @@ static FREObject awesomeUtils_connectWebSocket(FREContext ctx, void *funcData, u
         return nullptr;
     }
 
-    uint32_t uriLength;
-    const uint8_t *uri;
+    uint32_t uriLength = 0;
+    const uint8_t *uri = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[1], &uriLength, &uri);
+    if (!uri) uri = EMPTY_CSTR;
 
     uint32_t headersLength = 0;
-    const uint8_t *headers = nullptr;
+    const uint8_t *headers = EMPTY_CSTR;
     if (argc > 2) {
         FREObjectType headersType;
         if (FREGetObjectType(argv[2], &headersType) != FRE_OK || headersType != FRE_TYPE_STRING) {
             writeLog("Invalid headers type");
             return nullptr;
         }
-
         FREGetObjectAsUTF8(argv[2], &headersLength, &headers);
+        if (!headers) {
+            headers = EMPTY_CSTR;
+            headersLength = 0;
+        }
     }
 
-    writeLog("Calling connect to uri: ");
-    writeLog(reinterpret_cast<const char *>(uri));
+    writeLog(("Calling connect to uri: " + viewToString(uri, uriLength)).c_str());
 
-    csharpLibrary_awesomeUtils_connectWebSocket(id, static_cast<int>(idLength), uri, static_cast<int>(uriLength), headers, static_cast<int>(headersLength));
+    csharpLibrary_awesomeUtils_connectWebSocket(
+        id, static_cast<int>(idLength),
+        uri, static_cast<int>(uriLength),
+        headers, static_cast<int>(headersLength)
+    );
 
     return nullptr;
 }
 
 static FREObject awesomeUtils_closeWebSocket(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("closeWebSocket called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 1) return nullptr;
 
     FREObjectType idType;
@@ -154,9 +191,10 @@ static FREObject awesomeUtils_closeWebSocket(FREContext ctx, void *funcData, uin
         return nullptr;
     }
 
-    uint32_t idLength;
-    const uint8_t *id;
+    uint32_t idLength = 0;
+    const uint8_t *id = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
+    if (!id) id = EMPTY_CSTR;
 
     uint32_t closeCode = 1000;
     if (argc > 1) {
@@ -172,12 +210,12 @@ static FREObject awesomeUtils_closeWebSocket(FREContext ctx, void *funcData, uin
     }
 
     csharpLibrary_awesomeUtils_closeWebSocket(id, static_cast<int>(idLength), static_cast<int>(closeCode));
-
     return nullptr;
 }
 
 static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("sendMessageWebSocket called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 3) return nullptr;
 
     FREObjectType idType;
@@ -186,9 +224,10 @@ static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcDat
         return nullptr;
     }
 
-    uint32_t idLength;
-    const uint8_t *id;
+    uint32_t idLength = 0;
+    const uint8_t *id = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
+    if (!id) id = EMPTY_CSTR;
 
     FREObjectType typeType;
     if (FREGetObjectType(argv[1], &typeType) != FRE_OK || typeType != FRE_TYPE_NUMBER) {
@@ -218,7 +257,10 @@ static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcDat
             return nullptr;
         }
 
-        csharpLibrary_awesomeUtils_sendWebSocketMessage(id, static_cast<int>(idLength), byteArray.bytes, static_cast<int>(byteArray.length));
+        csharpLibrary_awesomeUtils_sendWebSocketMessage(
+            id, static_cast<int>(idLength),
+            byteArray.bytes, static_cast<int>(byteArray.length)
+        );
 
         FREReleaseByteArray(argv[2]);
     } else {
@@ -231,6 +273,7 @@ static FREObject awesomeUtils_sendWebSocketMessage(FREContext ctx, void *funcDat
 
 static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("getByteArrayMessage called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 1) return nullptr;
 
     FREObjectType idType;
@@ -239,9 +282,10 @@ static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void 
         return nullptr;
     }
 
-    uint32_t idLength;
-    const uint8_t *id;
+    uint32_t idLength = 0;
+    const uint8_t *id = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[0], &idLength, &id);
+    if (!id) id = EMPTY_CSTR;
 
     auto nextMessageResult = csharpLibrary_awesomeUtils_getWebSocketMessage(id, static_cast<int>(idLength));
 
@@ -259,7 +303,7 @@ static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void 
     }
 
     FREObject length;
-    if (FRENewObjectFromUint32(nextMessageResult.Size, &length) != FRE_OK) {
+    if (FRENewObjectFromUint32(static_cast<uint32_t>(nextMessageResult.Size), &length) != FRE_OK) {
         writeLog("Failed to create length object");
         return nullptr;
     }
@@ -273,7 +317,7 @@ static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void 
         writeLog("Failed to acquire target byte array");
         return nullptr;
     }
-    memcpy(ba.bytes, nextMessageResult.DataPointer, nextMessageResult.Size);
+    std::memcpy(ba.bytes, nextMessageResult.DataPointer, nextMessageResult.Size);
     FREReleaseByteArray(byteArrayObject);
 
     return byteArrayObject;
@@ -281,6 +325,7 @@ static FREObject awesomeUtils_getWebSocketByteArrayMessage(FREContext ctx, void 
 
 static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("Calling loadUrl");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 4) return nullptr;
 
     FREObjectType urlType;
@@ -304,27 +349,36 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
         return nullptr;
     }
 
-    uint32_t urlLength;
-    const uint8_t *url;
+    uint32_t urlLength = 0;
+    const uint8_t *url = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[0], &urlLength, &url);
-    writeLog(("URL: " + std::string(reinterpret_cast<const char *>(url), urlLength)).c_str());
+    if (!url) url = EMPTY_CSTR;
+    writeLog(("URL: " + viewToString(url, urlLength)).c_str());
 
-    uint32_t methodLength;
-    const uint8_t *method;
+    uint32_t methodLength = 0;
+    const uint8_t *method = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[1], &methodLength, &method);
-    writeLog(("Method: " + std::string(reinterpret_cast<const char *>(method), methodLength)).c_str());
+    if (!method) method = EMPTY_CSTR;
+    writeLog(("Method: " + viewToString(method, methodLength)).c_str());
 
-    uint32_t variableLength;
-    const uint8_t *variable;
+    uint32_t variableLength = 0;
+    const uint8_t *variable = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[2], &variableLength, &variable);
-    writeLog(("Variable: " + std::string(reinterpret_cast<const char *>(variable), variableLength)).c_str());
+    if (!variable) variable = EMPTY_CSTR;
+    writeLog(("Variable: " + viewToString(variable, variableLength)).c_str());
 
-    uint32_t headersLength;
-    const uint8_t *headers;
+    uint32_t headersLength = 0;
+    const uint8_t *headers = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[3], &headersLength, &headers);
-    writeLog(("Headers: " + std::string(reinterpret_cast<const char *>(headers), headersLength)).c_str());
+    if (!headers) headers = EMPTY_CSTR;
+    writeLog(("Headers: " + viewToString(headers, headersLength)).c_str());
 
-    auto da = csharpLibrary_awesomeUtils_loadUrl(url, static_cast<int>(urlLength), method, static_cast<int>(methodLength), variable, static_cast<int>(variableLength), headers, static_cast<int>(headersLength));
+    auto da = csharpLibrary_awesomeUtils_loadUrl(
+        url, static_cast<int>(urlLength),
+        method, static_cast<int>(methodLength),
+        variable, static_cast<int>(variableLength),
+        headers, static_cast<int>(headersLength)
+    );
 
     if (da.Size == 0 || da.DataPointer == nullptr) {
         writeLog("startLoader returned empty");
@@ -333,11 +387,11 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
 
     auto daDeleter = std::unique_ptr<uint8_t, decltype(&csharpLibrary_awesomeUtils_disposeDataArrayBytes)>(da.DataPointer, &csharpLibrary_awesomeUtils_disposeDataArrayBytes);
 
-    std::string resultString(reinterpret_cast<char *>(da.DataPointer), da.Size);
+    std::string resultString(reinterpret_cast<char *>(da.DataPointer), static_cast<size_t>(da.Size));
     writeLog(("Result: " + resultString).c_str());
 
     FREObject resultStr;
-    if (FRENewObjectFromUTF8(da.Size, da.DataPointer, &resultStr) != FRE_OK) {
+    if (FRENewObjectFromUTF8(static_cast<uint32_t>(da.Size), da.DataPointer, &resultStr) != FRE_OK) {
         writeLog("Failed to create string object");
         return nullptr;
     }
@@ -346,6 +400,7 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
 
 static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData, uint32_t argc, FREObject argv[]) {
     writeLog("Calling getResult");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 1) return nullptr;
 
     FREObjectType uuidType;
@@ -354,9 +409,10 @@ static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData
         return nullptr;
     }
 
-    uint32_t uuidLength;
-    const uint8_t *uuid;
+    uint32_t uuidLength = 0;
+    const uint8_t *uuid = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[0], &uuidLength, &uuid);
+    if (!uuid) uuid = EMPTY_CSTR;
 
     auto result = csharpLibrary_awesomeUtils_getLoaderResult(uuid, static_cast<int>(uuidLength));
 
@@ -373,7 +429,7 @@ static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData
     }
 
     FREObject length;
-    if (FRENewObjectFromUint32(result.Size, &length) != FRE_OK) {
+    if (FRENewObjectFromUint32(static_cast<uint32_t>(result.Size), &length) != FRE_OK) {
         writeLog("Failed to create length object");
         return nullptr;
     }
@@ -387,7 +443,7 @@ static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData
         writeLog("Failed to acquire byte array");
         return nullptr;
     }
-    memcpy(byteArray.bytes, result.DataPointer, result.Size);
+    std::memcpy(byteArray.bytes, result.DataPointer, result.Size);
     FREReleaseByteArray(byteArrayObject);
 
     return byteArrayObject;
@@ -395,6 +451,7 @@ static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData
 
 static FREObject awesomeUtils_addStaticHost(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("addStaticHost called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 2) return nullptr;
 
     FREObjectType hostType;
@@ -408,18 +465,17 @@ static FREObject awesomeUtils_addStaticHost(FREContext ctx, void *funcData, uint
         return nullptr;
     }
 
-    uint32_t hostLength;
-    const uint8_t *host;
+    uint32_t hostLength = 0;
+    const uint8_t *host = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[0], &hostLength, &host);
+    if (!host) host = EMPTY_CSTR;
 
-    uint32_t ipLength;
-    const uint8_t *ip;
+    uint32_t ipLength = 0;
+    const uint8_t *ip = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[1], &ipLength, &ip);
+    if (!ip) ip = EMPTY_CSTR;
 
-    writeLog("Calling addStaticHost with host: ");
-    writeLog(reinterpret_cast<const char *>(host));
-    writeLog(" and ip: ");
-    writeLog(reinterpret_cast<const char *>(ip));
+    writeLog(("Calling addStaticHost with host: " + viewToString(host, hostLength) + " and ip: " + viewToString(ip, ipLength)).c_str());
 
     csharpLibrary_awesomeUtils_addStaticHost(host, static_cast<int>(hostLength), ip, static_cast<int>(ipLength));
 
@@ -428,6 +484,7 @@ static FREObject awesomeUtils_addStaticHost(FREContext ctx, void *funcData, uint
 
 static FREObject awesomeUtils_removeStaticHost(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("removeStaticHost called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 1) return nullptr;
 
     FREObjectType hostType;
@@ -436,12 +493,12 @@ static FREObject awesomeUtils_removeStaticHost(FREContext ctx, void *funcData, u
         return nullptr;
     }
 
-    uint32_t hostLength;
-    const uint8_t *host;
+    uint32_t hostLength = 0;
+    const uint8_t *host = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[0], &hostLength, &host);
+    if (!host) host = EMPTY_CSTR;
 
-    writeLog("Calling removeStaticHost with host: ");
-    writeLog(reinterpret_cast<const char *>(host));
+    writeLog(("Calling removeStaticHost with host: " + viewToString(host, hostLength)).c_str());
 
     csharpLibrary_awesomeUtils_removeStaticHost(host, static_cast<int>(hostLength));
 
@@ -450,6 +507,7 @@ static FREObject awesomeUtils_removeStaticHost(FREContext ctx, void *funcData, u
 
 static FREObject awesomeUtils_getDeviceUniqueId(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("getDeviceId called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
 #if TARGET_OS_IOS
     const char* uniqueIdCString = getDeviceUniqueId();
     
@@ -461,7 +519,7 @@ static FREObject awesomeUtils_getDeviceUniqueId(FREContext ctx, void *funcData, 
     if (da.Size == 0 || da.DataPointer == nullptr) return nullptr;
     auto daDeleter = std::unique_ptr<uint8_t, decltype(&csharpLibrary_awesomeUtils_disposeDataArrayBytes)>(da.DataPointer, &csharpLibrary_awesomeUtils_disposeDataArrayBytes);
     FREObject resultStr;
-    if (FRENewObjectFromUTF8(da.Size, da.DataPointer, &resultStr) != FRE_OK) {
+    if (FRENewObjectFromUTF8(static_cast<uint32_t>(da.Size), da.DataPointer, &resultStr) != FRE_OK) {
         writeLog("Failed to create string object");
         return nullptr;
     }
@@ -471,6 +529,7 @@ static FREObject awesomeUtils_getDeviceUniqueId(FREContext ctx, void *funcData, 
 
 static FREObject awesomeUtils_isRunningOnEmulator(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("isRunningOnEmulator called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     auto result = csharpLibrary_awesomeUtils_isRunningOnEmulator();
     FREObject resultBool;
     if (FRENewObjectFromBool(result == 1, &resultBool) != FRE_OK) {
@@ -482,6 +541,7 @@ static FREObject awesomeUtils_isRunningOnEmulator(FREContext ctx, void *funcData
 
 static FREObject awesomeUtils_decompressByteArray(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("decompressByteArray called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 2) return nullptr;
 
     FREObjectType inType;
@@ -511,7 +571,7 @@ static FREObject awesomeUtils_decompressByteArray(FREContext ctx, void *funcData
     auto daDeleter = std::unique_ptr<uint8_t, decltype(&csharpLibrary_awesomeUtils_disposeDataArrayBytes)>(result.DataPointer, &csharpLibrary_awesomeUtils_disposeDataArrayBytes);
 
     FREObject length;
-    if (FRENewObjectFromUint32(result.Size, &length) != FRE_OK) {
+    if (FRENewObjectFromUint32(static_cast<uint32_t>(result.Size), &length) != FRE_OK) {
         writeLog("Failed to create length object");
         return nullptr;
     }
@@ -525,7 +585,7 @@ static FREObject awesomeUtils_decompressByteArray(FREContext ctx, void *funcData
         writeLog("Failed to acquire target byte array");
         return nullptr;
     }
-    memcpy(targetBA.bytes, result.DataPointer, result.Size);
+    std::memcpy(targetBA.bytes, result.DataPointer, result.Size);
     FREReleaseByteArray(argv[1]);
 
     return nullptr;
@@ -533,6 +593,7 @@ static FREObject awesomeUtils_decompressByteArray(FREContext ctx, void *funcData
 
 static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("readFileToByteArray called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 2) return nullptr;
 
     FREObjectType pathType;
@@ -546,11 +607,12 @@ static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData
         return nullptr;
     }
 
-    uint32_t filePathLength;
-    const uint8_t *filePath;
+    uint32_t filePathLength = 0;
+    const uint8_t *filePath = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[0], &filePathLength, &filePath);
-    writeLog("Calling readFileToByteArray with filePath: ");
-    writeLog(reinterpret_cast<const char *>(filePath));
+    if (!filePath) filePath = EMPTY_CSTR;
+
+    writeLog(("Calling readFileToByteArray with filePath: " + viewToString(filePath, filePathLength)).c_str());
 
     auto result = csharpLibrary_awesomeUtils_readFileToByteArray(filePath, static_cast<int>(filePathLength));
 
@@ -562,7 +624,7 @@ static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData
     auto daDeleter = std::unique_ptr<uint8_t, decltype(&csharpLibrary_awesomeUtils_disposeDataArrayBytes)>(result.DataPointer, &csharpLibrary_awesomeUtils_disposeDataArrayBytes);
 
     FREObject length;
-    if (FRENewObjectFromUint32(result.Size, &length) != FRE_OK) {
+    if (FRENewObjectFromUint32(static_cast<uint32_t>(result.Size), &length) != FRE_OK) {
         writeLog("Failed to create length object");
         return nullptr;
     }
@@ -576,13 +638,14 @@ static FREObject awesomeUtils_readFileToByteArray(FREContext ctx, void *funcData
         writeLog("Failed to acquire target byte array");
         return nullptr;
     }
-    memcpy(targetBA.bytes, result.DataPointer, result.Size);
+    std::memcpy(targetBA.bytes, result.DataPointer, result.Size);
     FREReleaseByteArray(argv[1]);
 
     return nullptr;
 }
 
 static FREObject awesomeUtils_mapXmlToObject(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
     if (argc < 1) return nullptr;
 
     FREObjectType xmlType;
@@ -591,18 +654,20 @@ static FREObject awesomeUtils_mapXmlToObject(FREContext ctx, void *funcData, uin
         return nullptr;
     }
 
-    uint32_t xmlLength;
-    const uint8_t *xml;
+    uint32_t xmlLength = 0;
+    const uint8_t *xml = EMPTY_CSTR;
     FREGetObjectAsUTF8(argv[0], &xmlLength, &xml);
+    if (!xml) xml = EMPTY_CSTR;
 
-    auto result = csharpLibrary_awesomeUtils_mapXmlToObject(xml, static_cast<int>(xmlLength),
-                                                            reinterpret_cast<void *>(&FRENewObject),
-                                                            reinterpret_cast<void *>(&FRENewObjectFromBool),
-                                                            reinterpret_cast<void *>(&FRENewObjectFromInt32),
-                                                            reinterpret_cast<void *>(&FRENewObjectFromUint32),
-                                                            reinterpret_cast<void *>(&FRENewObjectFromDouble),
-                                                            reinterpret_cast<void *>(&FRENewObjectFromUTF8),
-                                                            reinterpret_cast<void *>(&FRESetObjectProperty)
+    auto result = csharpLibrary_awesomeUtils_mapXmlToObject(
+        xml, static_cast<int>(xmlLength),
+        reinterpret_cast<void *>(&FRENewObject),
+        reinterpret_cast<void *>(&FRENewObjectFromBool),
+        reinterpret_cast<void *>(&FRENewObjectFromInt32),
+        reinterpret_cast<void *>(&FRENewObjectFromUint32),
+        reinterpret_cast<void *>(&FRENewObjectFromDouble),
+        reinterpret_cast<void *>(&FRENewObjectFromUTF8),
+        reinterpret_cast<void *>(&FRESetObjectProperty)
     );
 
     return result;
@@ -645,16 +710,21 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[12].function = awesomeUtils_decompressByteArray;
         exportedFunctions[13].name = reinterpret_cast<const uint8_t *>("awesomeUtils_readFileToByteArray");
         exportedFunctions[13].function = awesomeUtils_readFileToByteArray;
-        exportedFunctions[14].name = reinterpret_cast<const uint8_t *>("awesomeUtils_mapXmlToObject");
-        exportedFunctions[14].function = awesomeUtils_mapXmlToObject;
-        context = ctx;
+        exportedFunctions[19].name = reinterpret_cast<const uint8_t *>("awesomeUtils_mapXmlToObject");
+        exportedFunctions[19].function = awesomeUtils_mapXmlToObject;
     }
+    g_ctx = ctx;
+
     if (numFunctionsToSet) *numFunctionsToSet = EXPORT_FUNCTIONS_COUNT;
     if (functionsToSet) *functionsToSet = exportedFunctions;
 }
 
 static void AneAwesomeUtilsSupportFinalizer(FREContext ctx) {
-    csharpLibrary_awesomeUtils_finalize();
+    g_finalized.store(true, std::memory_order_release);
+    g_ctx = nullptr;
+    if (g_inited.exchange(false, std::memory_order_acq_rel)) {
+        csharpLibrary_awesomeUtils_finalize();
+    }
 }
 
 extern "C" {
@@ -668,7 +738,10 @@ __attribute__((visibility("default"))) void InitExtension(void **extDataToSet, F
 
 __attribute__((visibility("default"))) void DestroyExtension(void *extData) {
     writeLog("DestroyExtension called");
-    delete[] exportedFunctions;
+    if (exportedFunctions) {
+        delete[] exportedFunctions;
+        exportedFunctions = nullptr;
+    }
     closeLog();
 }
 }
