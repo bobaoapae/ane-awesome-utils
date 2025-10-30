@@ -110,7 +110,6 @@ public static partial class HardwareID
     {
         if (IsWmicAvailable())
         {
-            // WMIC logic remains unchanged
             var logicalToPartitionOutput = RunCommand("wmic", "path Win32_LogicalDiskToPartition get Antecedent,Dependent");
             var osDiskMapping = logicalToPartitionOutput
                 .Split('\n')
@@ -159,7 +158,6 @@ public static partial class HardwareID
         }
         else
         {
-            // PowerShell script to get the OS disk's serial number
             var command = @"
             $osVolume = Get-Volume -DriveLetter C;
             $partition = Get-Partition | Where-Object { $_.DriveLetter -eq $osVolume.DriveLetter };
@@ -194,9 +192,39 @@ public static partial class HardwareID
             ? GetHardwareInfoWmic("wmic", "baseboard get serialnumber")
             : GetHardwareInfoPowerShell("(Get-WmiObject Win32_BaseBoard).SerialNumber");
 
+        var biosId = IsWmicAvailable()
+            ? GetHardwareInfoWmic("wmic", "bios get serialnumber")
+            : GetHardwareInfoPowerShell("(Get-WmiObject Win32_BIOS).SerialNumber");
+
         var osDiskSerial = GetSystemDiskSerial();
 
-        return $"{cpuId}-{motherboardId}-{osDiskSerial}";
+        string[] memorySerials;
+        string[] videoPnps;
+
+        if (IsWmicAvailable())
+        {
+            var memOutput = RunCommand("wmic", "memorychip get serialnumber");
+            memorySerials = memOutput.Split('\n').Skip(1).Select(l => l.Trim()).Where(s => !string.IsNullOrEmpty(s)).ToArray();
+
+            var vidOutput = RunCommand("wmic", "path Win32_VideoController get PNPDeviceID");
+            videoPnps = vidOutput.Split('\n').Skip(1).Select(l => l.Trim()).Where(s => !string.IsNullOrEmpty(s)).ToArray();
+        }
+        else
+        {
+            var memOut = RunPowerShellCommand("(Get-WmiObject Win32_PhysicalMemory | Select -Expand SerialNumber)");
+            memorySerials = memOut.Split('\n').Select(l => l.Trim()).Where(s => !string.IsNullOrEmpty(s)).ToArray();
+
+            var vidOut = RunPowerShellCommand("(Get-WmiObject Win32_VideoController | Select -Expand PNPDeviceID)");
+            videoPnps = vidOut.Split('\n').Select(l => l.Trim()).Where(s => !string.IsNullOrEmpty(s)).ToArray();
+        }
+
+        var result = string.Join("-",
+            new[] { cpuId, motherboardId, biosId, osDiskSerial }
+            .Concat(memorySerials)
+            .Concat(videoPnps)
+            .Where(s => !string.IsNullOrEmpty(s)));
+
+        return result;
     }
 
     private static string GetLinuxDeviceInfo()

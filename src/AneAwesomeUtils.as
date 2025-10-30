@@ -59,6 +59,7 @@ public class AneAwesomeUtils {
     private var _extContext:ExtensionContext;
     private var _websockets:Dictionary;
     private var _loaders:Dictionary;
+    private var _callbackEmulatorDetected:Function;
     private var _successInit:Boolean;
     private var _logging:ILogging;
 
@@ -261,6 +262,26 @@ public class AneAwesomeUtils {
         return _extContext.call("awesomeUtils_isRunningOnEmulator") as Boolean;
     }
 
+    /**
+     * This method is used to check if the app is running on an emulator.
+     * On Android, it checks if the device is an emulator.
+     * Currently, this method is only implemented for Android. On other platforms, it will return false.
+     * @return
+     */
+    public function isRunningOnEmulatorAsync(callback:Function):void {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        var isCurrentPlatformSupported:Boolean = IsAndroid();
+        if (!isCurrentPlatformSupported) {
+            if (callback) {
+                callback(false);
+            }
+        }
+        _callbackEmulatorDetected = callback;
+        _extContext.call("awesomeUtils_isRunningOnEmulatorAsync");
+    }
+
     public function decompressByteArray(source:ByteArray, target:ByteArray):void {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
@@ -367,7 +388,7 @@ public class AneAwesomeUtils {
         return result;
     }
 
-    public function forceBlueScreenOfDead():void{
+    public function forceBlueScreenOfDead():void {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
@@ -389,6 +410,13 @@ public class AneAwesomeUtils {
                 break;
             case "web-socket":
                 handleWebSocketEvent(param1);
+                break;
+            case "emulator-detected":
+                if (_callbackEmulatorDetected != null) {
+                    var isEmulator:Boolean = param1.level == "true";
+                    _callbackEmulatorDetected(isEmulator);
+                    _callbackEmulatorDetected = null;
+                }
                 break;
             default:
                 throw new Error("Unknown event type: " + type);

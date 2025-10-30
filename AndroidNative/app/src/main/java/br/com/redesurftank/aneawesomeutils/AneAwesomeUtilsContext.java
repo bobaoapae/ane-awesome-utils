@@ -25,14 +25,6 @@ import com.adobe.fre.FRETypeMismatchException;
 import com.adobe.fre.FREWrongThreadException;
 import com.fasterxml.aalto.stax.InputFactoryImpl;
 
-import org.w3c.dom.Attr;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.NamedNodeMap;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
-
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -42,7 +34,8 @@ import java.io.StringWriter;
 import java.net.InetAddress;
 import java.net.ProtocolException;
 import java.net.UnknownHostException;
-import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.nio.channels.AsynchronousFileChannel;
 import java.nio.file.Files;
 import java.security.cert.CertificateException;
 import java.util.ArrayList;
@@ -54,6 +47,9 @@ import java.util.Objects;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.HostnameVerifier;
@@ -62,8 +58,6 @@ import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
@@ -91,6 +85,7 @@ public class AneAwesomeUtilsContext extends FREContext {
     private final Map<UUID, ConcurrentLinkedQueue<WebSocketMessage>> _webSocketMessageQueues = new HashMap<>();
     private final Map<UUID, Thread> _webSocketSenderThreads = new HashMap<>();
     private final Object _webSocketLock = new Object();
+    private final Executor _backGroundExecutor = Executors.newCachedThreadPool();
 
 
     @Override
@@ -112,6 +107,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(DecompressByteArray.KEY, new DecompressByteArray());
         functionMap.put(ReadFileToByteArray.KEY, new ReadFileToByteArray());
         functionMap.put(CheckRunningEmulator.KEY, new CheckRunningEmulator());
+        functionMap.put(CheckRunningEmulatorAsync.KEY, new CheckRunningEmulatorAsync());
         functionMap.put(MapXmlToObject.KEY, new MapXmlToObject());
 
         return Collections.unmodifiableMap(functionMap);
@@ -540,6 +536,7 @@ public class AneAwesomeUtilsContext extends FREContext {
     }
 
     public static class LoadUrl implements FREFunction {
+        private static final ExecutorService FILE_IO = Executors.newCachedThreadPool();
         private static final byte[] EmptyResult = new byte[]{0, 1, 2, 3};
         public static final String KEY = "awesomeUtils_loadUrl";
 
@@ -547,7 +544,9 @@ public class AneAwesomeUtilsContext extends FREContext {
         public FREObject call(FREContext context, FREObject[] args) {
             AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_loadUrl");
             try {
+                UUID uuid = UUID.randomUUID();
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+
 
                 String url = args[0].getAsString();
                 String method = args[1].getAsString();
@@ -558,6 +557,59 @@ public class AneAwesomeUtilsContext extends FREContext {
                 AneAwesomeUtilsLogging.d(TAG, "Method: " + method);
                 AneAwesomeUtilsLogging.d(TAG, "Variables: " + variablesJson);
                 AneAwesomeUtilsLogging.d(TAG, "Headers: " + headersJson);
+
+                if (url != null && url.startsWith("file://")) {
+                    String path = url.replaceFirst("file://", "");
+                    FILE_IO.execute(() -> {
+                        try {
+                            File file = new File(path);
+                            if (!file.exists() || !file.isFile()) {
+                                ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", "File not found: " + path);
+                                return;
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                try (var openChanel = AsynchronousFileChannel.open(file.toPath())) {
+                                    if (!openChanel.isOpen()) {
+                                        ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", "Error opening file: " + path);
+                                        return;
+                                    }
+                                    long size = openChanel.size();
+                                    if (size > Integer.MAX_VALUE) {
+                                        ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", "File too large: " + path);
+                                        return;
+                                    }
+                                    ByteBuffer byteBuffer = ByteBuffer.allocate((int) size);
+                                    openChanel.read(byteBuffer, 0).get();
+                                    byte[] bytes = byteBuffer.array();
+                                    if (bytes.length == 0) bytes = EmptyResult;
+                                    ctx._urlLoaderResults.put(uuid, bytes);
+                                    ctx.dispatchUrlLoaderEvent(uuid.toString(), "success", "");
+                                    return;
+                                } catch (Exception e) {
+                                    AneAwesomeUtilsLogging.e(TAG, "Error reading file with AsynchronousFileChannel: " + path, e);
+                                    ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", "Error reading file: " + e.getMessage());
+                                    return;
+                                }
+                            }
+                            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                            FileInputStream fis = new FileInputStream(file);
+                            byte[] buffer = new byte[8192];
+                            int read;
+                            while ((read = fis.read(buffer)) != -1) {
+                                baos.write(buffer, 0, read);
+                            }
+                            fis.close();
+                            byte[] bytes = baos.toByteArray();
+                            if (bytes.length == 0) bytes = EmptyResult;
+                            ctx._urlLoaderResults.put(uuid, bytes);
+                            ctx.dispatchUrlLoaderEvent(uuid.toString(), "success", "");
+                        } catch (Throwable e) {
+                            AneAwesomeUtilsLogging.e(TAG, "Error reading file: " + path, e);
+                            ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", e.getMessage());
+                        }
+                    });
+                    return FREObject.newObject(uuid.toString());
+                }
 
                 Map<String, String> variables = new HashMap<>();
                 JsonReader reader = new JsonReader(new java.io.StringReader(variablesJson));
@@ -585,8 +637,6 @@ public class AneAwesomeUtilsContext extends FREContext {
                 }
                 reader.close();
 
-                UUID uuid = UUID.randomUUID();
-
                 Request.Builder requestBuilder = new Request.Builder();
 
                 if (method.equals("GET")) {
@@ -611,8 +661,8 @@ public class AneAwesomeUtilsContext extends FREContext {
                 ctx._client.newCall(request).enqueue(new Callback() {
                     @Override
                     public void onFailure(@NonNull Call call, @NonNull IOException e) {
-                        AneAwesomeUtilsLogging.e(TAG, "Error loading url", e);
-                        ctx.dispatchUrlLoaderEvent(uuid.toString(), "ërror", e.getMessage());
+                        AneAwesomeUtilsLogging.e(TAG, "Error loading url:" + url, e);
+                        ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", e.getMessage());
                     }
 
                     @Override
@@ -631,7 +681,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                             ctx._urlLoaderResults.put(uuid, bytes);
                             ctx.dispatchUrlLoaderEvent(uuid.toString(), "success", "");
                         } catch (Exception e) {
-                            AneAwesomeUtilsLogging.e(TAG, "Error loading url", e);
+                            AneAwesomeUtilsLogging.e(TAG, "Error loading url:" + url, e);
                             ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", e.getMessage());
                         }
                     }
@@ -808,6 +858,34 @@ public class AneAwesomeUtilsContext extends FREContext {
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error checking if running on emulator", e);
             }
+            return null;
+        }
+    }
+
+    public static class CheckRunningEmulatorAsync implements FREFunction {
+        public static final String KEY = "awesomeUtils_isRunningOnEmulatorAsync";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_isRunningOnEmulator");
+            AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+            ctx._backGroundExecutor.execute(() -> {
+                try {
+                    var emulatorDetection = new EmulatorDetection();
+                    boolean isEmulator = emulatorDetection.isDetected();
+                    if (isEmulator) {
+                        var detectionList = emulatorDetection.getResult();
+                        AneAwesomeUtilsLogging.i(TAG, "Emulator detected (async): " + detectionList);
+                    }
+                    ctx.dispatchStatusEventAsync("emulator-detected;", isEmulator ? "true" : "false");
+                } catch (UnsatisfiedLinkError e) {
+                    AneAwesomeUtilsLogging.e(TAG, "Emulator detection library not found, assuming not an emulator", e);
+                    ctx.dispatchStatusEventAsync("emulator-detected;", "false");
+                } catch (Exception e) {
+                    AneAwesomeUtilsLogging.e(TAG, "Error checking if running on emulator (async)", e);
+                    ctx.dispatchStatusEventAsync("emulator-detected;", "false");
+                }
+            });
             return null;
         }
     }

@@ -1,6 +1,3 @@
-//
-// Created by User on 08/09/2025.
-//
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <vector>
@@ -38,6 +35,12 @@ static WNDPROC oldProc = nullptr;
 
 static std::vector<DWORD> g_filteredKeys;
 static bool g_filterAll = true;
+
+static HMODULE g_hModule = NULL;
+
+void SetAneModuleHandle(HMODULE hModule) {
+    g_hModule = hModule;
+}
 
 LRESULT CALLBACK SubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_MOUSELEAVE) return 0;
@@ -83,11 +86,16 @@ LRESULT CALLBACK MouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 static DWORD WINAPI KeyboardHookThread(LPVOID) {
     BoostThisThread();
-    HINSTANCE hInstance = GetModuleHandleW(nullptr);
-    g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, hInstance, 0);
+    HMODULE mod = g_hModule ? g_hModule : GetModuleHandleW(NULL);
+    g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, mod, 0);
+    if (!g_keyboardHook) return 0;
     MSG msg;
     while (InterlockedCompareExchange(&g_stopHooks, 0, 0) == 0) {
-        if (GetMessageW(&msg, nullptr, 0, 0) <= 0) break;
+        if (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) break;
+        } else {
+            WaitMessage();
+        }
     }
     if (g_keyboardHook) { UnhookWindowsHookEx(g_keyboardHook); g_keyboardHook = NULL; }
     return 0;
@@ -95,11 +103,16 @@ static DWORD WINAPI KeyboardHookThread(LPVOID) {
 
 static DWORD WINAPI MouseHookThread(LPVOID) {
     BoostThisThread();
-    HINSTANCE hInstance = GetModuleHandleW(nullptr);
-    g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, hInstance, 0);
+    HMODULE mod = g_hModule ? g_hModule : GetModuleHandleW(NULL);
+    g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, mod, 0);
+    if (!g_mouseHook) return 0;
     MSG msg;
     while (InterlockedCompareExchange(&g_stopHooks, 0, 0) == 0) {
-        if (GetMessageW(&msg, nullptr, 0, 0) <= 0) break;
+        if (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) break;
+        } else {
+            WaitMessage();
+        }
     }
     if (g_mouseHook) { UnhookWindowsHookEx(g_mouseHook); g_mouseHook = NULL; }
     return 0;
