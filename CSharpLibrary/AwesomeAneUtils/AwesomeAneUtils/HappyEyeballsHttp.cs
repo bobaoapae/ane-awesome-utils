@@ -7,6 +7,8 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -43,17 +45,45 @@ public static class HappyEyeballsHttp
     // * Look I wanted to keep this simple OK?
     //   We don't do any fancy shit like statefulness or incremental sorting
     //   or incremental DNS updates who cares about that.
-    public static HttpClient CreateHttpClient(bool autoRedirect = true, Action<string> logAction = null)
+    public static HttpClient CreateHttpClient(bool autoRedirect = true, Action<string> logAction = null, string hostForCertificate = null)
     {
         if (logAction != null)
         {
             _log = logAction;
         }
 
+        var clientCert = ClientCertificateProvider.GetCertificate(hostForCertificate);
+        if (clientCert != null)
+        {
+            try
+            {
+                // Re-import to ensure private key is available for the TLS handshake.
+                clientCert = X509CertificateLoader.LoadPkcs12(clientCert.Export(X509ContentType.Pkcs12), password: null, keyStorageFlags: X509KeyStorageFlags.DefaultKeySet);
+            }
+            catch (Exception ex)
+            {
+                _log?.Invoke($"[TLS] Failed to re-import client certificate: {ex.Message}");
+            }
+        }
+
         var sslOptions = new SslClientAuthenticationOptions
         {
             // Leave certs unvalidated for debugging
             RemoteCertificateValidationCallback = delegate { return true; },
+            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+            ClientCertificates = clientCert != null ? new X509CertificateCollection { clientCert } : new X509CertificateCollection(),
+            LocalCertificateSelectionCallback = (sender, targetHost, localCertificates, remoteCertificate, acceptableIssuers) =>
+            {
+                X509Certificate chosen = clientCert;
+                if (chosen == null && localCertificates.Count > 0)
+                {
+                    chosen = localCertificates[0];
+                }
+
+                _log?.Invoke($"[TLS] targetHost={targetHost}, acceptableIssuers={acceptableIssuers?.Length ?? 0}, providedCert={(clientCert != null ? clientCert.Subject : "null")}, chosen={(chosen != null ? chosen.Subject : "null")}");
+                return chosen;
+            }
         };
 
         var handler = new SocketsHttpHandler

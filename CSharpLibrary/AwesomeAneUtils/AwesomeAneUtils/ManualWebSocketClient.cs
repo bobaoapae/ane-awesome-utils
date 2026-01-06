@@ -8,6 +8,7 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -60,8 +61,34 @@ public static class ManualWebSocketClient
                 Stream stream = new NetworkStream(socket, ownsSocket: true);
                 if (uri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase))
                 {
-                    var sslStream = new SslStream(stream, false, (sender, cert, chain, errors) => true);
-                    await sslStream.AuthenticateAsClientAsync(uri.Host);
+                    // Use options-based validation; do not set callback in ctor to avoid duplicate settings.
+                    var sslStream = new SslStream(stream, false);
+
+                    var clientCert = ClientCertificateProvider.GetCertificate(uri.Host);
+                    if (clientCert != null)
+                    {
+                        try
+                        {
+                            // Re-import to ensure private key is available, same as HTTP path.
+                            clientCert = X509CertificateLoader.LoadPkcs12(clientCert.Export(X509ContentType.Pkcs12), password: null, keyStorageFlags: X509KeyStorageFlags.DefaultKeySet);
+                        }
+                        catch (Exception ex)
+                        {
+                            onLog?.Invoke($"[TLS] Failed to re-import client certificate: {ex.Message}");
+                        }
+                    }
+
+                    var sslOptions = new SslClientAuthenticationOptions
+                    {
+                        TargetHost = uri.Host,
+                        RemoteCertificateValidationCallback = (sender, cert, chain, errors) => true
+                    };
+                    if (clientCert != null)
+                    {
+                        sslOptions.ClientCertificates = new X509CertificateCollection { clientCert };
+                    }
+
+                    await sslStream.AuthenticateAsClientAsync(sslOptions, cancellationToken);
                     stream = sslStream;
                 }
 

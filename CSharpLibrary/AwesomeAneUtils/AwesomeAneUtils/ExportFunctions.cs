@@ -87,37 +87,85 @@ public static class ExportFunctions
     private static void SafeInvoke(WriteLogCallBackDelegate invoker, IntPtr p1)
     {
         if (IsDisposed() || invoker == null) return;
-        try { invoker(p1); } catch { }
+        try
+        {
+            invoker(p1);
+        }
+        catch
+        {
+        }
     }
+
     private static void SafeInvoke(UrlLoaderSuccessCallBackDelegate invoker, IntPtr p1)
     {
         if (IsDisposed() || invoker == null) return;
-        try { invoker(p1); } catch { }
+        try
+        {
+            invoker(p1);
+        }
+        catch
+        {
+        }
     }
+
     private static void SafeInvoke(UrlLoaderFailureCallBackDelegate invoker, IntPtr p1, IntPtr p2)
     {
         if (IsDisposed() || invoker == null) return;
-        try { invoker(p1, p2); } catch { }
+        try
+        {
+            invoker(p1, p2);
+        }
+        catch
+        {
+        }
     }
+
     private static void SafeInvoke(UrlLoaderProgressCallBackDelegate invoker, IntPtr p1, IntPtr p2)
     {
         if (IsDisposed() || invoker == null) return;
-        try { invoker(p1, p2); } catch { }
+        try
+        {
+            invoker(p1, p2);
+        }
+        catch
+        {
+        }
     }
+
     private static void SafeInvoke(WebSocketConnectCallBackDelegate invoker, IntPtr p1, IntPtr p2)
     {
         if (IsDisposed() || invoker == null) return;
-        try { invoker(p1, p2); } catch { }
+        try
+        {
+            invoker(p1, p2);
+        }
+        catch
+        {
+        }
     }
+
     private static void SafeInvoke(WebSocketErrorCallBackDelegate invoker, IntPtr a, int b, IntPtr c, int d, IntPtr e)
     {
         if (IsDisposed() || invoker == null) return;
-        try { invoker(a, b, c, d, e); } catch { }
+        try
+        {
+            invoker(a, b, c, d, e);
+        }
+        catch
+        {
+        }
     }
+
     private static void SafeInvoke(WebSocketDataCallBackDelegate invoker, IntPtr p1)
     {
         if (IsDisposed() || invoker == null) return;
-        try { invoker(p1); } catch { }
+        try
+        {
+            invoker(p1);
+        }
+        catch
+        {
+        }
     }
 
     private static void ClearCallbacks()
@@ -170,40 +218,81 @@ public static class ExportFunctions
             {
                 if (IsDisposed() || _writeLogCallBackDelegate == null) return;
                 IntPtr ptr = IntPtr.Zero;
-                try { ptr = Utf8Alloc(message); SafeInvoke(_writeLogCallBackDelegate, ptr); }
-                finally { SafeFreeHGlobal(ptr); }
+                try
+                {
+                    ptr = Utf8Alloc(message);
+                    SafeInvoke(_writeLogCallBackDelegate, ptr);
+                }
+                finally
+                {
+                    SafeFreeHGlobal(ptr);
+                }
             };
 
             _urlLoaderSuccessWrapper = guid =>
             {
                 if (IsDisposed() || _urlLoaderSuccessCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
                 IntPtr p = IntPtr.Zero;
-                try { p = Utf8Alloc(guid); SafeInvoke(_urlLoaderSuccessCallBackDelegate, p); }
-                finally { SafeFreeHGlobal(p); }
+                try
+                {
+                    p = Utf8Alloc(guid);
+                    SafeInvoke(_urlLoaderSuccessCallBackDelegate, p);
+                }
+                finally
+                {
+                    SafeFreeHGlobal(p);
+                }
             };
 
             _urlLoaderFailureWrapper = (guid, error) =>
             {
                 if (IsDisposed() || _urlLoaderFailureCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
                 IntPtr p1 = IntPtr.Zero, p2 = IntPtr.Zero;
-                try { p1 = Utf8Alloc(guid); p2 = Utf8Alloc(error ?? string.Empty); SafeInvoke(_urlLoaderFailureCallBackDelegate, p1, p2); }
-                finally { SafeFreeHGlobal(p1); SafeFreeHGlobal(p2); }
+                try
+                {
+                    p1 = Utf8Alloc(guid);
+                    p2 = Utf8Alloc(error ?? string.Empty);
+                    SafeInvoke(_urlLoaderFailureCallBackDelegate, p1, p2);
+                }
+                finally
+                {
+                    SafeFreeHGlobal(p1);
+                    SafeFreeHGlobal(p2);
+                }
             };
 
             _urlLoaderProgressWrapper = (guid, progress) =>
             {
                 if (IsDisposed() || _urlLoaderProgressCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
                 IntPtr p1 = IntPtr.Zero, p2 = IntPtr.Zero;
-                try { p1 = Utf8Alloc(guid); p2 = Utf8Alloc(progress ?? string.Empty); SafeInvoke(_urlLoaderProgressCallBackDelegate, p1, p2); }
-                finally { SafeFreeHGlobal(p1); SafeFreeHGlobal(p2); }
+                try
+                {
+                    p1 = Utf8Alloc(guid);
+                    p2 = Utf8Alloc(progress ?? string.Empty);
+                    SafeInvoke(_urlLoaderProgressCallBackDelegate, p1, p2);
+                }
+                finally
+                {
+                    SafeFreeHGlobal(p1);
+                    SafeFreeHGlobal(p2);
+                }
             };
 
             _webSocketConnectWrapper = (guid, headers) =>
             {
                 if (IsDisposed() || _webSocketConnectCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
                 IntPtr p1 = IntPtr.Zero, p2 = IntPtr.Zero;
-                try { p1 = Utf8Alloc(guid); p2 = Utf8Alloc(headers ?? string.Empty); SafeInvoke(_webSocketConnectCallBackDelegate, p1, p2); }
-                finally { SafeFreeHGlobal(p1); SafeFreeHGlobal(p2); }
+                try
+                {
+                    p1 = Utf8Alloc(guid);
+                    p2 = Utf8Alloc(headers ?? string.Empty);
+                    SafeInvoke(_webSocketConnectCallBackDelegate, p1, p2);
+                }
+                finally
+                {
+                    SafeFreeHGlobal(p1);
+                    SafeFreeHGlobal(p2);
+                }
             };
 
             _webSocketErrorWrapper = (guid, errorCode, error, responseCode, headersEncoded) =>
@@ -217,15 +306,27 @@ public static class ExportFunctions
                     p3 = Utf8Alloc(headersEncoded ?? string.Empty);
                     SafeInvoke(_webSocketErrorCallBackDelegate, p1, errorCode, p2, responseCode, p3);
                 }
-                finally { SafeFreeHGlobal(p1); SafeFreeHGlobal(p2); SafeFreeHGlobal(p3); }
+                finally
+                {
+                    SafeFreeHGlobal(p1);
+                    SafeFreeHGlobal(p2);
+                    SafeFreeHGlobal(p3);
+                }
             };
 
             _webSocketDataWrapper = guid =>
             {
                 if (IsDisposed() || _webSocketDataCallBackDelegate == null || string.IsNullOrEmpty(guid)) return;
                 IntPtr p1 = IntPtr.Zero;
-                try { p1 = Utf8Alloc(guid); SafeInvoke(_webSocketDataCallBackDelegate, p1); }
-                finally { SafeFreeHGlobal(p1); }
+                try
+                {
+                    p1 = Utf8Alloc(guid);
+                    SafeInvoke(_webSocketDataCallBackDelegate, p1);
+                }
+                finally
+                {
+                    SafeFreeHGlobal(p1);
+                }
             };
         }
         catch
@@ -253,8 +354,22 @@ public static class ExportFunctions
         // 3) desconectar/limpar websockets
         foreach (var (guid, ws) in WebSocketClients.ToList())
         {
-            try { ws.Disconnect(1000); } catch { }
-            try { ws.Dispose(); } catch { }
+            try
+            {
+                ws.Disconnect(1000);
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                ws.Dispose();
+            }
+            catch
+            {
+            }
+
             WebSocketClients.TryRemove(guid, out _);
         }
 
@@ -279,7 +394,10 @@ public static class ExportFunctions
                 var headersEncoded64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(responseHeaders, JsonDictionaryHeaderContext.Default.DictionaryStringString)));
                 _webSocketConnectWrapper?.Invoke(guidString, headersEncoded64);
             },
-            () => { if (!IsDisposed()) _webSocketDataWrapper?.Invoke(guidString); },
+            () =>
+            {
+                if (!IsDisposed()) _webSocketDataWrapper?.Invoke(guidString);
+            },
             (errorCode, error, responseCode, responseHeaders) =>
             {
                 using (lockError.EnterScope())
@@ -385,6 +503,31 @@ public static class ExportFunctions
         {
             LogAll(e, _writeLogWrapper);
             return new DataArray();
+        }
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_addClientCertificate", CallConvs = [typeof(CallConvCdecl)])]
+    public static unsafe int AddClientCertificate(IntPtr hostPtr, int hostLen, IntPtr pfxPtr, int pfxLen, IntPtr passwordPtr, int passwordLen)
+    {
+        if (IsDisposed()) return 0;
+        try
+        {
+            var host = Encoding.UTF8.GetString((byte*)hostPtr, hostLen);
+            var base64Pfx = Encoding.UTF8.GetString((byte*)pfxPtr, pfxLen);
+            var password = Encoding.UTF8.GetString((byte*)passwordPtr, passwordLen);
+
+            var result = ClientCertificateProvider.TryConfigureHost(host, base64Pfx, password, out var errorMessage);
+            if (!result)
+            {
+                LogAll(new Exception($"AddClientCertificate failed for host '{host}': {errorMessage}"), _writeLogWrapper);
+            }
+
+            return result ? 1 : 0;
+        }
+        catch (Exception e)
+        {
+            LogAll(e, _writeLogWrapper);
+            return 0;
         }
     }
 
@@ -597,7 +740,11 @@ public static class ExportFunctions
                         IntPtr arr;
                         freNewObject(arrClassPtr, 0, IntPtr.Zero, out arr, out _);
                         Marshal.FreeHGlobal(arrClassPtr);
-                        if (arr == IntPtr.Zero) { Marshal.FreeHGlobal(propPtr); continue; }
+                        if (arr == IntPtr.Zero)
+                        {
+                            Marshal.FreeHGlobal(propPtr);
+                            continue;
+                        }
 
                         uint idx = 0;
                         foreach (var child in g)

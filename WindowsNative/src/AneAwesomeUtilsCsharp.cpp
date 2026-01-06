@@ -267,6 +267,21 @@ DataArray __cdecl csharpLibrary_awesomeUtils_getWebSocketMessage(const void *gui
     return result;
 }
 
+int __cdecl csharpLibrary_awesomeUtils_addClientCertificate(const void *hostData, int hostLen, const void *p12Data, int p12Len, const void *passwordData, int passwordLen) {
+    writeLog("addClientCertificate called");
+    using AddClientCertificateFunction = int(__cdecl *)(const void *, int, const void *, int, const void *, int);
+    auto func = reinterpret_cast<AddClientCertificateFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_addClientCertificate"));
+
+    if (!func) {
+        writeLog("Could not load addClientCertificate function");
+        return -1;
+    }
+
+    int result = func(hostData, hostLen, p12Data, p12Len, passwordData, passwordLen);
+    writeLog(("addClientCertificate result: " + std::to_string(result)).c_str());
+    return result;
+}
+
 void __cdecl csharpLibrary_awesomeUtils_addStaticHost(const void *hostData, int hostLen, const void *ipData, int ipLen) {
     writeLog("addStaticHost called");
     using AddStaticHostFunction = void(__cdecl *)(const void *, int, const void *, int);

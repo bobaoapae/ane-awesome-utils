@@ -12,7 +12,7 @@
 #include "log.h"
 #include "WindowsFilterInputs.h"
 
-constexpr int EXPORT_FUNCTIONS_COUNT = 22;
+constexpr int EXPORT_FUNCTIONS_COUNT = 23;
 static bool alreadyInitialized = false;
 static auto exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 
@@ -452,6 +452,57 @@ static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData
     return byteArrayObject;
 }
 
+static FREObject awesomeUtils_addClientCertificate(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("addClientCertificate called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+    if (argc < 3) return nullptr;
+
+    FREObjectType hostType;
+    if (FREGetObjectType(argv[0], &hostType) != FRE_OK || hostType != FRE_TYPE_STRING) {
+        writeLog("Invalid host type");
+        return nullptr;
+    }
+
+    FREObjectType certType;
+    if (FREGetObjectType(argv[1], &certType) != FRE_OK || certType != FRE_TYPE_STRING)
+    {
+        writeLog("Invalid cert type");
+        return nullptr;
+    }
+
+    FREObjectType keyType;
+    if (FREGetObjectType(argv[2], &keyType) != FRE_OK || keyType != FRE_TYPE_STRING)
+    {
+        writeLog("Invalid key type");
+        return nullptr;
+    }
+
+    uint32_t hostLength = 0;
+    const uint8_t *host = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[0], &hostLength, &host);
+    if (!host) host = EMPTY_CSTR;
+    uint32_t certLength = 0;
+    const uint8_t *cert = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[1], &certLength, &cert);
+    if (!cert) cert = EMPTY_CSTR;
+    uint32_t keyLength = 0;
+    const uint8_t *key = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[2], &keyLength, &key);
+    if (!key) key = EMPTY_CSTR;
+    writeLog(("Calling addClientCertificate with host: " + viewToString(host, hostLength)).c_str());
+    auto result = csharpLibrary_awesomeUtils_addClientCertificate(
+        host, static_cast<int>(hostLength),
+        cert, static_cast<int>(certLength),
+        key, static_cast<int>(keyLength)
+    );
+    FREObject resultBool;
+    if (FRENewObjectFromBool(result == 1, &resultBool) != FRE_OK)
+    {
+        writeLog("Failed to create bool object");
+    }
+    return resultBool;
+}
+
 static FREObject awesomeUtils_addStaticHost(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("addStaticHost called");
     if (g_finalized.load(std::memory_order_acquire)) return nullptr;
@@ -871,6 +922,8 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[20].function = awesomeUtils_isCheatEngineSpeedHackDetected;
         exportedFunctions[21].name = reinterpret_cast<const uint8_t *>("awesomeUtils_forceBlueScreenOfDead");
         exportedFunctions[21].function = awesomeUtils_forceBlueScreenOfDead;
+        exportedFunctions[22].name = reinterpret_cast<const uint8_t *>("awesomeUtils_addClientCertificate");;
+        exportedFunctions[22].function = awesomeUtils_addClientCertificate;
     }
     g_ctx = ctx;
 

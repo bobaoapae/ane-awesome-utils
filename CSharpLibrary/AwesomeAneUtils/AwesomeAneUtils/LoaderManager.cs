@@ -26,6 +26,7 @@ public class LoaderManager
     private Action<string> _writeLog;
     private HttpClient _client;
     private ConcurrentDictionary<Guid, byte[]> _results;
+    private ConcurrentDictionary<string, HttpClient> _clientsByHost;
 
     public void Initialize(Action<string> success, Action<string, string> error, Action<string, string> progress, Action<string> writeLog)
     {
@@ -36,6 +37,7 @@ public class LoaderManager
         _writeLog = writeLog;
         _client = HappyEyeballsHttp.CreateHttpClient(true, _writeLog);
         _results = new ConcurrentDictionary<Guid, byte[]>();
+        _clientsByHost = new ConcurrentDictionary<string, HttpClient>(StringComparer.OrdinalIgnoreCase);
     }
 
     public string StartLoad(string url, string method, Dictionary<string, string> variables, Dictionary<string, string> headers)
@@ -72,7 +74,22 @@ public class LoaderManager
                     request.Content = new FormUrlEncodedContent(variables);
                 }
 
-                var response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+                // Ensure HttpClient is created with the right host only when a host cert exists.
+                var client = _client;
+                try
+                {
+                    var host = new Uri(url).Host;
+                    if (ClientCertificateProvider.HasHostCertificate(host))
+                    {
+                        client = _clientsByHost.GetOrAdd(host, static (h, writeLog) => HappyEyeballsHttp.CreateHttpClient(true, writeLog, h), _writeLog);
+                    }
+                }
+                catch
+                {
+                    // Fallback to default client if URL parsing fails.
+                }
+
+                var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
                 if (response.StatusCode >= HttpStatusCode.BadRequest)
                 {
                     _ = Task.Run(() =>

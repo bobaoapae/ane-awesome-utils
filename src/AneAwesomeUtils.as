@@ -161,6 +161,13 @@ public class AneAwesomeUtils {
         delete _websockets[ws.id];
     }
 
+    public function addClientCertificate(host:String, p12Data:String, password:String):void {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        _extContext.call("awesomeUtils_addClientCertificate", host, p12Data, password);
+    }
+
     public function addStaticHostResolution(host:String, ip:String):void {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
