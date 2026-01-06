@@ -33,11 +33,18 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.net.InetAddress;
 import java.net.ProtocolException;
+import java.net.URI;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousFileChannel;
 import java.nio.file.Files;
+import java.security.KeyFactory;
+import java.security.KeyStore;
+import java.security.PrivateKey;
 import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -51,12 +58,18 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509KeyManager;
 import javax.net.ssl.X509TrustManager;
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
@@ -87,6 +100,10 @@ public class AneAwesomeUtilsContext extends FREContext {
     private final Object _webSocketLock = new Object();
     private final Executor _backGroundExecutor = Executors.newCachedThreadPool();
 
+    private final Object _clientCertificateLock = new Object();
+    private final Map<String, ClientCertificateEntry> _clientCertificates = new HashMap<>();
+    private X509TrustManager _defaultTrustManager;
+    private SSLSocketFactory _defaultSslSocketFactory;
 
     @Override
     public Map<String, FREFunction> getFunctions() {
@@ -109,6 +126,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(CheckRunningEmulator.KEY, new CheckRunningEmulator());
         functionMap.put(CheckRunningEmulatorAsync.KEY, new CheckRunningEmulatorAsync());
         functionMap.put(MapXmlToObject.KEY, new MapXmlToObject());
+        functionMap.put(AddClientCertificate.KEY, new AddClientCertificate());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -122,6 +140,10 @@ public class AneAwesomeUtilsContext extends FREContext {
             }
             _webSocketSenderThreads.clear();
             _webSocketMessageQueues.clear();
+        }
+
+        synchronized (_clientCertificateLock) {
+            _clientCertificates.clear();
         }
 
         // Original dispose logic if any
@@ -203,6 +225,188 @@ public class AneAwesomeUtilsContext extends FREContext {
         }
     }
 
+    private void ensureDefaultTrust() {
+        if (_defaultTrustManager != null && _defaultSslSocketFactory != null) {
+            return;
+        }
+        try {
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init((KeyStore) null);
+            TrustManager[] trustManagers = tmf.getTrustManagers();
+            for (TrustManager tm : trustManagers) {
+                if (tm instanceof X509TrustManager) {
+                    _defaultTrustManager = (X509TrustManager) tm;
+                    break;
+                }
+            }
+            if (_defaultTrustManager == null) {
+                throw new IllegalStateException("No default X509TrustManager found");
+            }
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, new TrustManager[]{_defaultTrustManager}, null);
+            _defaultSslSocketFactory = sslContext.getSocketFactory();
+        } catch (Exception e) {
+            AneAwesomeUtilsLogging.e(TAG, "Error initializing default trust manager", e);
+        }
+    }
+
+    private OkHttpClient getClientForHost(String host) {
+        if (host == null || host.isEmpty()) {
+            return _client;
+        }
+        ClientCertificateEntry entry = null;
+        synchronized (_clientCertificateLock) {
+            entry = _clientCertificates.get(host.toLowerCase());
+        }
+        if (entry == null) {
+            return _client;
+        }
+        try {
+            return _client.newBuilder().sslSocketFactory(entry.sslSocketFactory, _defaultTrustManager).build();
+        } catch (Exception e) {
+            AneAwesomeUtilsLogging.e(TAG, "Error building client for host with client certificate", e);
+            return _client;
+        }
+    }
+
+    private static class ClientCertificateEntry {
+        final X509KeyManager keyManager;
+        final SSLSocketFactory sslSocketFactory;
+
+        ClientCertificateEntry(X509KeyManager keyManager, SSLSocketFactory sslSocketFactory) {
+            this.keyManager = keyManager;
+            this.sslSocketFactory = sslSocketFactory;
+        }
+    }
+
+    private static class PemUtils {
+        private static final Pattern CERT_PATTERN = Pattern.compile("-----BEGIN CERTIFICATE-----([^-]+)-----END CERTIFICATE-----");
+        private static final Pattern PKCS8_KEY_PATTERN = Pattern.compile("-----BEGIN PRIVATE KEY-----([^-]+)-----END PRIVATE KEY-----", Pattern.DOTALL);
+        private static final Pattern PKCS1_KEY_PATTERN = Pattern.compile("-----BEGIN RSA PRIVATE KEY-----([^-]+)-----END RSA PRIVATE KEY-----", Pattern.DOTALL);
+
+        static List<X509Certificate> parseCertificates(String pem) throws Exception {
+            Matcher matcher = CERT_PATTERN.matcher(pem.replace("\r", ""));
+            List<X509Certificate> certificates = new ArrayList<>();
+            CertificateFactory factory = CertificateFactory.getInstance("X.509");
+            while (matcher.find()) {
+                String base64 = matcher.group(1).replaceAll("\\s+", "");
+                byte[] der = Base64.decode(base64, Base64.DEFAULT);
+                certificates.add((X509Certificate) factory.generateCertificate(new java.io.ByteArrayInputStream(der)));
+            }
+            if (certificates.isEmpty()) {
+                throw new CertificateException("No certificates found in PEM");
+            }
+            return certificates;
+        }
+
+        static PrivateKey parsePrivateKey(String pem) throws Exception {
+            String normalized = pem.replace("\r", "");
+            Matcher pkcs8 = PKCS8_KEY_PATTERN.matcher(normalized);
+            if (pkcs8.find()) {
+                byte[] der = Base64.decode(pkcs8.group(1).replaceAll("\\s+", ""), Base64.DEFAULT);
+                return buildPrivateKeyFromPkcs8(der);
+            }
+            Matcher pkcs1 = PKCS1_KEY_PATTERN.matcher(normalized);
+            if (pkcs1.find()) {
+                byte[] der = Base64.decode(pkcs1.group(1).replaceAll("\\s+", ""), Base64.DEFAULT);
+                byte[] pkcs8Bytes = wrapPkcs1ToPkcs8(der);
+                return buildPrivateKeyFromPkcs8(pkcs8Bytes);
+            }
+            throw new CertificateException("No private key found in PEM");
+        }
+
+        private static PrivateKey buildPrivateKeyFromPkcs8(byte[] der) throws Exception {
+            PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(der);
+            try {
+                return KeyFactory.getInstance("RSA").generatePrivate(keySpec);
+            } catch (Exception ignored) {
+            }
+            try {
+                return KeyFactory.getInstance("EC").generatePrivate(keySpec);
+            } catch (Exception ignored) {
+            }
+            return KeyFactory.getInstance("DSA").generatePrivate(keySpec);
+        }
+
+        private static byte[] wrapPkcs1ToPkcs8(byte[] pkcs1Bytes) throws IOException {
+            // PKCS#8 header for RSA: SEQUENCE {INTEGER 0, SEQ(OID rsaEncryption, NULL), OCTET STRING (PKCS#1 key)}
+            byte[] rsaAlgorithmId = new byte[]{0x30, 0x0d, 0x06, 0x09, 0x2a, (byte) 0x86, 0x48, (byte) 0x86, (byte) 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00};
+            ByteArrayOutputStream inner = new ByteArrayOutputStream();
+            inner.write(0x02); // INTEGER
+            inner.write(0x01);
+            inner.write(0x00); // version 0
+            inner.write(rsaAlgorithmId);
+            inner.write(0x04); // OCTET STRING
+            writeDerLength(inner, pkcs1Bytes.length);
+            inner.write(pkcs1Bytes);
+            byte[] innerBytes = inner.toByteArray();
+
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            out.write(0x30); // SEQUENCE
+            writeDerLength(out, innerBytes.length);
+            out.write(innerBytes);
+            return out.toByteArray();
+        }
+
+        private static void writeDerLength(ByteArrayOutputStream out, int length) {
+            if (length < 0x80) {
+                out.write(length);
+            } else {
+                int numBytes = Integer.BYTES - Integer.numberOfLeadingZeros(length) / 8;
+                out.write(0x80 | numBytes);
+                for (int i = numBytes - 1; i >= 0; i--) {
+                    out.write((length >> (8 * i)) & 0xFF);
+                }
+            }
+        }
+    }
+
+    private ClientCertificateEntry buildClientCertificate(String domain, String pem) throws Exception {
+        ensureDefaultTrust();
+        List<X509Certificate> certificates = PemUtils.parseCertificates(pem);
+        PrivateKey privateKey = PemUtils.parsePrivateKey(pem);
+
+        KeyStore keyStore = KeyStore.getInstance("PKCS12");
+        keyStore.load(null, null);
+        X509Certificate[] chain = certificates.toArray(new X509Certificate[0]);
+        keyStore.setKeyEntry("client", privateKey, new char[0], chain);
+
+        KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        kmf.init(keyStore, new char[0]);
+        KeyManager[] kms = kmf.getKeyManagers();
+        X509KeyManager keyManager = null;
+        for (KeyManager km : kms) {
+            if (km instanceof X509KeyManager) {
+                keyManager = (X509KeyManager) km;
+                break;
+            }
+        }
+        if (keyManager == null) {
+            throw new IllegalStateException("No X509KeyManager available");
+        }
+
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(new KeyManager[]{keyManager}, new TrustManager[]{_defaultTrustManager}, null);
+        return new ClientCertificateEntry(keyManager, sslContext.getSocketFactory());
+    }
+
+    private boolean registerClientCertificate(String domain, String pem) {
+        if (domain == null || domain.isEmpty() || pem == null || pem.isEmpty()) {
+            AneAwesomeUtilsLogging.e(TAG, "Domain or PEM content is empty");
+            return false;
+        }
+        try {
+            ClientCertificateEntry entry = buildClientCertificate(domain, pem);
+            synchronized (_clientCertificateLock) {
+                _clientCertificates.put(domain.toLowerCase(), entry);
+            }
+            return true;
+        } catch (Exception e) {
+            AneAwesomeUtilsLogging.e(TAG, "Error registering client certificate for domain: " + domain, e);
+            return false;
+        }
+    }
+
     public static class Initialize implements FREFunction {
         public static final String KEY = "awesomeUtils_initialize";
 
@@ -211,6 +415,7 @@ public class AneAwesomeUtilsContext extends FREContext {
             AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_initialize");
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+                ctx.ensureDefaultTrust();
                 OkHttpClient.Builder builder = new OkHttpClient.Builder().fastFallback(true).dns(new Dns() {
                     @NonNull
                     @Override
@@ -223,7 +428,9 @@ public class AneAwesomeUtilsContext extends FREContext {
                     return chain.proceed(requestWithUserAgent);
                 });
 
-                builder = configureToIgnoreCertificate(builder);
+                if (ctx._defaultSslSocketFactory != null && ctx._defaultTrustManager != null) {
+                    builder.sslSocketFactory(ctx._defaultSslSocketFactory, ctx._defaultTrustManager);
+                }
                 ctx._client = builder.build();
                 return FREObject.newObject(true);
             } catch (Exception e) {
@@ -391,7 +598,28 @@ public class AneAwesomeUtilsContext extends FREContext {
                     requestBuilder.addHeader(entry.getKey(), entry.getValue());
                 }
 
-                WebSocket webSocket = ctx._client.newWebSocket(requestBuilder.url(url).build(), new okhttp3.WebSocketListener() {
+                HttpUrl parsedUrl = HttpUrl.parse(url);
+                String host = null;
+                if (parsedUrl != null) {
+                    host = parsedUrl.host();
+                } else {
+                    try {
+                        URI uri = URI.create(url);
+                        host = uri.getHost();
+                    } catch (Exception e) {
+                        AneAwesomeUtilsLogging.e(TAG, "Invalid WebSocket URL: " + url, e);
+                        return null;
+                    }
+                }
+
+                if (host == null || host.isEmpty()) {
+                    AneAwesomeUtilsLogging.e(TAG, "Invalid WebSocket URL (no host): " + url);
+                    return null;
+                }
+
+                OkHttpClient client = ctx.getClientForHost(host);
+
+                WebSocket webSocket = client.newWebSocket(requestBuilder.url(url).build(), new okhttp3.WebSocketListener() {
                     private Map<String, String> receivedHeaders = new HashMap<>();
 
                     @Override
@@ -639,6 +867,16 @@ public class AneAwesomeUtilsContext extends FREContext {
 
                 Request.Builder requestBuilder = new Request.Builder();
 
+                HttpUrl parsedUrl = HttpUrl.parse(url);
+                if (parsedUrl == null) {
+                    AneAwesomeUtilsLogging.e(TAG, "Invalid URL: " + url);
+                    return null;
+                }
+
+                for (Map.Entry<String, String> entry : headers.entrySet()) {
+                    requestBuilder.addHeader(entry.getKey(), entry.getValue());
+                }
+
                 if (method.equals("GET")) {
                     okhttp3.HttpUrl.Builder urlBuilder = Objects.requireNonNull(HttpUrl.parse(url)).newBuilder();
                     for (Map.Entry<String, String> entry : variables.entrySet()) {
@@ -653,12 +891,9 @@ public class AneAwesomeUtilsContext extends FREContext {
                     requestBuilder.url(url).post(formBuilder.build());
                 }
 
-                for (Map.Entry<String, String> entry : headers.entrySet()) {
-                    requestBuilder.addHeader(entry.getKey(), entry.getValue());
-                }
-
                 Request request = requestBuilder.build();
-                ctx._client.newCall(request).enqueue(new Callback() {
+                OkHttpClient client = ctx.getClientForHost(parsedUrl.host());
+                client.newCall(request).enqueue(new Callback() {
                     @Override
                     public void onFailure(@NonNull Call call, @NonNull IOException e) {
                         AneAwesomeUtilsLogging.e(TAG, "Error loading url:" + url, e);
@@ -1007,6 +1242,25 @@ public class AneAwesomeUtilsContext extends FREContext {
             }
 
             return FREObject.newObject(value);
+        }
+    }
+
+    public static class AddClientCertificate implements FREFunction {
+        public static final String KEY = "awesomeUtils_addClientCertificate";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_addClientCertificate");
+            try {
+                AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+                String domain = args[0].getAsString();
+                String pemContent = args[1].getAsString();
+                boolean success = ctx.registerClientCertificate(domain, pemContent);
+                return FREObject.newObject(success);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error adding client certificate", e);
+                return null;
+            }
         }
     }
 }
