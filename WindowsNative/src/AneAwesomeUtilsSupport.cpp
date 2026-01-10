@@ -12,6 +12,11 @@
 #include "log.h"
 #include "WindowsFilterInputs.h"
 
+// WDA_EXCLUDEFROMCAPTURE is not defined in older Windows SDKs (requires Windows 10 2004+)
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
 constexpr int EXPORT_FUNCTIONS_COUNT = 23;
 static bool alreadyInitialized = false;
 static auto exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
