@@ -2,7 +2,7 @@
 
 # Define the project path and output directories
 PROJECT_PATH="../CSharpLibrary/AwesomeAneUtils/AwesomeAneUtils/AwesomeAneUtils.csproj"
-OUTPUT_DIR="../CSharpLibrary/AwesomeAneUtils/AwesomeAneUtils/bin/Release/net9.0"
+OUTPUT_DIR="../CSharpLibrary/AwesomeAneUtils/AwesomeAneUtils/bin/Release/net10.0"
 ARM64_DIR="$OUTPUT_DIR/osx-arm64/native"
 X64_DIR="$OUTPUT_DIR/osx-x64/native"
 IOS_ARM64_DIR="$OUTPUT_DIR/ios-arm64/native"

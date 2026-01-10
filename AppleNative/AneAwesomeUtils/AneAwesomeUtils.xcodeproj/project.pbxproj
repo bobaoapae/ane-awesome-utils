@@ -41,8 +41,8 @@
 		57B755652CD02ADE0000FE66 /* AneAwesomeUtils.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = AneAwesomeUtils.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		57B755742CD02AFF0000FE66 /* libAneAwesomeUtils-IOS.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libAneAwesomeUtils-IOS.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		57B755832CD02C190000FE66 /* Adobe AIR.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = "Adobe AIR.framework"; path = "../../../../AirSdks/AIRSDK_51.1.2/runtimes/air/mac/Adobe AIR.framework"; sourceTree = "<group>"; };
-		57B755872CD02C390000FE66 /* AwesomeAneUtils.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = AwesomeAneUtils.dylib; path = "../../CSharpLibrary/AwesomeAneUtils/AwesomeAneUtils/bin/Release/net9.0/macos-universal/AwesomeAneUtils.dylib"; sourceTree = "<group>"; };
-		57B7558B2CD02C4F0000FE66 /* AwesomeAneUtils.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = AwesomeAneUtils.a; path = "../../CSharpLibrary/AwesomeAneUtils/AwesomeAneUtils/bin/Release/net9.0/ios-universal/AwesomeAneUtils.a"; sourceTree = "<group>"; };
+		57B755872CD02C390000FE66 /* AwesomeAneUtils.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = AwesomeAneUtils.dylib; path = "../../CSharpLibrary/AwesomeAneUtils/AwesomeAneUtils/bin/Release/net10.0/macos-universal/AwesomeAneUtils.dylib"; sourceTree = "<group>"; };
+		57B7558B2CD02C4F0000FE66 /* AwesomeAneUtils.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = AwesomeAneUtils.a; path = "../../CSharpLibrary/AwesomeAneUtils/AwesomeAneUtils/bin/Release/net10.0/ios-universal/AwesomeAneUtils.a"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */

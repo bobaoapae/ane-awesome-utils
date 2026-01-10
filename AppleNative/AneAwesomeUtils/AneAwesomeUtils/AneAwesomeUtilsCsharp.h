@@ -24,6 +24,7 @@ extern "C" {
     int __cdecl csharpLibrary_awesomeUtils_sendWebSocketMessage(const void* guidPointer, int guidLen, const void* data, int length);
     int __cdecl csharpLibrary_awesomeUtils_closeWebSocket(const void* guidPointer, int guidLen, int closeCode);
     DataArray __cdecl csharpLibrary_awesomeUtils_getWebSocketMessage(const void* guidPointer, int guidLen);
+    int __cdecl csharpLibrary_awesomeUtils_addClientCertificate(const void* host, int hostLen, const void* p12Data, int p12Len, const void* password, int passwordLen);
     void __cdecl csharpLibrary_awesomeUtils_addStaticHost(const void* host, int hostLen, const void* ip, int ipLen);
     void __cdecl csharpLibrary_awesomeUtils_removeStaticHost(const void* host, int hostLen);
     int __cdecl csharpLibrary_awesomeUtils_isRunningOnEmulator();
