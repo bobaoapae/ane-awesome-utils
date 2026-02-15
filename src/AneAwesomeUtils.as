@@ -2,6 +2,7 @@ package {
 import aneAwesomeUtils.Base64;
 import aneAwesomeUtils.ILogging;
 
+import flash.events.EventDispatcher;
 import flash.events.StatusEvent;
 import flash.external.ExtensionContext;
 import flash.net.URLVariables;
@@ -62,6 +63,8 @@ public class AneAwesomeUtils {
     private var _callbackEmulatorDetected:Function;
     private var _successInit:Boolean;
     private var _logging:ILogging;
+    private var _networkAvailable:Boolean = true;
+    private var _networkEventDispatcher:EventDispatcher;
 
     function AneAwesomeUtils() {
         _extContext = ExtensionContext.createExtensionContext("br.com.redesurftank.aneawesomeutils", "");
@@ -71,6 +74,7 @@ public class AneAwesomeUtils {
         _extContext.addEventListener("status", onStatusEvent);
         _websockets = new Dictionary();
         _loaders = new Dictionary();
+        _networkEventDispatcher = new EventDispatcher();
     }
 
     private function doLogging(level:String, message:String):void {
@@ -109,6 +113,7 @@ public class AneAwesomeUtils {
         _loaders = null;
         _successInit = false;
         _logging = null;
+        _networkEventDispatcher = null;
     }
 
     private function getWebSocket(id:String):AneWebSocket {
@@ -304,6 +309,8 @@ public class AneAwesomeUtils {
         target.position = 0;
     }
 
+    // --- Windows-specific methods ---
+
     public function preventCaptureScreen():Boolean {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
@@ -375,14 +382,6 @@ public class AneAwesomeUtils {
         return result;
     }
 
-    public function mapXmlToObject(xmlString:String):Object {
-        if (!_successInit) {
-            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
-        }
-        var result:Object = _extContext.call("awesomeUtils_mapXmlToObject", xmlString);
-        return result;
-    }
-
     public function isCheatEngineSpeedHackDetected():Boolean {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
@@ -406,6 +405,68 @@ public class AneAwesomeUtils {
         _extContext.call("awesomeUtils_forceBlueScreenOfDead");
     }
 
+    // --- Android-specific methods ---
+
+    public function isBatteryOptimizationIgnored():Boolean {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsAndroid()) {
+            return true;
+        }
+        return _extContext.call("awesomeUtils_isBatteryOptimizationIgnored") as Boolean;
+    }
+
+    public function requestBatteryOptimizationExclusion():void {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsAndroid()) {
+            return;
+        }
+        _extContext.call("awesomeUtils_requestBatteryOptimizationExclusion");
+    }
+
+    public function configureConnection(pingInterval:int, connectTimeout:int, readTimeout:int, writeTimeout:int):void {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsAndroid()) {
+            return;
+        }
+        _extContext.call("awesomeUtils_configureConnection", pingInterval, connectTimeout, readTimeout, writeTimeout);
+    }
+
+    public function releaseConnectionResources():void {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (!IsAndroid()) {
+            return;
+        }
+        _extContext.call("awesomeUtils_releaseConnectionResources");
+    }
+
+    public function get networkAvailable():Boolean {
+        return _networkAvailable;
+    }
+
+    public function addNetworkStateChangeListener(listener:Function):void {
+        _networkEventDispatcher.addEventListener("networkStateChange", listener);
+    }
+
+    public function removeNetworkStateChangeListener(listener:Function):void {
+        _networkEventDispatcher.removeEventListener("networkStateChange", listener);
+    }
+
+    public function mapXmlToObject(xmlString:String):Object {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        var result:Object = _extContext.call("awesomeUtils_mapXmlToObject", xmlString);
+        return result;
+    }
+
     private function onStatusEvent(param1:StatusEvent):void {
         var dataSplit:Array = param1.code.split(";");
         var type:String = dataSplit[0];
@@ -424,6 +485,11 @@ public class AneAwesomeUtils {
                     _callbackEmulatorDetected(isEmulator);
                     _callbackEmulatorDetected = null;
                 }
+                break;
+            case "network":
+                var state:String = dataSplit[1];
+                _networkAvailable = (state == "available");
+                _networkEventDispatcher.dispatchEvent(new StatusEvent("networkStateChange", false, false, state));
                 break;
             default:
                 throw new Error("Unknown event type: " + type);

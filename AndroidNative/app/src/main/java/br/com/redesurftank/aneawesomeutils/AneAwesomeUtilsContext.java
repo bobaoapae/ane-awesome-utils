@@ -2,8 +2,18 @@ package br.com.redesurftank.aneawesomeutils;
 
 import static br.com.redesurftank.aneawesomeutils.AneAwesomeUtilsExtension.TAG;
 
+import android.app.Activity;
 import android.content.ContentResolver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
+import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.Base64;
 import android.util.JsonReader;
@@ -11,6 +21,7 @@ import android.util.JsonWriter;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 
 import com.adobe.fre.FREASErrorException;
 import com.adobe.fre.FREArray;
@@ -32,7 +43,9 @@ import java.io.IOException;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.ProtocolException;
+import java.net.Socket;
 import java.net.URI;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
@@ -61,6 +74,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import javax.net.SocketFactory;
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
@@ -105,6 +119,15 @@ public class AneAwesomeUtilsContext extends FREContext {
     private X509TrustManager _defaultTrustManager;
     private SSLSocketFactory _defaultSslSocketFactory;
 
+    private PowerManager.WakeLock _wakeLock;
+    private WifiManager.WifiLock _wifiLock;
+    private ConnectivityManager _connectivityManager;
+    private ConnectivityManager.NetworkCallback _networkCallback;
+    private int _pingInterval = 30;
+    private int _connectTimeout = 10;
+    private int _readTimeout = 30;
+    private int _writeTimeout = 30;
+
     @Override
     public Map<String, FREFunction> getFunctions() {
         AneAwesomeUtilsLogging.d(TAG, "Creating function Map");
@@ -127,6 +150,10 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(CheckRunningEmulatorAsync.KEY, new CheckRunningEmulatorAsync());
         functionMap.put(MapXmlToObject.KEY, new MapXmlToObject());
         functionMap.put(AddClientCertificate.KEY, new AddClientCertificate());
+        functionMap.put(IsBatteryOptimizationIgnored.KEY, new IsBatteryOptimizationIgnored());
+        functionMap.put(RequestBatteryOptimizationExclusion.KEY, new RequestBatteryOptimizationExclusion());
+        functionMap.put(ConfigureConnection.KEY, new ConfigureConnection());
+        functionMap.put(ReleaseConnectionResources.KEY, new ReleaseConnectionResources());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -146,7 +173,16 @@ public class AneAwesomeUtilsContext extends FREContext {
             _clientCertificates.clear();
         }
 
-        // Original dispose logic if any
+        try { if (_wakeLock != null && _wakeLock.isHeld()) _wakeLock.release(); } catch (Exception e) {}
+        try { if (_wifiLock != null && _wifiLock.isHeld()) _wifiLock.release(); } catch (Exception e) {}
+        try {
+            if (_connectivityManager != null && _networkCallback != null)
+                _connectivityManager.unregisterNetworkCallback(_networkCallback);
+        } catch (Exception e) {}
+        _wakeLock = null;
+        _wifiLock = null;
+        _connectivityManager = null;
+        _networkCallback = null;
     }
 
     private void startWebSocketSenderThread(UUID uuid) {
@@ -161,6 +197,7 @@ public class AneAwesomeUtilsContext extends FREContext {
             }
 
             Thread senderThread = new Thread(() -> {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_FOREGROUND);
                 AneAwesomeUtilsLogging.d(TAG, "Starting WebSocket sender thread for " + uuid);
                 ConcurrentLinkedQueue<WebSocketMessage> queue = _webSocketMessageQueues.get(uuid);
 
@@ -252,17 +289,22 @@ public class AneAwesomeUtilsContext extends FREContext {
 
     private OkHttpClient getClientForHost(String host) {
         if (host == null || host.isEmpty()) {
+            AneAwesomeUtilsLogging.d(TAG, "getClientForHost: host is null or empty, using default client");
             return _client;
         }
         ClientCertificateEntry entry = null;
         synchronized (_clientCertificateLock) {
             entry = _clientCertificates.get(host.toLowerCase());
+            AneAwesomeUtilsLogging.d(TAG, "getClientForHost: looking for host '" + host.toLowerCase() + "', found: " + (entry != null));
         }
         if (entry == null) {
+            AneAwesomeUtilsLogging.d(TAG, "getClientForHost: no certificate for host, using default client");
             return _client;
         }
         try {
-            return _client.newBuilder().sslSocketFactory(entry.sslSocketFactory, _defaultTrustManager).build();
+            X509TrustManager trustManager = entry.trustManager != null ? entry.trustManager : _defaultTrustManager;
+            AneAwesomeUtilsLogging.d(TAG, "getClientForHost: building client with mTLS for host: " + host);
+            return _client.newBuilder().sslSocketFactory(entry.sslSocketFactory, trustManager).build();
         } catch (Exception e) {
             AneAwesomeUtilsLogging.e(TAG, "Error building client for host with client certificate", e);
             return _client;
@@ -272,10 +314,12 @@ public class AneAwesomeUtilsContext extends FREContext {
     private static class ClientCertificateEntry {
         final X509KeyManager keyManager;
         final SSLSocketFactory sslSocketFactory;
+        final X509TrustManager trustManager;
 
-        ClientCertificateEntry(X509KeyManager keyManager, SSLSocketFactory sslSocketFactory) {
+        ClientCertificateEntry(X509KeyManager keyManager, SSLSocketFactory sslSocketFactory, X509TrustManager trustManager) {
             this.keyManager = keyManager;
             this.sslSocketFactory = sslSocketFactory;
+            this.trustManager = trustManager;
         }
     }
 
@@ -361,8 +405,22 @@ public class AneAwesomeUtilsContext extends FREContext {
         }
     }
 
+    private static final X509TrustManager TRUST_ALL_MANAGER = new X509TrustManager() {
+        @Override
+        public void checkClientTrusted(X509Certificate[] chain, String authType) {
+        }
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] chain, String authType) {
+        }
+
+        @Override
+        public X509Certificate[] getAcceptedIssuers() {
+            return new X509Certificate[0];
+        }
+    };
+
     private ClientCertificateEntry buildClientCertificate(String domain, String pem) throws Exception {
-        ensureDefaultTrust();
         List<X509Certificate> certificates = PemUtils.parseCertificates(pem);
         PrivateKey privateKey = PemUtils.parsePrivateKey(pem);
 
@@ -385,9 +443,10 @@ public class AneAwesomeUtilsContext extends FREContext {
             throw new IllegalStateException("No X509KeyManager available");
         }
 
+        // Use trust-all manager for mTLS - we only care about sending client cert
         SSLContext sslContext = SSLContext.getInstance("TLS");
-        sslContext.init(new KeyManager[]{keyManager}, new TrustManager[]{_defaultTrustManager}, null);
-        return new ClientCertificateEntry(keyManager, sslContext.getSocketFactory());
+        sslContext.init(new KeyManager[]{keyManager}, new TrustManager[]{TRUST_ALL_MANAGER}, null);
+        return new ClientCertificateEntry(keyManager, sslContext.getSocketFactory(), TRUST_ALL_MANAGER);
     }
 
     private boolean registerClientCertificate(String domain, String pem) {
@@ -396,15 +455,202 @@ public class AneAwesomeUtilsContext extends FREContext {
             return false;
         }
         try {
+            AneAwesomeUtilsLogging.i(TAG, "Registering client certificate for domain: " + domain.toLowerCase());
             ClientCertificateEntry entry = buildClientCertificate(domain, pem);
             synchronized (_clientCertificateLock) {
                 _clientCertificates.put(domain.toLowerCase(), entry);
             }
+            AneAwesomeUtilsLogging.i(TAG, "Successfully registered client certificate for domain: " + domain.toLowerCase());
             return true;
         } catch (Exception e) {
             AneAwesomeUtilsLogging.e(TAG, "Error registering client certificate for domain: " + domain, e);
             return false;
         }
+    }
+
+    private void acquireConnectionResources() {
+        Activity activity = getActivity();
+        if (activity == null) return;
+
+        // WiFi Lock (no extra permission needed)
+        try {
+            WifiManager wm = (WifiManager) activity.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                _wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ane:websocket");
+                _wifiLock.acquire();
+                AneAwesomeUtilsLogging.i(TAG, "WiFi lock acquired");
+            }
+        } catch (Exception e) {
+            AneAwesomeUtilsLogging.e(TAG, "Error acquiring WiFi lock", e);
+        }
+
+        // WakeLock (needs WAKE_LOCK permission - granted at install time, no runtime check needed)
+        try {
+            PowerManager pm = (PowerManager) activity.getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                _wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ane:websocket");
+                _wakeLock.acquire();
+                AneAwesomeUtilsLogging.i(TAG, "WakeLock acquired");
+            }
+        } catch (Exception e) {
+            AneAwesomeUtilsLogging.e(TAG, "Error acquiring WakeLock", e);
+        }
+
+        // NetworkCallback (needs ACCESS_NETWORK_STATE - granted at install time, API 21+)
+        try {
+            _connectivityManager = (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (_connectivityManager != null) {
+                NetworkRequest request = new NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .build();
+                _networkCallback = new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(@NonNull Network network) {
+                        try {
+                            dispatchStatusEventAsync("network;available", "status");
+                        } catch (Exception e) {
+                            AneAwesomeUtilsLogging.e(TAG, "Error dispatching network available event", e);
+                        }
+                    }
+
+                    @Override
+                    public void onLost(@NonNull Network network) {
+                        try {
+                            dispatchStatusEventAsync("network;lost", "status");
+                        } catch (Exception e) {
+                            AneAwesomeUtilsLogging.e(TAG, "Error dispatching network lost event", e);
+                        }
+                    }
+                };
+                _connectivityManager.registerNetworkCallback(request, _networkCallback);
+                _connectivityManager.requestNetwork(request, _networkCallback);
+                AneAwesomeUtilsLogging.i(TAG, "NetworkCallback registered");
+            }
+        } catch (Exception e) {
+            AneAwesomeUtilsLogging.e(TAG, "Error registering NetworkCallback", e);
+        }
+    }
+
+    private void releaseConnectionResources() {
+        try { if (_wakeLock != null && _wakeLock.isHeld()) _wakeLock.release(); } catch (Exception e) {}
+        try { if (_wifiLock != null && _wifiLock.isHeld()) _wifiLock.release(); } catch (Exception e) {}
+        try {
+            if (_connectivityManager != null && _networkCallback != null)
+                _connectivityManager.unregisterNetworkCallback(_networkCallback);
+        } catch (Exception e) {}
+        _wakeLock = null;
+        _wifiLock = null;
+        _connectivityManager = null;
+        _networkCallback = null;
+        AneAwesomeUtilsLogging.i(TAG, "Connection resources released");
+    }
+
+    OkHttpClient buildClient() {
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .fastFallback(true)
+                .retryOnConnectionFailure(true)
+                .dns(new Dns() {
+                    @NonNull
+                    @Override
+                    public List<InetAddress> lookup(@NonNull String s) throws UnknownHostException {
+                        return InternalDnsResolver.getInstance().resolveHost(s);
+                    }
+                })
+                .socketFactory(new SocketFactory() {
+                    @Override
+                    public Socket createSocket() throws IOException {
+                        Socket socket = new Socket();
+                        socket.setKeepAlive(true);
+                        socket.setTcpNoDelay(true);
+                        return socket;
+                    }
+
+                    @Override
+                    public Socket createSocket(String host, int port) throws IOException {
+                        Socket socket = new Socket();
+                        socket.setKeepAlive(true);
+                        socket.setTcpNoDelay(true);
+                        socket.connect(new InetSocketAddress(host, port));
+                        return socket;
+                    }
+
+                    @Override
+                    public Socket createSocket(String host, int port, InetAddress localHost, int localPort) throws IOException {
+                        Socket socket = new Socket();
+                        socket.setKeepAlive(true);
+                        socket.setTcpNoDelay(true);
+                        socket.bind(new InetSocketAddress(localHost, localPort));
+                        socket.connect(new InetSocketAddress(host, port));
+                        return socket;
+                    }
+
+                    @Override
+                    public Socket createSocket(InetAddress host, int port) throws IOException {
+                        Socket socket = new Socket();
+                        socket.setKeepAlive(true);
+                        socket.setTcpNoDelay(true);
+                        socket.connect(new InetSocketAddress(host, port));
+                        return socket;
+                    }
+
+                    @Override
+                    public Socket createSocket(InetAddress address, int port, InetAddress localAddress, int localPort) throws IOException {
+                        Socket socket = new Socket();
+                        socket.setKeepAlive(true);
+                        socket.setTcpNoDelay(true);
+                        socket.bind(new InetSocketAddress(localAddress, localPort));
+                        socket.connect(new InetSocketAddress(address, port));
+                        return socket;
+                    }
+                })
+                .connectionPool(new okhttp3.ConnectionPool(5, 1, TimeUnit.MINUTES))
+                .pingInterval(_pingInterval, TimeUnit.SECONDS)
+                .connectTimeout(_connectTimeout, TimeUnit.SECONDS)
+                .readTimeout(_readTimeout, TimeUnit.SECONDS)
+                .writeTimeout(_writeTimeout, TimeUnit.SECONDS)
+                .addInterceptor(chain -> {
+                    Request originalRequest = chain.request();
+                    Request requestWithUserAgent = originalRequest.newBuilder().header("User-Agent", originalRequest.header("User-Agent") + " NativeLoader/1.0").build();
+                    return chain.proceed(requestWithUserAgent);
+                });
+
+        configureToIgnoreCertificate(builder);
+        return builder.build();
+    }
+
+    private static OkHttpClient.Builder configureToIgnoreCertificate(OkHttpClient.Builder builder) {
+        AneAwesomeUtilsLogging.w(TAG, "Ignoring SSL certificate");
+        try {
+            final TrustManager[] trustAllCerts = new TrustManager[]{new X509TrustManager() {
+                @Override
+                public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {
+                }
+
+                @Override
+                public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {
+                }
+
+                @Override
+                public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                    return new java.security.cert.X509Certificate[]{};
+                }
+            }};
+
+            final SSLContext sslContext = SSLContext.getInstance("SSL");
+            sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
+            final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
+
+            builder.sslSocketFactory(sslSocketFactory, (X509TrustManager) trustAllCerts[0]);
+            builder.hostnameVerifier(new HostnameVerifier() {
+                @Override
+                public boolean verify(String hostname, SSLSession session) {
+                    return true;
+                }
+            });
+        } catch (Exception e) {
+            AneAwesomeUtilsLogging.e(TAG, "Error configuring to ignore certificate", e);
+        }
+        return builder;
     }
 
     public static class Initialize implements FREFunction {
@@ -415,67 +661,13 @@ public class AneAwesomeUtilsContext extends FREContext {
             AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_initialize");
             try {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
-                ctx.ensureDefaultTrust();
-                OkHttpClient.Builder builder = new OkHttpClient.Builder().fastFallback(true).dns(new Dns() {
-                    @NonNull
-                    @Override
-                    public List<InetAddress> lookup(@NonNull String s) throws UnknownHostException {
-                        return InternalDnsResolver.getInstance().resolveHost(s);
-                    }
-                }).connectionPool(new okhttp3.ConnectionPool(5, 1, TimeUnit.MINUTES)).pingInterval(30, TimeUnit.SECONDS).connectTimeout(5, TimeUnit.SECONDS).addInterceptor(chain -> {
-                    Request originalRequest = chain.request();
-                    Request requestWithUserAgent = originalRequest.newBuilder().header("User-Agent", originalRequest.header("User-Agent") + " NativeLoader/1.0").build();
-                    return chain.proceed(requestWithUserAgent);
-                });
-
-                if (ctx._defaultSslSocketFactory != null && ctx._defaultTrustManager != null) {
-                    builder.sslSocketFactory(ctx._defaultSslSocketFactory, ctx._defaultTrustManager);
-                }
-                ctx._client = builder.build();
+                ctx._client = ctx.buildClient();
+                ctx.acquireConnectionResources();
                 return FREObject.newObject(true);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error initializing", e);
             }
             return null;
-        }
-
-        private static OkHttpClient.Builder configureToIgnoreCertificate(OkHttpClient.Builder builder) {
-            AneAwesomeUtilsLogging.w(TAG, "Ignoring SSL certificate");
-            try {
-
-                // Create a trust manager that does not validate certificate chains
-                final TrustManager[] trustAllCerts = new TrustManager[]{new X509TrustManager() {
-                    @Override
-                    public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {
-                    }
-
-                    @Override
-                    public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {
-                    }
-
-                    @Override
-                    public java.security.cert.X509Certificate[] getAcceptedIssuers() {
-                        return new java.security.cert.X509Certificate[]{};
-                    }
-                }};
-
-                // Install the all-trusting trust manager
-                final SSLContext sslContext = SSLContext.getInstance("SSL");
-                sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
-                // Create an ssl socket factory with our all-trusting manager
-                final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
-
-                builder.sslSocketFactory(sslSocketFactory, (X509TrustManager) trustAllCerts[0]);
-                builder.hostnameVerifier(new HostnameVerifier() {
-                    @Override
-                    public boolean verify(String hostname, SSLSession session) {
-                        return true;
-                    }
-                });
-            } catch (Exception e) {
-                AneAwesomeUtilsLogging.e(TAG, "Error configuring to ignore certificate", e);
-            }
-            return builder;
         }
     }
 
@@ -1261,6 +1453,107 @@ public class AneAwesomeUtilsContext extends FREContext {
                 AneAwesomeUtilsLogging.e(TAG, "Error adding client certificate", e);
                 return null;
             }
+        }
+    }
+
+    public static class IsBatteryOptimizationIgnored implements FREFunction {
+        public static final String KEY = "awesomeUtils_isBatteryOptimizationIgnored";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_isBatteryOptimizationIgnored");
+            try {
+                // Doze mode only exists on API 23+, no need to show dialog on older versions
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                    return FREObject.newObject(true);
+                }
+                Activity activity = context.getActivity();
+                if (activity == null) return FREObject.newObject(true);
+                PowerManager pm = (PowerManager) activity.getSystemService(Context.POWER_SERVICE);
+                if (pm == null) return FREObject.newObject(true);
+                boolean ignored = pm.isIgnoringBatteryOptimizations(activity.getPackageName());
+                return FREObject.newObject(ignored);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error checking battery optimization", e);
+                return null;
+            }
+        }
+    }
+
+    public static class RequestBatteryOptimizationExclusion implements FREFunction {
+        public static final String KEY = "awesomeUtils_requestBatteryOptimizationExclusion";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.i(TAG, "awesomeUtils_requestBatteryOptimizationExclusion called");
+            try {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                    AneAwesomeUtilsLogging.i(TAG, "API < 23, Doze mode not available, skipping");
+                    return null;
+                }
+                Activity activity = context.getActivity();
+                if (activity == null) {
+                    AneAwesomeUtilsLogging.e(TAG, "Activity is null, cannot request battery optimization exclusion");
+                    return null;
+                }
+                String packageName = activity.getPackageName();
+                AneAwesomeUtilsLogging.i(TAG, "Requesting battery optimization exclusion for: " + packageName);
+
+                // Check if already ignored
+                PowerManager pm = (PowerManager) activity.getSystemService(Context.POWER_SERVICE);
+                if (pm != null && pm.isIgnoringBatteryOptimizations(packageName)) {
+                    AneAwesomeUtilsLogging.i(TAG, "Battery optimization already ignored, skipping");
+                    return null;
+                }
+
+                // Launch a transparent wrapper Activity that hosts the system dialog.
+                // This avoids AIR's immersive mode (ProxyWindowCallback.onWindowFocusChanged)
+                // from reclaiming focus and dismissing the system dialog.
+                // See: Google Issue Tracker 36992828.
+                Intent wrapperIntent = new Intent(activity, BatteryOptActivity.class);
+                activity.startActivity(wrapperIntent);
+                AneAwesomeUtilsLogging.i(TAG, "BatteryOptActivity launched");
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error requesting battery optimization exclusion", e);
+            }
+            return null;
+        }
+    }
+
+    public static class ConfigureConnection implements FREFunction {
+        public static final String KEY = "awesomeUtils_configureConnection";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_configureConnection");
+            try {
+                AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+                ctx._pingInterval = args[0].getAsInt();
+                ctx._connectTimeout = args[1].getAsInt();
+                ctx._readTimeout = args[2].getAsInt();
+                ctx._writeTimeout = args[3].getAsInt();
+                ctx._client = ctx.buildClient();
+                AneAwesomeUtilsLogging.i(TAG, "Connection configured: ping=" + ctx._pingInterval + "s, connect=" + ctx._connectTimeout + "s, read=" + ctx._readTimeout + "s, write=" + ctx._writeTimeout + "s");
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error configuring connection", e);
+            }
+            return null;
+        }
+    }
+
+    public static class ReleaseConnectionResources implements FREFunction {
+        public static final String KEY = "awesomeUtils_releaseConnectionResources";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_releaseConnectionResources");
+            try {
+                AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+                ctx.releaseConnectionResources();
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error releasing connection resources", e);
+            }
+            return null;
         }
     }
 }
