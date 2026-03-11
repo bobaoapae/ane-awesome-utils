@@ -1,226 +1,88 @@
-
 # AneAwesomeUtils
 
 **Extension ID:** `br.com.redesurftank.aneawesomeutils`
 
-AneAwesomeUtils is an Adobe AIR Native Extension (ANE) compatible with Windows 32-bit, Android, macOS, and iOS platforms. It provides an efficient way to load URLs with various HTTP methods, custom headers, or parameters, and offers WebSocket support for real-time communication.
+AneAwesomeUtils is an Adobe AIR Native Extension (ANE) that provides advanced networking, security, device utilities, and platform-specific features for Windows, Android, macOS, and iOS.
 
-## Key Features
+## Features
 
-- **Happy Eyeballs (RFC 8305)**: Implements the Happy Eyeballs algorithm to improve connection performance by quickly falling back to the best available IP version (IPv4 or IPv6).
-- **HTTP/2 Support**: Utilizes HTTP/2 for faster and more efficient network communication, with a fallback to HTTP/1 if needed.
-- **TLS 1.3**: Supports the latest TLS 1.3 protocol for enhanced security and performance.
-- **Custom DNS Resolver**: Uses Cloudflare and Google DNS by default, with the ability to configure custom DNS servers for flexibility.
-- **WebSocket Support**: Allows you to create and manage WebSocket connections, send and receive binary data, and handle connection events such as open, close, and error.
+| Feature | Windows | Android | macOS | iOS |
+|---|:---:|:---:|:---:|:---:|
+| [HTTP Client](docs/http-client.md) (HTTP/2, TLS 1.3, Happy Eyeballs) | x | x | x | x |
+| [WebSocket](docs/websocket.md) (binary mode) | x | x | x | x |
+| [mTLS Client Certificates](docs/mtls.md) | x | x | x | x |
+| [Static DNS / Host Resolution](docs/dns.md) | x | x | x | x |
+| [Compression / Decompression](docs/utilities.md#decompression) | x | x | x | x |
+| [File I/O](docs/utilities.md#file-io) | x | x | x | x |
+| [XML to Object Mapping](docs/utilities.md#xml-to-object) | x | x | x | x |
+| [Device Unique ID](docs/utilities.md#device-unique-id) | x | x | x | x |
+| [Emulator / VM Detection](docs/utilities.md#emulator--vm-detection) | x | x | | |
+| [Network State Monitoring](docs/platform-android.md#network-state-monitoring) | | x | | |
+| [Screen Capture Prevention](docs/platform-windows.md#screen-capture-prevention) | x | | | |
+| [Input Filtering (anti-cheat)](docs/platform-windows.md#input-filtering) | x | | | |
+| [Speed Hack Detection](docs/platform-windows.md#speed-hack-detection) | x | | | |
+| [Audio Safety Hook](docs/platform-windows.md#audio-safety-hook) | x | | | |
+| [Battery Optimization](docs/platform-android.md#battery-optimization) | | x | | |
+| [Connection Configuration](docs/platform-android.md#connection-configuration) | | x | | |
 
 ## Supported Platforms
 
-- Windows 32-bit (7 SP1+)
-- Android (API 22+)
-- macOS (10.12+)
-- iOS (12.2+)
+| Platform | Min Version | Architecture |
+|---|---|---|
+| Windows | 7 SP1 | x86, x86-64 |
+| Android | API 22 (5.1) | arm64-v8a, armeabi-v7a |
+| macOS | 10.12 (Sierra) | x86-64 |
+| iOS | 12.2 | arm64 |
 
-## Installation
-
-Ensure that you have included the `AneAwesomeUtils` ANE in your Adobe AIR project. Update your application descriptor XML to include the extension ID `br.com.redesurftank.aneawesomeutils` and necessary permissions for each platform.
-
-## Initialization
-
-Before using AneAwesomeUtils, check if the extension is supported on the current platform and initialize it only once during your application lifecycle.
-
-### Step-by-Step Initialization
-
-1. **Check if the extension is supported:**
-
-   ```actionscript
-   if (AneAwesomeUtils.isSupported) {
-       trace("AneAwesomeUtils is supported on this platform.");
-   } else {
-       trace("AneAwesomeUtils is not supported on this platform.");
-   }
-   ```
-
-2. **Initialize the extension (do this once, typically in your app startup code):**
-
-   ```actionscript
-   var initialized:Boolean = false;
-   
-   if (AneAwesomeUtils.isSupported) {
-       initialized = AneAwesomeUtils.instance.initialize();
-       if (initialized) {
-           trace("AneAwesomeUtils initialized successfully.");
-       } else {
-           trace("Failed to initialize AneAwesomeUtils.");
-       }
-   }
-   ```
-
-## Static Host Resolution
-
-You can use the `addStaticHostResolution` method to manually add a list of IP addresses for a specific host. This feature is useful for both URL loading and WebSocket connections.
-
-### Example: Adding Static Host Resolutions
+## Quick Start
 
 ```actionscript
-// Ensure AneAwesomeUtils is initialized and ready to use
-if (initialized) {
-    // Add multiple IPs for a specific host
-    AneAwesomeUtils.instance.addStaticHostResolution("example.com", "192.168.0.1");
-    AneAwesomeUtils.instance.addStaticHostResolution("example.com", "192.168.0.2");
-    AneAwesomeUtils.instance.addStaticHostResolution("example.com", "192.168.0.3");
+// 1. Check support
+if (!AneAwesomeUtils.isSupported) return;
 
-    trace("Static host resolutions added for example.com.");
-}
+// 2. Initialize (once)
+var ok:Boolean = AneAwesomeUtils.instance.initialize();
+
+// 3. Use it
+AneAwesomeUtils.instance.loadUrl("https://api.example.com/data", "GET",
+    null, null,
+    function(response:ByteArray):void { trace(response.toString()); },
+    function(error:Error):void { trace(error.message); }
+);
 ```
 
-## URL Loading Usage
+See [Getting Started](docs/getting-started.md) for full installation and setup instructions.
 
-After initialization, you can use `AneAwesomeUtils` to load URLs with different HTTP methods and configurations.
+## Documentation
 
-### Loading a URL
+- [Getting Started](docs/getting-started.md) - Installation, app descriptor, initialization
+- [HTTP Client](docs/http-client.md) - URL loading with HTTP/2, progress, custom headers
+- [WebSocket](docs/websocket.md) - Binary WebSocket connections
+- [mTLS Client Certificates](docs/mtls.md) - Mutual TLS authentication
+- [Static DNS / Host Resolution](docs/dns.md) - Custom DNS mapping
+- [Utilities](docs/utilities.md) - Compression, file I/O, XML parsing, device ID, emulator detection
+- [Windows Features](docs/platform-windows.md) - Screen capture, input filtering, speed hack detection, audio hook
+- [Android Features](docs/platform-android.md) - Battery optimization, connection config, network monitoring
+- [Logging](docs/logging.md) - Custom logging interface
 
-To load a URL, use the `loadUrl` method from the `AneAwesomeUtils` instance.
+## Networking Highlights
 
-#### `loadUrl` Method Signature
+- **Happy Eyeballs (RFC 8305)** - Fast dual-stack IPv4/IPv6 connection racing
+- **HTTP/2** with automatic HTTP/1.1 fallback
+- **TLS 1.3** for improved security and performance
+- **Custom DNS** - Cloudflare + Google DNS by default, configurable static hosts
 
-```actionscript
-native public function loadUrl(
-    url:String, 
-    method:String = "GET", 
-    variables:Object = null, 
-    headers:Object = null, 
-    onResult:Function = null, 
-    onError:Function = null, 
-    onProgress:Function = null
-):void;
-```
+## Build Output
 
-#### Parameters
+| File | Description |
+|---|---|
+| `AneBuild/br.com.redesurftank.aneawesomeutils.ane` | Packaged ANE (all platforms) |
+| `AneBuild/windows-32/AneAwesomeUtilsWindows.dll` | Windows x86 native |
+| `AneBuild/windows-64/AneAwesomeUtilsWindows.dll` | Windows x64 native |
+| `AndroidNative/app/build/outputs/aar/app-debug.aar` | Android native |
+| `AppleNative/build/AneAwesomeUtils.framework` | macOS native |
+| `AppleNative/build/libAneAwesomeUtils-IOS.a` | iOS native |
 
-- **url**: The URL to load.
-- **method**: The HTTP method to use (default is "GET").
-- **variables**: An object containing variables to send with the request (optional).
-- **headers**: An object containing custom headers to send with the request (optional).
-- **onResult**: A callback function that will be called upon a successful response. The response is passed as a `ByteArray`.
-- **onError**: A callback function that will be called if an error occurs. The error is passed as an `Error` object.
-- **onProgress**: A callback function that will be called to report the progress of the loading. Progress is passed as a `Number` representing the percentage completed.
+## License
 
-### Example Code for URL Loading
-
-Below is an example demonstrating how to use `AneAwesomeUtils` to load a URL after the extension has been initialized:
-
-```actionscript
-// Initialize AneAwesomeUtils once in your application
-var initialized:Boolean = false;
-
-if (AneAwesomeUtils.isSupported) {
-    initialized = AneAwesomeUtils.instance.initialize();
-    if (initialized) {
-        trace("AneAwesomeUtils initialized successfully.");
-    } else {
-        trace("Failed to initialize AneAwesomeUtils.");
-    }
-} else {
-    trace("AneAwesomeUtils is not supported on this platform.");
-}
-
-// Usage example after initialization
-if (initialized) {
-    // Define the URL, HTTP method, and optional headers and variables
-    var url:String = "https://example.com/api/data";
-    var method:String = "POST";
-    var variables:Object = { key1: "value1", key2: "value2" };
-    var headers:Object = { "Content-Type": "application/json" };
-
-    // Load the URL with specified parameters and handle responses
-    AneAwesomeUtils.instance.loadUrl(
-        url,
-        method,
-        variables,
-        headers,
-        function(response:ByteArray):void {
-            trace("Success: " + response.toString());
-        },
-        function(error:Error):void {
-            trace("Error: " + error.message);
-        },
-        function(progress:Number):void {
-            trace("Progress: " + progress + "% completed.");
-        }
-    );
-}
-```
-
-## WebSocket Usage
-
-AneAwesomeUtils also supports WebSocket connections in binary mode only. You can create, send messages, and handle events using WebSocket functionality.
-
-### WebSocket Example
-
-Below is an example demonstrating how to create and use a WebSocket connection:
-
-```actionscript
-// Initialize AneAwesomeUtils once in your application
-var initialized:Boolean = false;
-
-if (AneAwesomeUtils.isSupported) {
-    initialized = AneAwesomeUtils.instance.initialize();
-    if (initialized) {
-        trace("AneAwesomeUtils initialized successfully.");
-    } else {
-        trace("Failed to initialize AneAwesomeUtils.");
-    }
-}
-
-if (initialized) {
-    // Create a new WebSocket connection
-    var ws:AneWebSocket = AneAwesomeUtils.instance.createWebSocket();
-    
-    // Connect to the WebSocket server
-    ws.connect("wss://example.com/socket");
-
-    // Prepare binary data to send
-    var sendBytes:ByteArray = new ByteArray();
-    sendBytes.writeUTFBytes("Hello in binary!");
-
-    // Send the binary message
-    ws.sendMessage(WebSocket.fmtBINARY, sendBytes);
-
-    // Handle WebSocket events
-    ws.addEventListener("connect", function(event:Event):void {
-        trace("Connected to WebSocket server.");
-    });
-    
-    ws.addEventListener("websocketData", function(event:WebSocketEvent):void {
-        var data:ByteArray = event.data as ByteArray;
-        trace("Received data: " + data.toString());
-    });
-    
-    ws.addEventListener("close", function(event:Event):void {
-        trace("WebSocket connection closed.");
-    });
-    
-    ws.addEventListener("ioError", function(event:IOErrorEvent):void {
-        trace("WebSocket error: " + event.text);
-    });
-    
-    // Close the WebSocket connection
-    ws.close();
-}
-```
-
-## Notes
-
-- Always check if the extension is supported on the current platform using `AneAwesomeUtils.isSupported`.
-- Initialize the extension only once before using other methods.
-- Ensure your Adobe AIR application descriptor XML file is correctly configured for each platform with the required permissions and extension ID.
-
-## Troubleshooting
-
-If you encounter issues:
-
-1. **Check platform compatibility**: Ensure the ANE is supported on your target platform.
-2. **Review initialization**: Make sure `initialize()` is called and returns `true`.
-3. **Inspect callback functions**: Ensure your callback functions handle errors and results appropriately.
-
-For further assistance, consult the official documentation or contact support.
+Proprietary.
