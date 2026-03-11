@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.WebSockets;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -27,13 +28,21 @@ public class WebSocketClient : IDisposable
     private Stream _stream;
     private Dictionary<string, string> _receivedHeaders = new();
     private int _responseCode;
-    private bool _disposed;
-    private bool _isDisconnectCalled;
+    private int _disposed;
+    private int _isDisconnectCalled;
     private readonly Lock _sendLocker;
+    private Task _sendTask;
+    private Task _receiveTask;
     private readonly Channel<byte[]> _sendChannel;
     private readonly ConcurrentQueue<IMemoryOwner<byte>> _receiveQueue;
 
     public IReadOnlyDictionary<string, string> ReceivedHeaders => _receivedHeaders;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool IsDisposed() => Volatile.Read(ref _disposed) != 0;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool IsDisconnectCalled() => Volatile.Read(ref _isDisconnectCalled) != 0;
 
     public WebSocketClient(Action<Dictionary<string, string>> onConnect, Action onReceived, Action<int, string, int, Dictionary<string, string>> onIoError, Action<string> onLog)
     {
@@ -75,8 +84,8 @@ public class WebSocketClient : IDisposable
                 _onConnect?.Invoke(_receivedHeaders); // Callback after successful connection
 
                 // Start background tasks for sending and receiving messages
-                _ = Task.Factory.StartNew(SendLoopAsync, TaskCreationOptions.LongRunning);
-                _ = Task.Factory.StartNew(ReceiveLoopAsync, TaskCreationOptions.LongRunning);
+                _sendTask = Task.Factory.StartNew(SendLoopAsync, TaskCreationOptions.LongRunning).Unwrap();
+                _receiveTask = Task.Factory.StartNew(ReceiveLoopAsync, TaskCreationOptions.LongRunning).Unwrap();
             }
             else
             {
@@ -182,14 +191,14 @@ public class WebSocketClient : IDisposable
 
     public void Disconnect(int closeReason)
     {
-        _isDisconnectCalled = true;
+        Interlocked.Exchange(ref _isDisconnectCalled, 1);
         _ = Task.Run(async () => await DisconnectAsync(closeReason));
     }
 
     public bool TryGetNextMessage(out byte[] data)
     {
         data = [];
-        if (_isDisconnectCalled)
+        if (IsDisconnectCalled())
             return false;
 
         if (!_receiveQueue.TryDequeue(out var memory))
@@ -202,7 +211,7 @@ public class WebSocketClient : IDisposable
 
     private async Task DisconnectAsync(int closeReason, string reason = "Closing connection gracefully.")
     {
-        if (!_isDisconnectCalled)
+        if (!IsDisconnectCalled())
             _onIoError?.Invoke(closeReason, reason, _responseCode, _receivedHeaders);
         if (_activeWebSocket is { State: WebSocketState.Open or WebSocketState.CloseReceived })
         {
@@ -227,6 +236,18 @@ public class WebSocketClient : IDisposable
         _cancellationTokenSource?.Cancel();
     }
 
+    public void StopAndWait(TimeSpan timeout)
+    {
+        _cancellationTokenSource?.Cancel();
+        var tasks = new List<Task>(2);
+        if (_sendTask != null) tasks.Add(_sendTask);
+        if (_receiveTask != null) tasks.Add(_receiveTask);
+        if (tasks.Count > 0)
+        {
+            try { Task.WaitAll(tasks.ToArray(), timeout); } catch { }
+        }
+    }
+
     public void Dispose()
     {
         Dispose(true);
@@ -235,7 +256,7 @@ public class WebSocketClient : IDisposable
 
     private void Dispose(bool disposing)
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
         if (disposing)
         {
@@ -266,6 +287,8 @@ public class WebSocketClient : IDisposable
                 // ignored
             }
 
+            try { _stream?.Dispose(); } catch { }
+
             try
             {
                 _sendChannel?.Writer.TryComplete();
@@ -274,11 +297,14 @@ public class WebSocketClient : IDisposable
             {
                 // ignored
             }
+
+            while (_receiveQueue.TryDequeue(out var leftover))
+            {
+                try { leftover.Dispose(); } catch { }
+            }
         }
 
 
-        // Mark as disposed
-        _disposed = true;
         _onLog?.Invoke("WebSocket client disposed.");
     }
 

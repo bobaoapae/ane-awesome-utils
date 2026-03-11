@@ -39,6 +39,9 @@ add_library(AneAwesomeUtilsWindows SHARED
         src/DataArray.h
         src/WindowsFilterInputs.h
         src/WindowsFilterInputs.cpp
+        src/AudioSafetyHook.h
+        src/AudioSafetyHook.cpp
+        src/AudioSafetyHookSEH.c
 )
 
 target_link_libraries(AneAwesomeUtilsWindows PRIVATE ${LIBRARY_PATH}/FlashRuntimeExtensions.lib)

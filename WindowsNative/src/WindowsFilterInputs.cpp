@@ -35,6 +35,7 @@ static WNDPROC oldProc = nullptr;
 
 static std::vector<DWORD> g_filteredKeys;
 static bool g_filterAll = true;
+static SRWLOCK g_filterLock = SRWLOCK_INIT;
 
 static HMODULE g_hModule = NULL;
 
@@ -70,8 +71,12 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode >= 0) {
         auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
         bool isInjected = (kb->flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED)) != 0;
-        bool isFilteredKey = std::find(g_filteredKeys.begin(), g_filteredKeys.end(), kb->vkCode) != g_filteredKeys.end();
-        if (isInjected && (g_filterAll || isFilteredKey)) return 1;
+        if (isInjected) {
+            AcquireSRWLockShared(&g_filterLock);
+            bool block = g_filterAll || std::find(g_filteredKeys.begin(), g_filteredKeys.end(), kb->vkCode) != g_filteredKeys.end();
+            ReleaseSRWLockShared(&g_filterLock);
+            if (block) return 1;
+        }
     }
     return CallNextHookEx(g_keyboardHook, nCode, wParam, lParam);
 }
@@ -119,8 +124,10 @@ static DWORD WINAPI MouseHookThread(LPVOID) {
 }
 
 void StartHooksIfNeeded(bool filterAll, const std::vector<DWORD> &filteredKeys) {
+    AcquireSRWLockExclusive(&g_filterLock);
     g_filterAll = filterAll;
     g_filteredKeys = filteredKeys;
+    ReleaseSRWLockExclusive(&g_filterLock);
     if (g_kbThreadHandle && g_msThreadHandle) return;
     InterlockedExchange(&g_stopHooks, 0);
     g_kbThreadHandle = CreateThread(nullptr, 0, KeyboardHookThread, nullptr, 0, &g_kbThreadId);

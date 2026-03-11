@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <cstdio>
 #include "WindowsFilterInputs.h"
+#include "AudioSafetyHook.h"
 
 static HANDLE g_logHandle = NULL;
 
@@ -65,7 +66,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         SetAneModuleHandle(hModule);
         initLog();
         writeLog("DLL loaded (DLL_PROCESS_ATTACH)");
+        InstallAudioSafetyHook();
     } else if (reason == DLL_PROCESS_DETACH) {
+        RemoveAudioSafetyHook();
         writeLog("DLL unloaded (DLL_PROCESS_DETACH)");
         closeLog();
     }

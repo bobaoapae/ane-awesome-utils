@@ -354,22 +354,8 @@ public static class ExportFunctions
         // 3) desconectar/limpar websockets
         foreach (var (guid, ws) in WebSocketClients.ToList())
         {
-            try
-            {
-                ws.Disconnect(1000);
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                ws.Dispose();
-            }
-            catch
-            {
-            }
-
+            try { ws.StopAndWait(TimeSpan.FromSeconds(2)); } catch { }
+            try { ws.Dispose(); } catch { }
             WebSocketClients.TryRemove(guid, out _);
         }
 
@@ -713,54 +699,60 @@ public static class ExportFunctions
                 }
 
                 var classPtr = Utf8Alloc("Object");
-                freNewObject(classPtr, 0, IntPtr.Zero, out var obj, out _);
-                Marshal.FreeHGlobal(classPtr);
+                IntPtr obj;
+                try { freNewObject(classPtr, 0, IntPtr.Zero, out obj, out _); }
+                finally { Marshal.FreeHGlobal(classPtr); }
                 if (obj == IntPtr.Zero) return IntPtr.Zero;
 
                 foreach (var attr in elem.Attributes())
                 {
                     var namePtr = Utf8Alloc(attr.Name.LocalName);
-                    var valObj = ValueToFre(attr.Value, freNewFromBool, freNewFromInt32, freNewFromUint32, freNewFromDouble, freNewFromUtf8);
-                    freSetProp(obj, namePtr, valObj, out _);
-                    Marshal.FreeHGlobal(namePtr);
+                    try
+                    {
+                        var valObj = ValueToFre(attr.Value, freNewFromBool, freNewFromInt32, freNewFromUint32, freNewFromDouble, freNewFromUtf8);
+                        freSetProp(obj, namePtr, valObj, out _);
+                    }
+                    finally { Marshal.FreeHGlobal(namePtr); }
                 }
 
                 var groups = elem.Elements().GroupBy(e => e.Name.LocalName);
                 foreach (var g in groups)
                 {
                     var propPtr = Utf8Alloc(g.Key);
-                    IntPtr propVal;
-                    if (g.Count() == 1)
+                    try
                     {
-                        propVal = Convert(g.First());
-                    }
-                    else
-                    {
-                        var arrClassPtr = Utf8Alloc("Array");
-                        IntPtr arr;
-                        freNewObject(arrClassPtr, 0, IntPtr.Zero, out arr, out _);
-                        Marshal.FreeHGlobal(arrClassPtr);
-                        if (arr == IntPtr.Zero)
+                        IntPtr propVal;
+                        if (g.Count() == 1)
                         {
-                            Marshal.FreeHGlobal(propPtr);
-                            continue;
+                            propVal = Convert(g.First());
+                        }
+                        else
+                        {
+                            var arrClassPtr = Utf8Alloc("Array");
+                            IntPtr arr;
+                            try { freNewObject(arrClassPtr, 0, IntPtr.Zero, out arr, out _); }
+                            finally { Marshal.FreeHGlobal(arrClassPtr); }
+                            if (arr == IntPtr.Zero)
+                            {
+                                continue;
+                            }
+
+                            uint idx = 0;
+                            foreach (var child in g)
+                            {
+                                var childObj = Convert(child);
+                                var idxPtr = Utf8Alloc(idx.ToString());
+                                try { freSetProp(arr, idxPtr, childObj, out _); }
+                                finally { Marshal.FreeHGlobal(idxPtr); }
+                                idx++;
+                            }
+
+                            propVal = arr;
                         }
 
-                        uint idx = 0;
-                        foreach (var child in g)
-                        {
-                            var childObj = Convert(child);
-                            var idxPtr = Utf8Alloc(idx.ToString());
-                            freSetProp(arr, idxPtr, childObj, out _);
-                            Marshal.FreeHGlobal(idxPtr);
-                            idx++;
-                        }
-
-                        propVal = arr;
+                        freSetProp(obj, propPtr, propVal, out _);
                     }
-
-                    freSetProp(obj, propPtr, propVal, out _);
-                    Marshal.FreeHGlobal(propPtr);
+                    finally { Marshal.FreeHGlobal(propPtr); }
                 }
 
                 return obj;
@@ -849,11 +841,16 @@ public static class ExportFunctions
         }
     }
 
-    private static DataArray CreateDataArrayFromString(string s)
+    private static unsafe DataArray CreateDataArrayFromString(string s)
     {
         if (string.IsNullOrEmpty(s)) return new DataArray();
         var bytes = Encoding.UTF8.GetBytes(s);
-        return CreateDataArrayFromBytes(bytes);
+        var result = new DataArray();
+        result.Size = bytes.Length;
+        result.DataPointer = Marshal.AllocCoTaskMem(bytes.Length + 1);
+        Marshal.Copy(bytes, 0, result.DataPointer, bytes.Length);
+        ((byte*)result.DataPointer)[bytes.Length] = 0;
+        return result;
     }
 
     private static unsafe DataArray CreateDataArrayFromBytes(ReadOnlySpan<byte> data)
