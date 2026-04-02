@@ -42,9 +42,11 @@ add_library(AneAwesomeUtilsWindows SHARED
         src/AudioSafetyHook.h
         src/AudioSafetyHook.cpp
         src/AudioSafetyHookSEH.c
+        src/SamplerSafetyHook.h
+        src/SamplerSafetyHook.cpp
 )
 
-target_link_libraries(AneAwesomeUtilsWindows PRIVATE ${LIBRARY_PATH}/FlashRuntimeExtensions.lib)
+target_link_libraries(AneAwesomeUtilsWindows PRIVATE ${LIBRARY_PATH}/FlashRuntimeExtensions.lib version.lib)
 
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /GL")
 set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /LTCG /OPT:REF /OPT:ICF /DEBUG /PDBALTPATH:%_PDB%")

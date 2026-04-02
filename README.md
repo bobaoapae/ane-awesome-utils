@@ -15,6 +15,7 @@ AneAwesomeUtils is an Adobe AIR Native Extension (ANE) that provides advanced ne
 | [Compression / Decompression](docs/utilities.md#decompression) | x | x | x | x |
 | [File I/O](docs/utilities.md#file-io) | x | x | x | x |
 | [XML to Object Mapping](docs/utilities.md#xml-to-object) | x | x | x | x |
+| [Native Logging](docs/logging.md) (file, rotation, crash detection) | x | x | x | x |
 | [Device Unique ID](docs/utilities.md#device-unique-id) | x | x | x | x |
 | [Emulator / VM Detection](docs/utilities.md#emulator--vm-detection) | x | x | | |
 | [Network State Monitoring](docs/platform-android.md#network-state-monitoring) | | x | | |
@@ -63,7 +64,7 @@ See [Getting Started](docs/getting-started.md) for full installation and setup i
 - [Utilities](docs/utilities.md) - Compression, file I/O, XML parsing, device ID, emulator detection
 - [Windows Features](docs/platform-windows.md) - Screen capture, input filtering, speed hack detection, audio hook
 - [Android Features](docs/platform-android.md) - Battery optimization, connection config, network monitoring
-- [Logging](docs/logging.md) - Custom logging interface
+- [Logging](docs/logging.md) - Native file logging, crash detection, cross-ANE shared logging
 
 ## Networking Highlights
 

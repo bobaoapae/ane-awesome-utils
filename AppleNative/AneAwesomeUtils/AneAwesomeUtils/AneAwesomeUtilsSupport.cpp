@@ -1,6 +1,7 @@
 #include "AneAwesomeUtilsCsharp.h"
 #include <queue>
 #include <string>
+#include <unistd.h>
 typedef void* NSWindow; // don't need this..
 #include <FlashRuntimeExtensions.h>  // Adobe AIR runtime includes
 #include "log.hpp"
@@ -724,6 +725,162 @@ static FREObject awesomeUtils_mapXmlToObject(FREContext ctx, void *funcData, uin
     return result;
 }
 
+static void dispatchLogEvent(const char *code, const char *level) {
+    if (g_finalized.load(std::memory_order_acquire)) return;
+    std::string fullCode = std::string("log;") + code;
+    std::lock_guard lock(dispatchMutex);
+    FREContext ctx = g_ctx;
+    if (!ctx) return;
+    FREDispatchStatusEventAsync(ctx, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
+}
+
+static FREObject awesomeUtils_initLog(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("initLog called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+    if (argc < 1) return nullptr;
+
+    uint32_t profileLength = 0;
+    const uint8_t *profile = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[0], &profileLength, &profile);
+    if (!profile) profile = EMPTY_CSTR;
+
+    std::string profileStr = viewToString(profile, profileLength);
+
+    // Use current working directory as base path
+    char cwdBuf[4096];
+    const char* basePath = getcwd(cwdBuf, sizeof(cwdBuf));
+    if (!basePath) basePath = "/tmp";
+
+    const char* logDir = initNativeLog(basePath, profileStr.c_str());
+
+    if (checkUnexpectedShutdown()) {
+        dispatchLogEvent("unexpectedShutdown", "info");
+    }
+
+    FREObject resultStr;
+    if (!logDir || FRENewObjectFromUTF8(static_cast<uint32_t>(strlen(logDir)),
+                                         reinterpret_cast<const uint8_t*>(logDir),
+                                         &resultStr) != FRE_OK) {
+        writeLog("Failed to create log path string");
+        return nullptr;
+    }
+    return resultStr;
+}
+
+static FREObject awesomeUtils_writeNativeLog(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+    if (argc < 3) return nullptr;
+
+    uint32_t levelLength = 0;
+    const uint8_t *level = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[0], &levelLength, &level);
+    if (!level) level = EMPTY_CSTR;
+
+    uint32_t tagLength = 0;
+    const uint8_t *tag = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[1], &tagLength, &tag);
+    if (!tag) tag = EMPTY_CSTR;
+
+    uint32_t messageLength = 0;
+    const uint8_t *message = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[2], &messageLength, &message);
+    if (!message) message = EMPTY_CSTR;
+
+    writeNativeLog(
+        viewToString(level, levelLength).c_str(),
+        viewToString(tag, tagLength).c_str(),
+        viewToString(message, messageLength).c_str()
+    );
+
+    return nullptr;
+}
+
+static FREObject awesomeUtils_getLogFiles(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+
+    std::string json = getNativeLogFiles();
+
+    FREObject resultStr;
+    if (FRENewObjectFromUTF8(static_cast<uint32_t>(json.size()),
+                              reinterpret_cast<const uint8_t*>(json.c_str()),
+                              &resultStr) != FRE_OK) {
+        return nullptr;
+    }
+    return resultStr;
+}
+
+static FREObject awesomeUtils_readLogFile(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+    if (argc < 1) return nullptr;
+
+    uint32_t dateLength = 0;
+    const uint8_t *date = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[0], &dateLength, &date);
+    if (!date) date = EMPTY_CSTR;
+
+    std::string dateStr = viewToString(date, dateLength);
+
+    bool started = startAsyncLogRead(dateStr.c_str(), [](bool success, const char* error) {
+        if (success) {
+            dispatchLogEvent("readComplete", "info");
+        } else {
+            dispatchLogEvent("readError", error ? error : "Unknown error");
+        }
+    });
+
+    FREObject resultBool;
+    FRENewObjectFromBool(started, &resultBool);
+    return resultBool;
+}
+
+static FREObject awesomeUtils_getLogResult(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+
+    uint8_t* data = nullptr;
+    int size = 0;
+    getNativeLogReadResult(&data, &size);
+
+    if (!data || size <= 0) return nullptr;
+
+    FREObject byteArray;
+    if (FRENewObject(reinterpret_cast<const uint8_t*>("flash.utils::ByteArray"), 0, NULL, &byteArray, NULL) != FRE_OK) {
+        return nullptr;
+    }
+
+    FREObject lengthObj;
+    FRENewObjectFromUint32(static_cast<uint32_t>(size), &lengthObj);
+    FRESetObjectProperty(byteArray, reinterpret_cast<const uint8_t*>("length"), lengthObj, NULL);
+
+    FREByteArray ba;
+    if (FREAcquireByteArray(byteArray, &ba) != FRE_OK) {
+        return nullptr;
+    }
+    memcpy(ba.bytes, data, static_cast<size_t>(size));
+    FREReleaseByteArray(byteArray);
+
+    disposeNativeLogReadResult();
+
+    return byteArray;
+}
+
+static FREObject awesomeUtils_deleteLogFile(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+    if (argc < 1) return nullptr;
+
+    uint32_t dateLength = 0;
+    const uint8_t *date = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[0], &dateLength, &date);
+    if (!date) date = EMPTY_CSTR;
+
+    std::string dateStr = viewToString(date, dateLength);
+
+    bool result = deleteNativeLogFiles(dateStr.c_str());
+
+    FREObject resultBool;
+    FRENewObjectFromBool(result, &resultBool);
+    return resultBool;
+}
+
 static void AneAwesomeUtilsSupportInitializer(
     void *extData,
     const uint8_t *ctxType,
@@ -761,11 +918,21 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[12].function = awesomeUtils_decompressByteArray;
         exportedFunctions[13].name = reinterpret_cast<const uint8_t *>("awesomeUtils_readFileToByteArray");
         exportedFunctions[13].function = awesomeUtils_readFileToByteArray;
-        exportedFunctions[19].name = reinterpret_cast<const uint8_t *>("awesomeUtils_mapXmlToObject");
-        exportedFunctions[19].function = awesomeUtils_mapXmlToObject;
+        exportedFunctions[14].name = reinterpret_cast<const uint8_t *>("awesomeUtils_initLog");
+        exportedFunctions[14].function = awesomeUtils_initLog;
+        exportedFunctions[15].name = reinterpret_cast<const uint8_t *>("awesomeUtils_writeLog");
+        exportedFunctions[15].function = awesomeUtils_writeNativeLog;
+        exportedFunctions[16].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getLogFiles");
+        exportedFunctions[16].function = awesomeUtils_getLogFiles;
+        exportedFunctions[17].name = reinterpret_cast<const uint8_t *>("awesomeUtils_readLogFile");
+        exportedFunctions[17].function = awesomeUtils_readLogFile;
+        exportedFunctions[18].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getLogResult");
+        exportedFunctions[18].function = awesomeUtils_getLogResult;
+        exportedFunctions[19].name = reinterpret_cast<const uint8_t *>("awesomeUtils_deleteLogFile");
+        exportedFunctions[19].function = awesomeUtils_deleteLogFile;
         exportedFunctions[20].name = reinterpret_cast<const uint8_t *>("awesomeUtils_mapXmlToObject");
         exportedFunctions[20].function = awesomeUtils_mapXmlToObject;
-        exportedFunctions[21].name = reinterpret_cast<const uint8_t *>("awesomeUtils_addClientCertificate");;
+        exportedFunctions[21].name = reinterpret_cast<const uint8_t *>("awesomeUtils_addClientCertificate");
         exportedFunctions[21].function = awesomeUtils_addClientCertificate;
     }
     g_ctx = ctx;
@@ -777,6 +944,7 @@ static void AneAwesomeUtilsSupportInitializer(
 static void AneAwesomeUtilsSupportFinalizer(FREContext ctx) {
     g_finalized.store(true, std::memory_order_release);
     g_ctx = nullptr;
+    closeNativeLog();
     if (g_inited.exchange(false, std::memory_order_acq_rel)) {
         csharpLibrary_awesomeUtils_finalize();
     }

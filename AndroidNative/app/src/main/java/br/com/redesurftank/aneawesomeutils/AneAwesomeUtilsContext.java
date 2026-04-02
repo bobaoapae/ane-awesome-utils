@@ -119,6 +119,8 @@ public class AneAwesomeUtilsContext extends FREContext {
     private X509TrustManager _defaultTrustManager;
     private SSLSocketFactory _defaultSslSocketFactory;
 
+    byte[] _logReadResult;
+
     private PowerManager.WakeLock _wakeLock;
     private WifiManager.WifiLock _wifiLock;
     private ConnectivityManager _connectivityManager;
@@ -154,6 +156,12 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(RequestBatteryOptimizationExclusion.KEY, new RequestBatteryOptimizationExclusion());
         functionMap.put(ConfigureConnection.KEY, new ConfigureConnection());
         functionMap.put(ReleaseConnectionResources.KEY, new ReleaseConnectionResources());
+        functionMap.put(InitLog.KEY, new InitLog());
+        functionMap.put(WriteLog.KEY, new WriteLog());
+        functionMap.put(GetLogFiles.KEY, new GetLogFiles());
+        functionMap.put(ReadLogFile.KEY, new ReadLogFile());
+        functionMap.put(GetLogResult.KEY, new GetLogResult());
+        functionMap.put(DeleteLogFile.KEY, new DeleteLogFile());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -183,6 +191,16 @@ public class AneAwesomeUtilsContext extends FREContext {
         _wifiLock = null;
         _connectivityManager = null;
         _networkCallback = null;
+
+        NativeLogManager.close();
+    }
+
+    public void safeDispatchEvent(String code, String level) {
+        try {
+            dispatchStatusEventAsync(code, level != null ? level : "");
+        } catch (Exception e) {
+            // ignore
+        }
     }
 
     private void startWebSocketSenderThread(UUID uuid) {
@@ -1554,6 +1572,129 @@ public class AneAwesomeUtilsContext extends FREContext {
                 AneAwesomeUtilsLogging.e(TAG, "Error releasing connection resources", e);
             }
             return null;
+        }
+    }
+
+    public static class InitLog implements FREFunction {
+        public static final String KEY = "awesomeUtils_initLog";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String profile = args[0].getAsString();
+                String path = NativeLogManager.init(context.getActivity(), profile);
+                if (NativeLogManager.hadUnexpectedShutdown()) {
+                    AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+                    ctx.safeDispatchEvent("log;unexpectedShutdown", NativeLogManager.getUnexpectedShutdownInfo());
+                }
+                return FREObject.newObject(path);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e("NativeLog", "Error in initLog", e);
+                return null;
+            }
+        }
+    }
+
+    public static class WriteLog implements FREFunction {
+        public static final String KEY = "awesomeUtils_writeLog";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String level = args[0].getAsString();
+                String tag = args[1].getAsString();
+                String message = args[2].getAsString();
+                NativeLogManager.write(level, tag, message);
+            } catch (Exception e) {
+                // ignore
+            }
+            return null;
+        }
+    }
+
+    public static class GetLogFiles implements FREFunction {
+        public static final String KEY = "awesomeUtils_getLogFiles";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String json = NativeLogManager.getLogFiles();
+                return FREObject.newObject(json);
+            } catch (Exception e) {
+                return null;
+            }
+        }
+    }
+
+    public static class ReadLogFile implements FREFunction {
+        public static final String KEY = "awesomeUtils_readLogFile";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String date = args[0].getAsString();
+                AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+                new Thread(() -> {
+                    try {
+                        byte[] data = NativeLogManager.readLogFile(date);
+                        synchronized (ctx) {
+                            ctx._logReadResult = data;
+                        }
+                        ctx.safeDispatchEvent("log;readComplete", "");
+                    } catch (Exception e) {
+                        ctx.safeDispatchEvent("log;readError", e.getMessage());
+                    }
+                }).start();
+            } catch (Exception e) {
+                ((AneAwesomeUtilsContext) context).safeDispatchEvent("log;readError", e.getMessage());
+            }
+            return null;
+        }
+    }
+
+    public static class GetLogResult implements FREFunction {
+        public static final String KEY = "awesomeUtils_getLogResult";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+                byte[] data;
+                synchronized (ctx) {
+                    data = ctx._logReadResult;
+                    ctx._logReadResult = null;
+                }
+                if (data == null) return null;
+                FREByteArray byteArray = FREByteArray.newByteArray();
+                byteArray.setProperty("length", FREObject.newObject(data.length));
+                byteArray.acquire();
+                ByteBuffer buffer = byteArray.getBytes();
+                buffer.put(data);
+                byteArray.release();
+                return byteArray;
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e("NativeLog", "Error getting log result", e);
+                return null;
+            }
+        }
+    }
+
+    public static class DeleteLogFile implements FREFunction {
+        public static final String KEY = "awesomeUtils_deleteLogFile";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String date = args[0].getAsString();
+                boolean result = NativeLogManager.deleteLogFile(date);
+                return FREObject.newObject(result);
+            } catch (Exception e) {
+                try {
+                    return FREObject.newObject(false);
+                } catch (Exception ex) {
+                    return null;
+                }
+            }
         }
     }
 }

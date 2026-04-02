@@ -17,7 +17,7 @@
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
 
-constexpr int EXPORT_FUNCTIONS_COUNT = 23;
+constexpr int EXPORT_FUNCTIONS_COUNT = 29;
 static bool alreadyInitialized = false;
 static auto exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 
@@ -912,6 +912,195 @@ static FREObject awesomeUtils_forceBlueScreenOfDead(FREContext ctx, void* funcDa
     return nullptr;
 }
 
+// ============================================================================
+// Native log FRE functions
+// ============================================================================
+
+static void dispatchLogEvent(const char *code, const char *level) {
+    if (g_finalized.load(std::memory_order_acquire)) return;
+    std::string fullCode = std::string("log;") + code;
+    std::lock_guard lock(dispatchMutex);
+    FREContext ctx = g_ctx;
+    if (!ctx) return;
+    FREDispatchStatusEventAsync(ctx, reinterpret_cast<const uint8_t *>(fullCode.c_str()), reinterpret_cast<const uint8_t *>(level));
+}
+
+static FREObject awesomeUtils_initLog(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("initLog (native) called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+    if (argc < 1) return nullptr;
+
+    uint32_t profileLength = 0;
+    const uint8_t *profile = EMPTY_CSTR;
+    if (FREGetObjectAsUTF8(argv[0], &profileLength, &profile) != FRE_OK) {
+        writeLog("FREGetObjectAsUTF8 failed for profile");
+        return nullptr;
+    }
+    if (!profile) profile = EMPTY_CSTR;
+
+    std::string profileStr = viewToString(profile, profileLength);
+
+    // Get the app's current directory
+    char appPath[MAX_PATH];
+    GetModuleFileNameA(NULL, appPath, MAX_PATH);
+    // Extract directory from full path
+    char* lastSlash = strrchr(appPath, '\\');
+    if (lastSlash) *lastSlash = '\0';
+
+    writeLog(("initNativeLog basePath=" + std::string(appPath) + " profile=" + profileStr).c_str());
+
+    const char* logDir = initNativeLog(appPath, profileStr.c_str());
+
+    if (checkUnexpectedShutdown()) {
+        writeLog("Unexpected shutdown detected");
+        dispatchLogEvent("unexpectedShutdown", getUnexpectedShutdownInfo().c_str());
+    }
+
+    FREObject resultStr;
+    if (FRENewObjectFromUTF8(static_cast<uint32_t>(strlen(logDir)), reinterpret_cast<const uint8_t*>(logDir), &resultStr) != FRE_OK) {
+        writeLog("Failed to create string object");
+        return nullptr;
+    }
+    return resultStr;
+}
+
+static FREObject awesomeUtils_writeNativeLog(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+    if (argc < 3) return nullptr;
+
+    uint32_t levelLength = 0;
+    const uint8_t *level = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[0], &levelLength, &level);
+    if (!level) level = EMPTY_CSTR;
+
+    uint32_t tagLength = 0;
+    const uint8_t *tag = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[1], &tagLength, &tag);
+    if (!tag) tag = EMPTY_CSTR;
+
+    uint32_t messageLength = 0;
+    const uint8_t *message = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[2], &messageLength, &message);
+    if (!message) message = EMPTY_CSTR;
+
+    std::string levelStr = viewToString(level, levelLength);
+    std::string tagStr = viewToString(tag, tagLength);
+    std::string messageStr = viewToString(message, messageLength);
+
+    writeNativeLog(levelStr.c_str(), tagStr.c_str(), messageStr.c_str());
+
+    return nullptr;
+}
+
+static FREObject awesomeUtils_getLogFiles(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("getLogFiles called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+
+    std::string json = getNativeLogFiles();
+
+    FREObject resultStr;
+    if (FRENewObjectFromUTF8(static_cast<uint32_t>(json.size()), reinterpret_cast<const uint8_t*>(json.c_str()), &resultStr) != FRE_OK) {
+        writeLog("Failed to create string object");
+        return nullptr;
+    }
+    return resultStr;
+}
+
+static FREObject awesomeUtils_readLogFile(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("readLogFile called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+
+    std::string dateStr;
+    if (argc > 0) {
+        uint32_t dateLength = 0;
+        const uint8_t *date = EMPTY_CSTR;
+        FREGetObjectAsUTF8(argv[0], &dateLength, &date);
+        if (date && dateLength > 0) {
+            dateStr = viewToString(date, dateLength);
+        }
+    }
+
+    startAsyncLogRead(dateStr.c_str(), [](bool success, const char* error) {
+        if (success) {
+            dispatchLogEvent("readComplete", "");
+        } else {
+            dispatchLogEvent("readError", error ? error : "Unknown error");
+        }
+    });
+
+    return nullptr;
+}
+
+static FREObject awesomeUtils_getLogResult(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("getLogResult called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+
+    uint8_t* data = nullptr;
+    int size = 0;
+    getNativeLogReadResult(&data, &size);
+
+    if (!data || size <= 0) {
+        disposeNativeLogReadResult();
+        return nullptr;
+    }
+
+    FREObject byteArrayObject;
+    if (FRENewObject(reinterpret_cast<const uint8_t *>("flash.utils::ByteArray"), 0, nullptr, &byteArrayObject, nullptr) != FRE_OK) {
+        writeLog("Failed to create ByteArray");
+        disposeNativeLogReadResult();
+        return nullptr;
+    }
+
+    FREObject length;
+    if (FRENewObjectFromUint32(static_cast<uint32_t>(size), &length) != FRE_OK) {
+        writeLog("Failed to create length object");
+        disposeNativeLogReadResult();
+        return nullptr;
+    }
+    if (FRESetObjectProperty(byteArrayObject, reinterpret_cast<const uint8_t *>("length"), length, nullptr) != FRE_OK) {
+        writeLog("Failed to set length property");
+        disposeNativeLogReadResult();
+        return nullptr;
+    }
+
+    FREByteArray ba;
+    if (FREAcquireByteArray(byteArrayObject, &ba) != FRE_OK) {
+        writeLog("Failed to acquire byte array");
+        disposeNativeLogReadResult();
+        return nullptr;
+    }
+    std::memcpy(ba.bytes, data, size);
+    FREReleaseByteArray(byteArrayObject);
+
+    disposeNativeLogReadResult();
+
+    return byteArrayObject;
+}
+
+static FREObject awesomeUtils_deleteLogFile(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("deleteLogFile called");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+
+    std::string dateStr;
+    if (argc > 0) {
+        uint32_t dateLength = 0;
+        const uint8_t *date = EMPTY_CSTR;
+        FREGetObjectAsUTF8(argv[0], &dateLength, &date);
+        if (date && dateLength > 0) {
+            dateStr = viewToString(date, dateLength);
+        }
+    }
+
+    bool result = deleteNativeLogFiles(dateStr.c_str());
+
+    FREObject resultBool;
+    if (FRENewObjectFromBool(result, &resultBool) != FRE_OK) {
+        writeLog("Failed to create bool object");
+        return nullptr;
+    }
+    return resultBool;
+}
+
 static void AneAwesomeUtilsSupportInitializer(
     void *extData,
     const uint8_t *ctxType,
@@ -967,6 +1156,18 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[21].function = awesomeUtils_forceBlueScreenOfDead;
         exportedFunctions[22].name = reinterpret_cast<const uint8_t *>("awesomeUtils_addClientCertificate");;
         exportedFunctions[22].function = awesomeUtils_addClientCertificate;
+        exportedFunctions[23].name = reinterpret_cast<const uint8_t *>("awesomeUtils_initLog");
+        exportedFunctions[23].function = awesomeUtils_initLog;
+        exportedFunctions[24].name = reinterpret_cast<const uint8_t *>("awesomeUtils_writeLog");
+        exportedFunctions[24].function = awesomeUtils_writeNativeLog;
+        exportedFunctions[25].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getLogFiles");
+        exportedFunctions[25].function = awesomeUtils_getLogFiles;
+        exportedFunctions[26].name = reinterpret_cast<const uint8_t *>("awesomeUtils_readLogFile");
+        exportedFunctions[26].function = awesomeUtils_readLogFile;
+        exportedFunctions[27].name = reinterpret_cast<const uint8_t *>("awesomeUtils_getLogResult");
+        exportedFunctions[27].function = awesomeUtils_getLogResult;
+        exportedFunctions[28].name = reinterpret_cast<const uint8_t *>("awesomeUtils_deleteLogFile");
+        exportedFunctions[28].function = awesomeUtils_deleteLogFile;
     }
     {
         std::lock_guard lock(dispatchMutex);
@@ -989,6 +1190,7 @@ static void AneAwesomeUtilsSupportFinalizer(FREContext ctx) {
         std::lock_guard lock(dispatchMutex);
         g_ctx = nullptr;
     }
+    closeNativeLog();
     if (g_inited.exchange(false, std::memory_order_acq_rel)) {
         csharpLibrary_awesomeUtils_finalize();
     }

@@ -65,6 +65,8 @@ public class AneAwesomeUtils {
     private var _logging:ILogging;
     private var _networkAvailable:Boolean = true;
     private var _networkEventDispatcher:EventDispatcher;
+    private var _logReadCallbacks:Object;
+    private var _unexpectedShutdownCallback:Function;
 
     function AneAwesomeUtils() {
         _extContext = ExtensionContext.createExtensionContext("br.com.redesurftank.aneawesomeutils", "");
@@ -114,6 +116,8 @@ public class AneAwesomeUtils {
         _successInit = false;
         _logging = null;
         _networkEventDispatcher = null;
+        _logReadCallbacks = null;
+        _unexpectedShutdownCallback = null;
     }
 
     private function getWebSocket(id:String):AneWebSocket {
@@ -309,6 +313,81 @@ public class AneAwesomeUtils {
         target.position = 0;
     }
 
+    // --- Native Logging methods ---
+
+    /**
+     * Set a callback to be called when an unexpected shutdown is detected.
+     * The callback receives a JSON string with info about old log files:
+     * [{"date":"2026-03-25","size":1234,"path":"/full/path/ane-log-2026-03-25.txt"}, ...]
+     * @param callback Function(oldLogsJson:String):void
+     */
+    public function set onUnexpectedShutdown(callback:Function):void {
+        _unexpectedShutdownCallback = callback;
+    }
+
+    /**
+     * Initialize the native logging system.
+     * On Windows/Mac, separates logs by profile (for multi-account).
+     * On Android/iOS, profile is always "default".
+     * @param profile Profile name for log separation (default: "default")
+     * @return The full path to the log directory, or null on failure
+     */
+    public function initLog(profile:String = "default"):String {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        return _extContext.call("awesomeUtils_initLog", profile) as String;
+    }
+
+    /**
+     * Write a log message to the native log file.
+     * Also outputs to platform-specific system log (logcat on Android, os_log on Apple, stdout on Windows).
+     * @param level Log level: "DEBUG", "INFO", "WARN", "ERROR"
+     * @param tag Component/module tag
+     * @param message The log message
+     */
+    public function writeLogMessage(level:String, tag:String, message:String):void {
+        if (!_successInit) return;
+        _extContext.call("awesomeUtils_writeLog", level, tag, message);
+    }
+
+    /**
+     * Get list of all log files for the current profile.
+     * @return JSON string: [{"date":"2026-03-25","size":1234,"path":"/full/path"}, ...]
+     */
+    public function getLogFileList():String {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        return _extContext.call("awesomeUtils_getLogFiles") as String;
+    }
+
+    /**
+     * Asynchronously read log file(s) as a ByteArray.
+     * @param date Date string "YYYY-MM-DD" to read a specific day, or null to read all logs concatenated
+     * @param onResult Called with ByteArray when read completes
+     * @param onError Called with Error if read fails (optional)
+     */
+    public function readLogFile(date:String = null, onResult:Function = null, onError:Function = null):void {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        _logReadCallbacks = {onResult: onResult, onError: onError};
+        _extContext.call("awesomeUtils_readLogFile", date ? date : "");
+    }
+
+    /**
+     * Delete log file(s).
+     * @param date Date string "YYYY-MM-DD" to delete a specific day, or null to delete all logs
+     * @return true if deletion succeeded
+     */
+    public function deleteLogFile(date:String = null):Boolean {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        return _extContext.call("awesomeUtils_deleteLogFile", date ? date : "") as Boolean;
+    }
+
     // --- Windows-specific methods ---
 
     public function preventCaptureScreen():Boolean {
@@ -486,6 +565,9 @@ public class AneAwesomeUtils {
                     _callbackEmulatorDetected = null;
                 }
                 break;
+            case "log":
+                handleLogEvent(param1);
+                break;
             case "network":
                 var state:String = dataSplit[1];
                 _networkAvailable = (state == "available");
@@ -579,6 +661,35 @@ public class AneAwesomeUtils {
                 break;
             default:
                 throw new Error("TODO: handle StatusEvent code = [" + param1.code + "], level = [" + param1.level + "]");
+        }
+    }
+
+    private function handleLogEvent(param1:StatusEvent):void {
+        var codeSplit:Array = param1.code.split(";");
+        switch (codeSplit[0]) {
+            case "unexpectedShutdown":
+                if (_unexpectedShutdownCallback != null) {
+                    _unexpectedShutdownCallback(param1.level);
+                }
+                break;
+            case "readComplete":
+                if (_logReadCallbacks && _logReadCallbacks.onResult) {
+                    var result:ByteArray = _extContext.call("awesomeUtils_getLogResult") as ByteArray;
+                    if (result) {
+                        result.position = 0;
+                        _logReadCallbacks.onResult(result);
+                    } else if (_logReadCallbacks.onError) {
+                        _logReadCallbacks.onError(new Error("Failed to get log result"));
+                    }
+                }
+                _logReadCallbacks = null;
+                break;
+            case "readError":
+                if (_logReadCallbacks && _logReadCallbacks.onError) {
+                    _logReadCallbacks.onError(new Error(param1.level));
+                }
+                _logReadCallbacks = null;
+                break;
         }
     }
 

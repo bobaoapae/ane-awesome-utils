@@ -8,7 +8,10 @@
         <option>-framework GSS</option>
         <option>-framework Foundation</option>
         <option>-framework UIKit</option>
+        <option>-framework Network</option>
         <option>-licucore</option>
+        <option>-lc++</option>
+        <option>-lcompression</option>
     </linkerOptions>
     <packagedDependencies>
         <packagedDependency>NativeCsharp/libbootstrapperdll.o</packagedDependency>
@@ -20,5 +23,9 @@
         <packagedDependency>NativeCsharp/libSystem.IO.Compression.Native.a</packagedDependency>
         <packagedDependency>NativeCsharp/libSystem.Net.Security.Native.a</packagedDependency>
         <packagedDependency>NativeCsharp/libSystem.Security.Cryptography.Native.Apple.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libaotminipal.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libbrotlidec.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libbrotlienc.a</packagedDependency>
+        <packagedDependency>NativeCsharp/libbrotlicommon.a</packagedDependency>
     </packagedDependencies>
 </platform>

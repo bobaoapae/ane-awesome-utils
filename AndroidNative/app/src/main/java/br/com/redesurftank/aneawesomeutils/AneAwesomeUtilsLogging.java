@@ -5,6 +5,8 @@ import android.util.Log;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import com.adobe.air.SharedAneLogger;
+
 import io.sentry.Sentry;
 import io.sentry.SentryEvent;
 import io.sentry.SentryLevel;
@@ -77,12 +79,8 @@ public class AneAwesomeUtilsLogging {
 
     private static Logger getSharedAneLogger() {
         try {
-            Class<?> classz = Class.forName("com.adobe.air.SharedAneLogger");
-            java.lang.reflect.Method method = classz.getMethod("getInstance");
-            Object instance = method.invoke(null);
-            method = classz.getMethod("getLogger");
-            Logger logger = (Logger) method.invoke(instance);
-            logger.log(Level.INFO, "Got shared ANE logger");
+            Logger logger = SharedAneLogger.getInstance().getLogger();
+            logger.log(Level.INFO, "Got shared ANE logger (direct)");
             return logger;
         } catch (Exception e) {
             Log.e("AneAwesomeUtilsLogging", "Failed to get shared ANE logger", e);
