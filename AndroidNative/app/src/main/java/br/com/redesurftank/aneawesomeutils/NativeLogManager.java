@@ -1,6 +1,5 @@
 package br.com.redesurftank.aneawesomeutils;
 
-import android.content.Context;
 import android.util.Log;
 
 import com.adobe.air.SharedAneLogger;
@@ -34,11 +33,11 @@ public class NativeLogManager {
     private static final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
     private static final SimpleDateFormat timestampFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
 
-    public static synchronized String init(Context context, String profileArg) {
+    public static synchronized String init(String storagePath, String profileArg) {
         try {
             profile = "default";
 
-            File baseDir = new File(context.getFilesDir(), LOG_DIR_NAME + "/" + profile);
+            File baseDir = new File(storagePath, LOG_DIR_NAME + "/" + profile);
             if (!baseDir.exists()) {
                 baseDir.mkdirs();
             }

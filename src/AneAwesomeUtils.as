@@ -8,6 +8,7 @@ import flash.external.ExtensionContext;
 import flash.net.URLVariables;
 import flash.system.Capabilities;
 import flash.utils.ByteArray;
+import flash.filesystem.File;
 import flash.utils.Dictionary;
 
 public class AneAwesomeUtils {
@@ -336,7 +337,9 @@ public class AneAwesomeUtils {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
-        return _extContext.call("awesomeUtils_initLog", profile) as String;
+        var storagePath:String = File.applicationStorageDirectory.nativePath;
+        doLogging("INFO", "Initializing native logging with profile: " + profile + " storagePath: " + storagePath);
+        return _extContext.call("awesomeUtils_initLog", profile, storagePath) as String;
     }
 
     /**

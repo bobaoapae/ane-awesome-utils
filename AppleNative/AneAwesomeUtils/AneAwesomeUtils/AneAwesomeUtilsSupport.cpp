@@ -737,7 +737,7 @@ static void dispatchLogEvent(const char *code, const char *level) {
 static FREObject awesomeUtils_initLog(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
     writeLog("initLog called");
     if (g_finalized.load(std::memory_order_acquire)) return nullptr;
-    if (argc < 1) return nullptr;
+    if (argc < 2) return nullptr;
 
     uint32_t profileLength = 0;
     const uint8_t *profile = EMPTY_CSTR;
@@ -746,12 +746,15 @@ static FREObject awesomeUtils_initLog(FREContext ctx, void *funcData, uint32_t a
 
     std::string profileStr = viewToString(profile, profileLength);
 
-    // Use current working directory as base path
-    char cwdBuf[4096];
-    const char* basePath = getcwd(cwdBuf, sizeof(cwdBuf));
-    if (!basePath) basePath = "/tmp";
+    // Get base path from applicationStorageDirectory (passed from AS3)
+    uint32_t basePathLength = 0;
+    const uint8_t *basePathRaw = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[1], &basePathLength, &basePathRaw);
+    if (!basePathRaw) basePathRaw = EMPTY_CSTR;
+    std::string basePath = viewToString(basePathRaw, basePathLength);
+    if (basePath.empty()) basePath = "/tmp";
 
-    const char* logDir = initNativeLog(basePath, profileStr.c_str());
+    const char* logDir = initNativeLog(basePath.c_str(), profileStr.c_str());
 
     if (checkUnexpectedShutdown()) {
         dispatchLogEvent("unexpectedShutdown", "info");

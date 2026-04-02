@@ -926,30 +926,33 @@ static void dispatchLogEvent(const char *code, const char *level) {
 }
 
 static FREObject awesomeUtils_initLog(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
-    writeLog("initLog (native) called");
+    writeLog(("initLog (native) called, argc=" + std::to_string(argc)).c_str());
     if (g_finalized.load(std::memory_order_acquire)) return nullptr;
-    if (argc < 1) return nullptr;
+    if (argc < 2) return nullptr;
+
+    writeLog(("argv[0] ptr=" + std::to_string(reinterpret_cast<uintptr_t>(argv[0]))).c_str());
+    FREObjectType argType;
+    FREResult typeRes = FREGetObjectType(argv[0], &argType);
+    writeLog(("FREGetObjectType result=" + std::to_string(typeRes) + " type=" + std::to_string(argType)).c_str());
 
     uint32_t profileLength = 0;
     const uint8_t *profile = EMPTY_CSTR;
-    if (FREGetObjectAsUTF8(argv[0], &profileLength, &profile) != FRE_OK) {
-        writeLog("FREGetObjectAsUTF8 failed for profile");
-        return nullptr;
-    }
+    FREResult utfRes = FREGetObjectAsUTF8(argv[0], &profileLength, &profile);
+    writeLog(("FREGetObjectAsUTF8 result=" + std::to_string(utfRes) + " len=" + std::to_string(profileLength)).c_str());
     if (!profile) profile = EMPTY_CSTR;
 
     std::string profileStr = viewToString(profile, profileLength);
 
-    // Get the app's current directory
-    char appPath[MAX_PATH];
-    GetModuleFileNameA(NULL, appPath, MAX_PATH);
-    // Extract directory from full path
-    char* lastSlash = strrchr(appPath, '\\');
-    if (lastSlash) *lastSlash = '\0';
+    // Get base path from applicationStorageDirectory (passed from AS3)
+    uint32_t basePathLength = 0;
+    const uint8_t *basePathRaw = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[1], &basePathLength, &basePathRaw);
+    if (!basePathRaw) basePathRaw = EMPTY_CSTR;
+    std::string basePath = viewToString(basePathRaw, basePathLength);
 
-    writeLog(("initNativeLog basePath=" + std::string(appPath) + " profile=" + profileStr).c_str());
+    writeLog(("initNativeLog basePath=" + basePath + " profile=" + profileStr).c_str());
 
-    const char* logDir = initNativeLog(appPath, profileStr.c_str());
+    const char* logDir = initNativeLog(basePath.c_str(), profileStr.c_str());
 
     if (checkUnexpectedShutdown()) {
         writeLog("Unexpected shutdown detected");

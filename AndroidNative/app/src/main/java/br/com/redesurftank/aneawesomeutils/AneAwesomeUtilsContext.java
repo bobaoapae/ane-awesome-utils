@@ -1582,7 +1582,8 @@ public class AneAwesomeUtilsContext extends FREContext {
         public FREObject call(FREContext context, FREObject[] args) {
             try {
                 String profile = args[0].getAsString();
-                String path = NativeLogManager.init(context.getActivity(), profile);
+                String storagePath = args[1].getAsString();
+                String path = NativeLogManager.init(storagePath, profile);
                 if (NativeLogManager.hadUnexpectedShutdown()) {
                     AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
                     ctx.safeDispatchEvent("log;unexpectedShutdown", NativeLogManager.getUnexpectedShutdownInfo());
