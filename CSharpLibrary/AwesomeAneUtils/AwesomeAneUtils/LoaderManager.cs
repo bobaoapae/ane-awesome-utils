@@ -69,7 +69,19 @@ public class LoaderManager
                     uriBuilder.Query = query.ToString()!;
                     request.RequestUri = uriBuilder.Uri;
                 }
-                else // If method is POST, add variables to the content
+                else if (method.Equals("POST_JSON", StringComparison.OrdinalIgnoreCase))
+                {
+                    request.Method = HttpMethod.Post;
+                    var json = System.Text.Json.JsonSerializer.Serialize(variables, JsonDictionaryHeaderContext.Default.DictionaryStringString);
+                    request.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                }
+                else if (request.Method == HttpMethod.Put)
+                {
+                    var body = variables.GetValueOrDefault("__body__", "");
+                    var contentType = variables.GetValueOrDefault("__contentType__", "application/octet-stream");
+                    request.Content = new StringContent(body, System.Text.Encoding.UTF8, contentType);
+                }
+                else // POST or other methods — form-encoded
                 {
                     request.Content = new FormUrlEncodedContent(variables);
                 }
@@ -92,11 +104,19 @@ public class LoaderManager
                 var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
                 if (response.StatusCode >= HttpStatusCode.BadRequest)
                 {
+                    var errorBody = "";
+                    try { errorBody = await response.Content.ReadAsStringAsync(); } catch { }
+                    var errorMsg = $"HTTP {(int)response.StatusCode} {response.StatusCode}";
+                    if (!string.IsNullOrEmpty(errorBody))
+                    {
+                        if (errorBody.Length > 512) errorBody = errorBody[..512];
+                        errorMsg += $": {errorBody}";
+                    }
                     _ = Task.Run(() =>
                     {
                         try
                         {
-                            _error(randomId.ToString(), $"Invalid status code: {response.StatusCode}");
+                            _error(randomId.ToString(), errorMsg);
                         }
                         catch (Exception e)
                         {
@@ -176,12 +196,104 @@ public class LoaderManager
 
                     try
                     {
-                        _error(randomId.ToString(), e.Message);
+                        var inner = e is AggregateException agg ? (agg.InnerException ?? e) : e;
+                        _error(randomId.ToString(), $"{inner.GetType().Name}: {inner.Message}");
                     }
                     catch (Exception)
                     {
                         // ignored
                     }
+                });
+            }
+        });
+
+        return randomId.ToString();
+    }
+
+    public string StartLoadWithBody(string url, string method, Dictionary<string, string> headers, byte[] body, string contentType)
+    {
+        var randomId = Guid.NewGuid();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var request = new HttpRequestMessage(new HttpMethod(method.ToUpper()), url);
+                request.Version = HttpVersion.Version20;
+                request.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+                foreach (var (key, value) in headers)
+                {
+                    request.Headers.Add(key, value);
+                }
+
+                request.Content = new ByteArrayContent(body);
+                request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+
+                var client = _client;
+                try
+                {
+                    var host = new Uri(url).Host;
+                    if (ClientCertificateProvider.HasHostCertificate(host))
+                    {
+                        client = _clientsByHost.GetOrAdd(host, static (h, writeLog) => HappyEyeballsHttp.CreateHttpClient(true, writeLog, h), _writeLog);
+                    }
+                }
+                catch { }
+
+                var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+                if (response.StatusCode >= HttpStatusCode.BadRequest)
+                {
+                    var errorBody = "";
+                    try { errorBody = await response.Content.ReadAsStringAsync(); } catch { }
+                    var errorMsg = $"HTTP {(int)response.StatusCode} {response.StatusCode}";
+                    if (!string.IsNullOrEmpty(errorBody))
+                    {
+                        if (errorBody.Length > 512) errorBody = errorBody[..512];
+                        errorMsg += $": {errorBody}";
+                    }
+                    _ = Task.Run(() =>
+                    {
+                        try { _error(randomId.ToString(), errorMsg); }
+                        catch (Exception e) { LogAll(e); }
+                    });
+                    return;
+                }
+
+                var contentLength = response.Content.Headers.ContentLength ?? -1;
+                var totalBytesRead = 0L;
+                var buffer = new byte[8192];
+
+                await using var stream = await response.Content.ReadAsStreamAsync();
+                using var memoryStream = new MemoryStream();
+
+                int bytesRead;
+                while ((bytesRead = await stream.ReadAsync(buffer)) > 0)
+                {
+                    memoryStream.Write(buffer, 0, bytesRead);
+                    totalBytesRead += bytesRead;
+                    if (contentLength > 0)
+                    {
+                        _progress(randomId.ToString(), $"{totalBytesRead};{contentLength}");
+                    }
+                }
+
+                var result = memoryStream.ToArray();
+                if (result.Length == 0) result = EmptyResult;
+                _results[randomId] = result;
+
+                _ = Task.Run(() =>
+                {
+                    try { _success(randomId.ToString()); }
+                    catch (Exception e) { LogAll(e); try { _error(randomId.ToString(), e.Message); } catch { } }
+                });
+            }
+            catch (Exception e)
+            {
+                _ = Task.Run(() =>
+                {
+                    LogAll(e);
+                    var inner = e is AggregateException agg ? (agg.InnerException ?? e) : e;
+                    try { _error(randomId.ToString(), $"{inner.GetType().Name}: {inner.Message}"); } catch { }
                 });
             }
         });

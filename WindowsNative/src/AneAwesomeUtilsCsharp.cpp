@@ -171,6 +171,25 @@ DataArray __cdecl csharpLibrary_awesomeUtils_loadUrl(const void *urlData, int ur
     return result;
 }
 
+DataArray __cdecl csharpLibrary_awesomeUtils_loadUrlWithBody(const void *urlData, int urlLen, const void *methodData, int methodLen, const void *headersData, int headersLen, const void *bodyData, int bodyLen, const void *contentTypeData, int contentTypeLen) {
+    writeLog("loadUrlWithBody called");
+    using LoadUrlWithBodyFunction = DataArray(__cdecl *)(const void *, int, const void *, int, const void *, int, const void *, int, const void *, int);
+    auto func = reinterpret_cast<LoadUrlWithBodyFunction>(getFunctionPointer("csharpLibrary_awesomeUtils_loadUrlWithBody"));
+
+    if (!func) {
+        writeLog("Could not load loadUrlWithBody function");
+        return {};
+    }
+
+    DataArray result = func(urlData, urlLen, methodData, methodLen, headersData, headersLen, bodyData, bodyLen, contentTypeData, contentTypeLen);
+    writeLog("loadUrlWithBody result: ");
+    if (result.DataPointer) {
+        std::string resStr(reinterpret_cast<char *>(result.DataPointer), result.Size);
+        writeLog(resStr.c_str());
+    }
+    return result;
+}
+
 DataArray __cdecl csharpLibrary_awesomeUtils_getLoaderResult(const void *guidData, int guidLen) {
     writeLog("getLoaderResult called");
     using GetLoaderResultFunction = DataArray(__cdecl *)(const void *, int);

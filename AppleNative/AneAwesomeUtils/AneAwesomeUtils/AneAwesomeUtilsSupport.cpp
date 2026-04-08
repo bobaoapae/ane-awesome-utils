@@ -10,7 +10,7 @@ typedef void* NSWindow; // don't need this..
 #include "DeviceUtils.h"
 #endif
 
-constexpr int EXPORT_FUNCTIONS_COUNT = 22;
+constexpr int EXPORT_FUNCTIONS_COUNT = 25;
 static bool alreadyInitialized = false;
 static auto exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 
@@ -18,8 +18,6 @@ static FREContext g_ctx = nullptr;
 static std::mutex dispatchMutex;
 static std::atomic<bool> g_finalized{false};
 static std::atomic<bool> g_inited{false};
-static std::atomic<bool> g_subclassed{false};
-static std::atomic<bool> g_hooksStarted{false};
 
 static std::string viewToString(const uint8_t *p, uint32_t len) {
     if (!p || len == 0) return {};
@@ -399,6 +397,62 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
     return resultStr;
 }
 
+static FREObject awesomeUtils_loadUrlWithBody(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("Calling loadUrlWithBody");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+    if (argc < 5) return nullptr;
+
+    uint32_t urlLength = 0;
+    const uint8_t *url = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[0], &urlLength, &url);
+    if (!url) url = EMPTY_CSTR;
+
+    uint32_t methodLength = 0;
+    const uint8_t *method = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[1], &methodLength, &method);
+    if (!method) method = EMPTY_CSTR;
+
+    uint32_t headersLength = 0;
+    const uint8_t *headers = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[2], &headersLength, &headers);
+    if (!headers) headers = EMPTY_CSTR;
+
+    FREByteArray bodyBA;
+    if (FREAcquireByteArray(argv[3], &bodyBA) != FRE_OK) {
+        writeLog("Failed to acquire body ByteArray");
+        return nullptr;
+    }
+    std::vector<uint8_t> bodyCopy(bodyBA.bytes, bodyBA.bytes + bodyBA.length);
+    FREReleaseByteArray(argv[3]);
+
+    uint32_t ctLength = 0;
+    const uint8_t *contentType = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[4], &ctLength, &contentType);
+    if (!contentType) contentType = EMPTY_CSTR;
+
+    auto da = csharpLibrary_awesomeUtils_loadUrlWithBody(
+        url, static_cast<int>(urlLength),
+        method, static_cast<int>(methodLength),
+        headers, static_cast<int>(headersLength),
+        bodyCopy.data(), static_cast<int>(bodyCopy.size()),
+        contentType, static_cast<int>(ctLength)
+    );
+
+    if (da.Size <= 0 || da.DataPointer == nullptr) {
+        writeLog("loadUrlWithBody returned empty");
+        return nullptr;
+    }
+
+    auto daDeleter = std::unique_ptr<uint8_t, decltype(&csharpLibrary_awesomeUtils_disposeDataArrayBytes)>(da.DataPointer, &csharpLibrary_awesomeUtils_disposeDataArrayBytes);
+
+    FREObject resultStr;
+    if (FRENewObjectFromUTF8(static_cast<uint32_t>(da.Size), da.DataPointer, &resultStr) != FRE_OK) {
+        writeLog("Failed to create string object");
+        return nullptr;
+    }
+    return resultStr;
+}
+
 static FREObject awesomeUtils_getLoaderResult(FREContext ctx, void *functionData, uint32_t argc, FREObject argv[]) {
     writeLog("Calling getResult");
     if (g_finalized.load(std::memory_order_acquire)) return nullptr;
@@ -757,7 +811,8 @@ static FREObject awesomeUtils_initLog(FREContext ctx, void *funcData, uint32_t a
     const char* logDir = initNativeLog(basePath.c_str(), profileStr.c_str());
 
     if (checkUnexpectedShutdown()) {
-        dispatchLogEvent("unexpectedShutdown", "info");
+        std::string shutdownInfo = getUnexpectedShutdownInfo();
+        dispatchLogEvent("unexpectedShutdown", shutdownInfo.c_str());
     }
 
     FREObject resultStr;
@@ -937,6 +992,18 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[20].function = awesomeUtils_mapXmlToObject;
         exportedFunctions[21].name = reinterpret_cast<const uint8_t *>("awesomeUtils_addClientCertificate");
         exportedFunctions[21].function = awesomeUtils_addClientCertificate;
+        exportedFunctions[22].name = reinterpret_cast<const uint8_t *>("awesomeUtils_loadUrlWithBody");
+        exportedFunctions[22].function = awesomeUtils_loadUrlWithBody;
+        exportedFunctions[23].name = reinterpret_cast<const uint8_t *>("awesomeUtils_notifyBackground");
+        exportedFunctions[23].function = [](FREContext, void*, uint32_t, FREObject*) -> FREObject {
+            nativeLogOnBackground();
+            return nullptr;
+        };
+        exportedFunctions[24].name = reinterpret_cast<const uint8_t *>("awesomeUtils_notifyForeground");
+        exportedFunctions[24].function = [](FREContext, void*, uint32_t, FREObject*) -> FREObject {
+            nativeLogOnForeground();
+            return nullptr;
+        };
     }
     g_ctx = ctx;
 

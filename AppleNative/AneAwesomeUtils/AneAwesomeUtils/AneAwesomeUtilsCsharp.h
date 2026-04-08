@@ -18,6 +18,7 @@ extern "C" {
     void __cdecl csharpLibrary_awesomeUtils_finalize();
     DataArray __cdecl csharpLibrary_awesomeUtils_deviceUniqueId();
     DataArray __cdecl csharpLibrary_awesomeUtils_loadUrl(const void* url, int urlLen, const void* method, int methodLen, const void* variables, int variablesLen, const void* headers, int headersLen);
+    DataArray __cdecl csharpLibrary_awesomeUtils_loadUrlWithBody(const void* url, int urlLen, const void* method, int methodLen, const void* headers, int headersLen, const void* body, int bodyLen, const void* contentType, int contentTypeLen);
     DataArray __cdecl csharpLibrary_awesomeUtils_getLoaderResult(const void* guidPointer, int guidLen);
     DataArray __cdecl csharpLibrary_awesomeUtils_createWebSocket();
     int __cdecl csharpLibrary_awesomeUtils_connectWebSocket(const void* guidPointer, int guidLen, const void* uri, int uriLen, const void* headers, int headersLen);

@@ -17,7 +17,7 @@
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
 
-constexpr int EXPORT_FUNCTIONS_COUNT = 29;
+constexpr int EXPORT_FUNCTIONS_COUNT = 32;
 static bool alreadyInitialized = false;
 static auto exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 
@@ -417,6 +417,70 @@ static FREObject awesomeUtils_loadUrl(FREContext ctx, void *funcData, uint32_t a
 
     std::string resultString(reinterpret_cast<char *>(da.DataPointer), static_cast<size_t>(da.Size));
     writeLog(("Result: " + resultString).c_str());
+
+    FREObject resultStr;
+    if (FRENewObjectFromUTF8(static_cast<uint32_t>(da.Size), da.DataPointer, &resultStr) != FRE_OK) {
+        writeLog("Failed to create string object");
+        return nullptr;
+    }
+    return resultStr;
+}
+
+static FREObject awesomeUtils_loadUrlWithBody(FREContext ctx, void *funcData, uint32_t argc, FREObject argv[]) {
+    writeLog("Calling loadUrlWithBody");
+    if (g_finalized.load(std::memory_order_acquire)) return nullptr;
+    if (argc < 5) return nullptr;
+
+    // argv[0] = url (String), argv[1] = method (String), argv[2] = headersJson (String),
+    // argv[3] = body (ByteArray), argv[4] = contentType (String)
+
+    uint32_t urlLength = 0;
+    const uint8_t *url = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[0], &urlLength, &url);
+    if (!url) url = EMPTY_CSTR;
+
+    uint32_t methodLength = 0;
+    const uint8_t *method = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[1], &methodLength, &method);
+    if (!method) method = EMPTY_CSTR;
+
+    uint32_t headersLength = 0;
+    const uint8_t *headers = EMPTY_CSTR;
+    FREGetObjectAsUTF8(argv[2], &headersLength, &headers);
+    if (!headers) headers = EMPTY_CSTR;
+
+    FREByteArray bodyBA;
+    if (FREAcquireByteArray(argv[3], &bodyBA) != FRE_OK) {
+        writeLog("Failed to acquire body ByteArray");
+        return nullptr;
+    }
+    auto bodyBytes = bodyBA.bytes;
+    auto bodyLen = static_cast<int>(bodyBA.length);
+
+    uint32_t ctLength = 0;
+    const uint8_t *contentType = EMPTY_CSTR;
+    // Must release ByteArray before calling other FRE functions
+    // So copy the body first
+    std::vector<uint8_t> bodyCopy(bodyBytes, bodyBytes + bodyLen);
+    FREReleaseByteArray(argv[3]);
+
+    FREGetObjectAsUTF8(argv[4], &ctLength, &contentType);
+    if (!contentType) contentType = EMPTY_CSTR;
+
+    auto da = csharpLibrary_awesomeUtils_loadUrlWithBody(
+        url, static_cast<int>(urlLength),
+        method, static_cast<int>(methodLength),
+        headers, static_cast<int>(headersLength),
+        bodyCopy.data(), static_cast<int>(bodyCopy.size()),
+        contentType, static_cast<int>(ctLength)
+    );
+
+    if (da.Size <= 0 || da.DataPointer == nullptr) {
+        writeLog("loadUrlWithBody returned empty");
+        return nullptr;
+    }
+
+    auto daDeleter = std::unique_ptr<uint8_t, decltype(&csharpLibrary_awesomeUtils_disposeDataArrayBytes)>(da.DataPointer, &csharpLibrary_awesomeUtils_disposeDataArrayBytes);
 
     FREObject resultStr;
     if (FRENewObjectFromUTF8(static_cast<uint32_t>(da.Size), da.DataPointer, &resultStr) != FRE_OK) {
@@ -1171,6 +1235,18 @@ static void AneAwesomeUtilsSupportInitializer(
         exportedFunctions[27].function = awesomeUtils_getLogResult;
         exportedFunctions[28].name = reinterpret_cast<const uint8_t *>("awesomeUtils_deleteLogFile");
         exportedFunctions[28].function = awesomeUtils_deleteLogFile;
+        exportedFunctions[29].name = reinterpret_cast<const uint8_t *>("awesomeUtils_loadUrlWithBody");
+        exportedFunctions[29].function = awesomeUtils_loadUrlWithBody;
+        exportedFunctions[30].name = reinterpret_cast<const uint8_t *>("awesomeUtils_notifyBackground");
+        exportedFunctions[30].function = [](FREContext, void*, uint32_t, FREObject*) -> FREObject {
+            nativeLogOnBackground();
+            return nullptr;
+        };
+        exportedFunctions[31].name = reinterpret_cast<const uint8_t *>("awesomeUtils_notifyForeground");
+        exportedFunctions[31].function = [](FREContext, void*, uint32_t, FREObject*) -> FREObject {
+            nativeLogOnForeground();
+            return nullptr;
+        };
     }
     {
         std::lock_guard lock(dispatchMutex);

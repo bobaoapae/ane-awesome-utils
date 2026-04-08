@@ -20,6 +20,7 @@ import org.xbill.DNS.Type;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +34,8 @@ import okhttp3.Dns;
 public class InternalDnsResolver {
 
     private static final InternalDnsResolver instance = new InternalDnsResolver();
+    private static final long NEGATIVE_CACHE_TTL_MS = 30_000;
+    private static final long SYSTEM_DNS_DELAY_MS = 2_000;
 
     public static InternalDnsResolver getInstance() {
         return instance;
@@ -40,11 +43,13 @@ public class InternalDnsResolver {
 
     private final Map<String, List<String>> _staticHosts;
     private final Map<String, List<InetAddress>> _resolvedHosts;
+    private final Map<String, Long> _negativeCache;
     private final ExecutorService _executor;
 
     private InternalDnsResolver() {
         _staticHosts = new HashMap<>();
         _resolvedHosts = new HashMap<>();
+        _negativeCache = new HashMap<>();
         _executor= Executors.newCachedThreadPool();
     }
 
@@ -78,6 +83,16 @@ public class InternalDnsResolver {
             }
         }
 
+        // Check negative cache to avoid flooding DNS resolvers on repeated failures
+        synchronized (_negativeCache) {
+            Long failedAt = _negativeCache.get(host);
+            if (failedAt != null && (System.currentTimeMillis() - failedAt) < NEGATIVE_CACHE_TTL_MS) {
+                // Recently failed - go straight to system DNS
+                addresses.addAll(Dns.SYSTEM.lookup(host));
+                return addresses;
+            }
+        }
+
         try {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
                 addresses.addAll(resolveDnsUsingThreadForLowApi(host));
@@ -86,7 +101,7 @@ public class InternalDnsResolver {
                 addresses.addAll(fromResolversResult);
             }
         } catch (Exception e) {
-            AneAwesomeUtilsLogging.e(TAG, "Error in lookup() : " + e.getMessage(), e);
+            AneAwesomeUtilsLogging.d(TAG, "Custom DNS resolution failed for " + host + ", falling back to system DNS");
         }
 
         if (!addresses.isEmpty()) {
@@ -95,6 +110,10 @@ public class InternalDnsResolver {
             }
             synchronized (_resolvedHosts) {
                 _resolvedHosts.put(host, addresses);
+            }
+            // Clear negative cache on success
+            synchronized (_negativeCache) {
+                _negativeCache.remove(host);
             }
             return addresses;
         }
@@ -115,7 +134,15 @@ public class InternalDnsResolver {
             }
         }
 
-        addresses.addAll(Dns.SYSTEM.lookup(host));
+        try {
+            addresses.addAll(Dns.SYSTEM.lookup(host));
+        } catch (UnknownHostException e) {
+            // All resolution methods failed - add to negative cache
+            synchronized (_negativeCache) {
+                _negativeCache.put(host, System.currentTimeMillis());
+            }
+            throw e;
+        }
 
         return addresses;
     }
@@ -130,7 +157,7 @@ public class InternalDnsResolver {
     }
 
     private List<InetAddress> resolveDnsUsingThreadForLowApi(String domain) {
-        AneAwesomeUtilsLogging.i(TAG, "resolveDnsUsingThreadForLowApi() called with: domain = [" + domain + "]");
+        AneAwesomeUtilsLogging.d(TAG, "resolveDnsUsingThreadForLowApi() called with: domain = [" + domain + "]");
         List<InetAddress> addresses = new ArrayList<>();
         Thread cloudflareThread = new Thread(() -> {
             try {
@@ -142,7 +169,7 @@ public class InternalDnsResolver {
                     addresses.addAll(cloudflareAddresses);
                 }
             } catch (Exception e) {
-                AneAwesomeUtilsLogging.e(TAG, "Failure in resolveDnsUsingThreadForLowApi() : " + e.getMessage(), e);
+                AneAwesomeUtilsLogging.d(TAG, "Failure in resolveDnsUsingThreadForLowApi() cloudflare: " + e.getMessage());
             }
         });
         Thread googleThread = new Thread(() -> {
@@ -155,7 +182,7 @@ public class InternalDnsResolver {
                     addresses.addAll(googleAddresses);
                 }
             } catch (Exception e) {
-                AneAwesomeUtilsLogging.e(TAG, "Failure in resolveDnsUsingThreadForLowApi() : " + e.getMessage(), e);
+                AneAwesomeUtilsLogging.d(TAG, "Failure in resolveDnsUsingThreadForLowApi() google: " + e.getMessage());
             }
         });
         Thread adguardThread = new Thread(() -> {
@@ -168,33 +195,33 @@ public class InternalDnsResolver {
                     addresses.addAll(adguardAddresses);
                 }
             } catch (Exception e) {
-                AneAwesomeUtilsLogging.e(TAG, "Failure in resolveDnsUsingThreadForLowApi() : " + e.getMessage(), e);
+                AneAwesomeUtilsLogging.d(TAG, "Failure in resolveDnsUsingThreadForLowApi() adguard: " + e.getMessage());
             }
         });
         Thread cloudflareNormalThread = new Thread(() -> {
             try {
-                List<InetAddress> adguardAddresses = resolveDns(new SimpleResolver(Objects.requireNonNull(getByIpWithoutException("1.1.1.1"))), domain);
+                List<InetAddress> cloudflareAddresses = resolveDns(new SimpleResolver(Objects.requireNonNull(getByIpWithoutException("1.1.1.1"))), domain);
                 synchronized (addresses) {
                     if (!addresses.isEmpty())
                         return;
                     AneAwesomeUtilsLogging.d(TAG, "resolveDnsUsingThreadForLowApi() resolved with cloudflare normal");
-                    addresses.addAll(adguardAddresses);
+                    addresses.addAll(cloudflareAddresses);
                 }
             } catch (Exception e) {
-                AneAwesomeUtilsLogging.e(TAG, "Failure in resolveDnsUsingThreadForLowApi() : " + e.getMessage(), e);
+                AneAwesomeUtilsLogging.d(TAG, "Failure in resolveDnsUsingThreadForLowApi() cloudflare normal: " + e.getMessage());
             }
         });
         Thread googleNormalThread = new Thread(() -> {
             try {
-                List<InetAddress> adguardAddresses = resolveDns(new SimpleResolver(Objects.requireNonNull(getByIpWithoutException("8.8.8.8"))), domain);
+                List<InetAddress> googleAddresses = resolveDns(new SimpleResolver(Objects.requireNonNull(getByIpWithoutException("8.8.8.8"))), domain);
                 synchronized (addresses) {
                     if (!addresses.isEmpty())
                         return;
                     AneAwesomeUtilsLogging.d(TAG, "resolveDnsUsingThreadForLowApi() resolved with google normal");
-                    addresses.addAll(adguardAddresses);
+                    addresses.addAll(googleAddresses);
                 }
             } catch (Exception e) {
-                AneAwesomeUtilsLogging.e(TAG, "Failure in resolveDnsUsingThreadForLowApi() : " + e.getMessage(), e);
+                AneAwesomeUtilsLogging.d(TAG, "Failure in resolveDnsUsingThreadForLowApi() google normal: " + e.getMessage());
             }
         });
         Thread adGuardNormalThread = new Thread(() -> {
@@ -207,7 +234,26 @@ public class InternalDnsResolver {
                     addresses.addAll(adguardAddresses);
                 }
             } catch (Exception e) {
-                AneAwesomeUtilsLogging.e(TAG, "Failure in resolveDnsUsingThreadForLowApi() : " + e.getMessage(), e);
+                AneAwesomeUtilsLogging.d(TAG, "Failure in resolveDnsUsingThreadForLowApi() adguard normal: " + e.getMessage());
+            }
+        });
+        Thread systemDnsThread = new Thread(() -> {
+            try {
+                // Delay to give priority to custom resolvers over potentially poisoned system DNS
+                Thread.sleep(SYSTEM_DNS_DELAY_MS);
+                synchronized (addresses) {
+                    if (!addresses.isEmpty())
+                        return;
+                }
+                List<InetAddress> systemAddresses = Dns.SYSTEM.lookup(domain);
+                synchronized (addresses) {
+                    if (!addresses.isEmpty())
+                        return;
+                    AneAwesomeUtilsLogging.d(TAG, "resolveDnsUsingThreadForLowApi() resolved with system DNS");
+                    addresses.addAll(systemAddresses);
+                }
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.d(TAG, "Failure in resolveDnsUsingThreadForLowApi() system DNS: " + e.getMessage());
             }
         });
 
@@ -217,6 +263,7 @@ public class InternalDnsResolver {
         cloudflareNormalThread.start();
         googleNormalThread.start();
         adGuardNormalThread.start();
+        systemDnsThread.start();
 
         while (true) {
             synchronized (addresses) {
@@ -224,8 +271,9 @@ public class InternalDnsResolver {
                     break;
                 }
             }
-            //check if all threads are done
-            if (!cloudflareThread.isAlive() && !googleThread.isAlive() && !adguardThread.isAlive() && !cloudflareNormalThread.isAlive() && !googleNormalThread.isAlive() && !adGuardNormalThread.isAlive()) {
+            if (!cloudflareThread.isAlive() && !googleThread.isAlive() && !adguardThread.isAlive()
+                    && !cloudflareNormalThread.isAlive() && !googleNormalThread.isAlive()
+                    && !adGuardNormalThread.isAlive() && !systemDnsThread.isAlive()) {
                 break;
             }
             try {
@@ -240,36 +288,47 @@ public class InternalDnsResolver {
 
     @RequiresApi(api = Build.VERSION_CODES.N)
     private CompletableFuture<List<InetAddress>> resolveWithDns(String domain) {
-        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() called with: domain = [" + domain + "]");
+        AneAwesomeUtilsLogging.d(TAG, "resolveWithDns() called with: domain = [" + domain + "]");
         CompletableFuture<List<InetAddress>> cloudflareFuture = CompletableFuture.supplyAsync(() -> resolveDns(new DohResolver("https://1.1.1.1/dns-query"), domain), _executor);
         CompletableFuture<List<InetAddress>> googleFuture = CompletableFuture.supplyAsync(() -> resolveDns(new DohResolver("https://dns.google/dns-query"), domain), _executor);
         CompletableFuture<List<InetAddress>> adguardFuture = CompletableFuture.supplyAsync(() -> resolveDns(new DohResolver("https://unfiltered.adguard-dns.com/dns-query"), domain), _executor);
         CompletableFuture<List<InetAddress>> cloudflareNormalFuture = CompletableFuture.supplyAsync(() -> resolveDns(new SimpleResolver(Objects.requireNonNull(getByIpWithoutException("1.1.1.1"))), domain), _executor);
         CompletableFuture<List<InetAddress>> googleNormalFuture = CompletableFuture.supplyAsync(() -> resolveDns(new SimpleResolver(Objects.requireNonNull(getByIpWithoutException("8.8.8.8"))), domain), _executor);
         CompletableFuture<List<InetAddress>> adguardNormalFuture = CompletableFuture.supplyAsync(() -> resolveDns(new SimpleResolver(Objects.requireNonNull(getByIpWithoutException("94.140.14.140"))), domain), _executor);
+        CompletableFuture<List<InetAddress>> systemDnsFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                // Delay to give priority to custom resolvers over potentially poisoned system DNS
+                Thread.sleep(SYSTEM_DNS_DELAY_MS);
+                List<InetAddress> result = Dns.SYSTEM.lookup(domain);
+                if (result.isEmpty()) throw new RuntimeException("System DNS returned empty for " + domain);
+                return result;
+            } catch (UnknownHostException e) {
+                throw new RuntimeException(e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }, _executor);
 
-        return CompletableFuture.anyOf(cloudflareFuture, googleFuture, adguardFuture, cloudflareNormalFuture, googleNormalFuture, adguardNormalFuture)
+        List<CompletableFuture<List<InetAddress>>> allFutures = Arrays.asList(
+                cloudflareFuture, googleFuture, adguardFuture,
+                cloudflareNormalFuture, googleNormalFuture, adguardNormalFuture,
+                systemDnsFuture
+        );
+        String[] names = {"cloudflare", "google", "adguard", "cloudflare normal", "google normal", "adguard normal", "system"};
+
+        return CompletableFuture.anyOf(allFutures.toArray(new CompletableFuture[0]))
                 .thenApply(o -> {
-                    if (cloudflareFuture.isDone() && !cloudflareFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with cloudflare");
-                        return cloudflareFuture.join();
-                    } else if (googleFuture.isDone() && !googleFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with google");
-                        return googleFuture.join();
-                    } else if (adguardFuture.isDone() && !adguardFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with adguard");
-                        return adguardFuture.join();
-                    } else if (cloudflareNormalFuture.isDone() && !cloudflareNormalFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with cloudflare normal");
-                        return cloudflareNormalFuture.join();
-                    } else if (googleNormalFuture.isDone() && !googleNormalFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with google normal");
-                        return googleNormalFuture.join();
-                    } else if (adguardNormalFuture.isDone() && !adguardNormalFuture.isCompletedExceptionally()) {
-                        AneAwesomeUtilsLogging.i(TAG, "resolveWithDns() resolved with adguard normal");
-                        return adguardNormalFuture.join();
+                    for (int i = 0; i < allFutures.size(); i++) {
+                        CompletableFuture<List<InetAddress>> f = allFutures.get(i);
+                        if (f.isDone() && !f.isCompletedExceptionally()) {
+                            List<InetAddress> result = f.join();
+                            if (!result.isEmpty()) {
+                                AneAwesomeUtilsLogging.d(TAG, "resolveWithDns() resolved with " + names[i]);
+                                return result;
+                            }
+                        }
                     }
-
                     return new ArrayList<>();
                 });
     }

@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 #include "WindowsFilterInputs.h"
 #include "AudioSafetyHook.h"
 #include "SamplerSafetyHook.h"
@@ -90,11 +91,34 @@ static std::mutex g_nativeLogMutex;
 static HANDLE g_nativeLogHandle = INVALID_HANDLE_VALUE;
 static std::string g_nativeLogDir;
 static std::string g_nativeLogPath;
+static std::string g_nativeLogCurrentDate;
+static size_t g_nativeLogOffset = 0;
 static bool g_unexpectedShutdown = false;
-static std::vector<std::string> g_oldLogFiles;
+static std::string g_crashedSessionFile;
 
 static std::mutex g_readResultMutex;
 static std::vector<uint8_t> g_readResultBuffer;
+
+static const uint8_t LOG_XOR_KEY[] = {
+    0x4A, 0x7B, 0x2C, 0x5D, 0x1E, 0x6F, 0x3A, 0x8B,
+    0x9C, 0x0D, 0xFE, 0xAF, 0x50, 0xE1, 0x72, 0xC3
+};
+static const size_t LOG_XOR_KEY_LEN = sizeof(LOG_XOR_KEY);
+
+static void xorTransform(uint8_t* data, size_t size, size_t offset) {
+    for (size_t i = 0; i < size; i++) {
+        data[i] ^= LOG_XOR_KEY[(offset + i) % LOG_XOR_KEY_LEN];
+    }
+}
+
+static void writeXored(HANDLE hFile, const char* data, DWORD size) {
+    std::vector<uint8_t> buf(size);
+    memcpy(buf.data(), data, size);
+    xorTransform(buf.data(), size, g_nativeLogOffset);
+    DWORD written = 0;
+    WriteFile(hFile, buf.data(), size, &written, NULL);
+    g_nativeLogOffset += written;
+}
 
 static void createDirectoryRecursive(const std::string& path) {
     size_t pos = 0;
@@ -117,6 +141,15 @@ static std::string getTodayDateString() {
     GetLocalTime(&st);
     char buf[16];
     wsprintfA(buf, "%04u-%02u-%02u", st.wYear, st.wMonth, st.wDay);
+    return buf;
+}
+
+static std::string getSessionTimestamp() {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char buf[32];
+    wsprintfA(buf, "%04u-%02u-%02u_%02u%02u%02u",
+              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     return buf;
 }
 
@@ -183,19 +216,62 @@ const char* initNativeLog(const char* basePath, const char* profile) {
     g_nativeLogDir = std::string(basePath) + "\\ane-awesome-utils-logs\\" + profile;
     createDirectoryRecursive(g_nativeLogDir);
 
-    // Check for unexpected shutdown (session marker exists from previous run)
+    // Check for unexpected shutdown (session marker contains crashed session's filename)
     std::string sessionPath = g_nativeLogDir + "\\.session_active";
+    std::string bgPath = g_nativeLogDir + "\\.background_since";
     DWORD attr = GetFileAttributesA(sessionPath.c_str());
-    g_unexpectedShutdown = (attr != INVALID_FILE_ATTRIBUTES);
+    bool sessionMarkerExists = (attr != INVALID_FILE_ATTRIBUTES);
 
-    // If unexpected shutdown, collect old log file names before cleanup
-    if (g_unexpectedShutdown) {
-        g_oldLogFiles = scanLogFiles(g_nativeLogDir);
-    }
+    if (sessionMarkerExists) {
+        // Session wasn't closed cleanly - but was it an OS background kill?
+        DWORD bgAttr = GetFileAttributesA(bgPath.c_str());
+        bool bgMarkerExists = (bgAttr != INVALID_FILE_ATTRIBUTES);
 
-    // Delete the old session marker if it existed
-    if (g_unexpectedShutdown) {
+        if (bgMarkerExists) {
+            // Read background timestamp
+            long long bgSince = 0;
+            HANDLE hBg = CreateFileA(bgPath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hBg != INVALID_HANDLE_VALUE) {
+                char buf[64] = {};
+                DWORD bytesRead = 0;
+                ReadFile(hBg, buf, sizeof(buf) - 1, &bytesRead, NULL);
+                CloseHandle(hBg);
+                bgSince = _atoi64(buf);
+            }
+            auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            long long elapsed = now - bgSince;
+            static const long long BACKGROUND_GRACE_MS = 2LL * 60 * 1000; // 2 minutes
+
+            if (bgSince > 0 && elapsed > BACKGROUND_GRACE_MS) {
+                g_unexpectedShutdown = false;
+            } else {
+                g_unexpectedShutdown = true;
+                HANDLE hMarker = CreateFileA(sessionPath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (hMarker != INVALID_HANDLE_VALUE) {
+                    char buf[512] = {};
+                    DWORD bytesRead = 0;
+                    ReadFile(hMarker, buf, sizeof(buf) - 1, &bytesRead, NULL);
+                    CloseHandle(hMarker);
+                    g_crashedSessionFile = std::string(buf, bytesRead);
+                }
+            }
+            DeleteFileA(bgPath.c_str());
+        } else {
+            g_unexpectedShutdown = true;
+            HANDLE hMarker = CreateFileA(sessionPath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hMarker != INVALID_HANDLE_VALUE) {
+                char buf[512] = {};
+                DWORD bytesRead = 0;
+                ReadFile(hMarker, buf, sizeof(buf) - 1, &bytesRead, NULL);
+                CloseHandle(hMarker);
+                g_crashedSessionFile = std::string(buf, bytesRead);
+            }
+        }
         DeleteFileA(sessionPath.c_str());
+    } else {
+        g_unexpectedShutdown = false;
+        DeleteFileA(bgPath.c_str()); // clean up stale bg marker if any
     }
 
     // Scan and delete files older than 7 days
@@ -208,25 +284,33 @@ const char* initNativeLog(const char* basePath, const char* profile) {
         }
     }
 
-    // Open today's log file in append mode
-    std::string today = getTodayDateString();
-    g_nativeLogPath = g_nativeLogDir + "\\ane-log-" + today + ".txt";
+    // Open a new session log file (each app launch = new file)
+    g_nativeLogCurrentDate = getTodayDateString();
+    std::string sessionTs = getSessionTimestamp();
+    g_nativeLogPath = g_nativeLogDir + "\\ane-log-" + sessionTs + ".txt";
     g_nativeLogHandle = CreateFileA(
         g_nativeLogPath.c_str(),
         GENERIC_WRITE,
         FILE_SHARE_READ,
         NULL,
-        OPEN_ALWAYS,
+        CREATE_ALWAYS,
         FILE_ATTRIBUTE_NORMAL,
         NULL
     );
+    g_nativeLogOffset = 0;
+
+    // Flush log file to disk to ensure it persists through crashes
     if (g_nativeLogHandle != INVALID_HANDLE_VALUE) {
-        SetFilePointer(g_nativeLogHandle, 0, NULL, FILE_END);
+        FlushFileBuffers(g_nativeLogHandle);
     }
 
-    // Create session marker
+    // Create session marker with current log filename
     HANDLE hSession = CreateFileA(sessionPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hSession != INVALID_HANDLE_VALUE) {
+        std::string logFilename = "ane-log-" + sessionTs + ".txt";
+        DWORD written = 0;
+        WriteFile(hSession, logFilename.c_str(), static_cast<DWORD>(logFilename.size()), &written, NULL);
+        FlushFileBuffers(hSession);
         CloseHandle(hSession);
     }
 
@@ -238,22 +322,21 @@ void writeNativeLog(const char* level, const char* tag, const char* message) {
 
     // Check if we need to rotate to a new day's file
     std::string today = getTodayDateString();
-    std::string expectedPath = g_nativeLogDir + "\\ane-log-" + today + ".txt";
-    if (g_nativeLogHandle != INVALID_HANDLE_VALUE && expectedPath != g_nativeLogPath) {
+    if (g_nativeLogHandle != INVALID_HANDLE_VALUE && today != g_nativeLogCurrentDate) {
         CloseHandle(g_nativeLogHandle);
-        g_nativeLogPath = expectedPath;
+        g_nativeLogCurrentDate = today;
+        std::string sessionTs = getSessionTimestamp();
+        g_nativeLogPath = g_nativeLogDir + "\\ane-log-" + sessionTs + ".txt";
         g_nativeLogHandle = CreateFileA(
             g_nativeLogPath.c_str(),
             GENERIC_WRITE,
             FILE_SHARE_READ,
             NULL,
-            OPEN_ALWAYS,
+            CREATE_ALWAYS,
             FILE_ATTRIBUTE_NORMAL,
             NULL
         );
-        if (g_nativeLogHandle != INVALID_HANDLE_VALUE) {
-            SetFilePointer(g_nativeLogHandle, 0, NULL, FILE_END);
-        }
+        g_nativeLogOffset = 0;
     }
 
     if (g_nativeLogHandle == INVALID_HANDLE_VALUE) return;
@@ -264,8 +347,7 @@ void writeNativeLog(const char* level, const char* tag, const char* message) {
     // Format: [YYYY-MM-DD HH:MM:SS] [LEVEL] [TAG] message\r\n
     std::string line = std::string("[") + ts + "] [" + (level ? level : "") + "] [" + (tag ? tag : "") + "] " + (message ? message : "") + "\r\n";
 
-    DWORD written = 0;
-    WriteFile(g_nativeLogHandle, line.c_str(), static_cast<DWORD>(line.size()), &written, NULL);
+    writeXored(g_nativeLogHandle, line.c_str(), static_cast<DWORD>(line.size()));
     FlushFileBuffers(g_nativeLogHandle);
 
     printf("[%s] [%s] [%s] %s\n", ts, level ? level : "", tag ? tag : "", message ? message : "");
@@ -309,21 +391,17 @@ bool checkUnexpectedShutdown() {
 std::string getUnexpectedShutdownInfo() {
     std::lock_guard lock(g_nativeLogMutex);
 
-    std::string json = "[";
-    bool first = true;
-    for (auto& f : g_oldLogFiles) {
-        std::string fullPath = g_nativeLogDir + "\\" + f;
-        std::string date = dateFromFilename(f);
-        if (!first) json += ",";
-        first = false;
-        json += "{\"date\":\"" + date + "\",\"file\":\"";
-        for (char c : fullPath) {
-            if (c == '\\') json += "\\\\";
-            else json += c;
-        }
-        json += "\"}";
+    if (g_crashedSessionFile.empty()) return "[]";
+
+    std::string fullPath = g_nativeLogDir + "\\" + g_crashedSessionFile;
+    std::string date = dateFromFilename(g_crashedSessionFile);
+
+    std::string json = "[{\"date\":\"" + date + "\",\"path\":\"";
+    for (char c : fullPath) {
+        if (c == '\\') json += "\\\\";
+        else json += c;
     }
-    json += "]";
+    json += "\"}]";
     return json;
 }
 
@@ -333,37 +411,35 @@ bool startAsyncLogRead(const char* date, std::function<void(bool success, const 
 
     std::thread([dateStr, dir, callback]() {
         std::vector<uint8_t> buffer;
+        auto files = scanLogFiles(dir);
 
-        if (dateStr.empty()) {
-            // Concatenate all log files sorted by name
-            auto files = scanLogFiles(dir);
-            for (auto& f : files) {
-                std::string fullPath = dir + "\\" + f;
-                HANDLE hFile = CreateFileA(fullPath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-                if (hFile == INVALID_HANDLE_VALUE) continue;
-                DWORD fileSize = GetFileSize(hFile, NULL);
-                if (fileSize > 0 && fileSize != INVALID_FILE_SIZE) {
-                    size_t offset = buffer.size();
-                    buffer.resize(offset + fileSize);
-                    DWORD bytesRead = 0;
-                    ReadFile(hFile, buffer.data() + offset, fileSize, &bytesRead, NULL);
-                    buffer.resize(offset + bytesRead);
-                }
-                CloseHandle(hFile);
+        // Filter by date prefix if specified
+        std::vector<std::string> matched;
+        for (auto& f : files) {
+            if (!dateStr.empty()) {
+                std::string d = dateFromFilename(f);
+                if (d != dateStr) continue;
             }
-        } else {
-            std::string fullPath = dir + "\\ane-log-" + dateStr + ".txt";
+            matched.push_back(f);
+        }
+
+        if (matched.empty() && !dateStr.empty()) {
+            if (callback) callback(false, "File not found");
+            return;
+        }
+
+        for (auto& f : matched) {
+            std::string fullPath = dir + "\\" + f;
             HANDLE hFile = CreateFileA(fullPath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-            if (hFile == INVALID_HANDLE_VALUE) {
-                if (callback) callback(false, "File not found");
-                return;
-            }
+            if (hFile == INVALID_HANDLE_VALUE) continue;
             DWORD fileSize = GetFileSize(hFile, NULL);
             if (fileSize > 0 && fileSize != INVALID_FILE_SIZE) {
-                buffer.resize(fileSize);
+                size_t prevSize = buffer.size();
+                buffer.resize(prevSize + fileSize);
                 DWORD bytesRead = 0;
-                ReadFile(hFile, buffer.data(), fileSize, &bytesRead, NULL);
-                buffer.resize(bytesRead);
+                ReadFile(hFile, buffer.data() + prevSize, fileSize, &bytesRead, NULL);
+                buffer.resize(prevSize + bytesRead);
+                xorTransform(buffer.data() + prevSize, bytesRead, 0);
             }
             CloseHandle(hFile);
         }
@@ -400,28 +476,43 @@ bool deleteNativeLogFiles(const char* date) {
     std::lock_guard lock(g_nativeLogMutex);
 
     std::string dateStr = date ? date : "";
-    if (dateStr.empty()) {
-        // Delete all log files
-        auto files = scanLogFiles(g_nativeLogDir);
-        for (auto& f : files) {
-            std::string fullPath = g_nativeLogDir + "\\" + f;
-            // If it's today's file and we have it open, close it first
-            if (fullPath == g_nativeLogPath && g_nativeLogHandle != INVALID_HANDLE_VALUE) {
-                CloseHandle(g_nativeLogHandle);
-                g_nativeLogHandle = INVALID_HANDLE_VALUE;
-            }
-            DeleteFileA(fullPath.c_str());
+    auto files = scanLogFiles(g_nativeLogDir);
+
+    for (auto& f : files) {
+        if (!dateStr.empty()) {
+            std::string d = dateFromFilename(f);
+            if (d != dateStr) continue;
         }
-        return true;
-    } else {
-        std::string fullPath = g_nativeLogDir + "\\ane-log-" + dateStr + ".txt";
+        std::string fullPath = g_nativeLogDir + "\\" + f;
         // If it's the currently open file, close it first
         if (fullPath == g_nativeLogPath && g_nativeLogHandle != INVALID_HANDLE_VALUE) {
             CloseHandle(g_nativeLogHandle);
             g_nativeLogHandle = INVALID_HANDLE_VALUE;
         }
-        return DeleteFileA(fullPath.c_str()) != FALSE;
+        DeleteFileA(fullPath.c_str());
     }
+    return true;
+}
+
+void nativeLogOnBackground() {
+    if (g_nativeLogDir.empty()) return;
+    std::string bgPath = g_nativeLogDir + "\\.background_since";
+    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    HANDLE hBg = CreateFileA(bgPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hBg != INVALID_HANDLE_VALUE) {
+        std::string ts = std::to_string(now);
+        DWORD written = 0;
+        WriteFile(hBg, ts.c_str(), static_cast<DWORD>(ts.size()), &written, NULL);
+        FlushFileBuffers(hBg);
+        CloseHandle(hBg);
+    }
+}
+
+void nativeLogOnForeground() {
+    if (g_nativeLogDir.empty()) return;
+    std::string bgPath = g_nativeLogDir + "\\.background_since";
+    DeleteFileA(bgPath.c_str());
 }
 
 void closeNativeLog() {

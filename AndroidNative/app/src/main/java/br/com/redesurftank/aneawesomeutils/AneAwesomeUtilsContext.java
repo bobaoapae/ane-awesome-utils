@@ -143,6 +143,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(AddStaticHost.KEY, new AddStaticHost());
         functionMap.put(RemoveStaticHost.KEY, new RemoveStaticHost());
         functionMap.put(LoadUrl.KEY, new LoadUrl());
+        functionMap.put(LoadUrlWithBody.KEY, new LoadUrlWithBody());
         functionMap.put(GetLoaderResult.KEY, new GetLoaderResult());
         functionMap.put(GetWebSocketByteArrayMessage.KEY, new GetWebSocketByteArrayMessage());
         functionMap.put(GetDeviceUniqueId.KEY, new GetDeviceUniqueId());
@@ -162,6 +163,8 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(ReadLogFile.KEY, new ReadLogFile());
         functionMap.put(GetLogResult.KEY, new GetLogResult());
         functionMap.put(DeleteLogFile.KEY, new DeleteLogFile());
+        functionMap.put(NotifyBackground.KEY, new NotifyBackground());
+        functionMap.put(NotifyForeground.KEY, new NotifyForeground());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -223,20 +226,25 @@ public class AneAwesomeUtilsContext extends FREContext {
                     try {
                         WebSocketMessage message = queue.poll();
                         if (message != null) {
-                            WebSocket webSocket = _webSockets.get(uuid);
+                            WebSocket webSocket;
+                            synchronized (_webSocketLock) {
+                                webSocket = _webSockets.get(uuid);
+                            }
                             if (webSocket != null) {
                                 message.send(webSocket);
                             } else {
-                                AneAwesomeUtilsLogging.w(TAG, "WebSocket not found for " + uuid);
-                                break; // Exit thread if WebSocket is gone
+                                AneAwesomeUtilsLogging.d(TAG, "WebSocket gone for " + uuid + ", sender thread exiting");
+                                break;
                             }
                         } else {
                             // Sleep a bit when the queue is empty
                             Thread.sleep(10);
                         }
+                    } catch (InterruptedException e) {
+                        // Thread interrupted - exit gracefully
+                        break;
                     } catch (Exception e) {
-                        AneAwesomeUtilsLogging.e(TAG, "Error in WebSocket sender thread", e);
-                        // Continue processing other messages even if one fails
+                        AneAwesomeUtilsLogging.w(TAG, "Error in WebSocket sender thread: " + e.getMessage());
                     }
                 }
 
@@ -891,6 +899,9 @@ public class AneAwesomeUtilsContext extends FREContext {
                     }
 
                     private void handleDisconnect(UUID id, String reason, int closeCode, @Nullable Response response) {
+                        // Stop sender thread before removing WebSocket to avoid race condition
+                        ctx.stopWebSocketSenderThread(id);
+
                         int responseCode = response != null ? response.code() : 0;
                         Map<String, String> headers = new HashMap<>();
                         try {
@@ -905,8 +916,10 @@ public class AneAwesomeUtilsContext extends FREContext {
                         if (headers.isEmpty()) {
                             headers = receivedHeaders;
                         }
+                        synchronized (ctx._webSocketLock) {
+                            ctx._webSockets.remove(id);
+                        }
                         ctx.dispatchWebSocketEvent(id.toString(), "disconnected", reason + ";" + closeCode + ";" + responseCode + ";" + getHeadersAsBase64(headers));
-                        ctx._webSockets.remove(id);
                     }
 
                     private String getHeadersAsBase64(@Nullable Map<String, String> headers) {
@@ -1099,6 +1112,17 @@ public class AneAwesomeUtilsContext extends FREContext {
                         formBuilder.add(entry.getKey(), entry.getValue());
                     }
                     requestBuilder.url(url).post(formBuilder.build());
+                } else if (method.equals("POST_JSON")) {
+                    String json = "{}";
+                    if (!variables.isEmpty()) {
+                        org.json.JSONObject obj = new org.json.JSONObject(variables);
+                        json = obj.toString();
+                    }
+                    requestBuilder.url(url).post(okhttp3.RequestBody.create(json, okhttp3.MediaType.parse("application/json")));
+                } else if (method.equals("PUT")) {
+                    String body = variables.containsKey("__body__") ? variables.get("__body__") : "";
+                    String contentType = variables.containsKey("__contentType__") ? variables.get("__contentType__") : "application/octet-stream";
+                    requestBuilder.url(url).put(okhttp3.RequestBody.create(body.getBytes(java.nio.charset.StandardCharsets.UTF_8), okhttp3.MediaType.parse(contentType)));
                 }
 
                 Request request = requestBuilder.build();
@@ -1107,7 +1131,11 @@ public class AneAwesomeUtilsContext extends FREContext {
                     @Override
                     public void onFailure(@NonNull Call call, @NonNull IOException e) {
                         AneAwesomeUtilsLogging.e(TAG, "Error loading url:" + url, e);
-                        ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", e.getMessage());
+                        String msg = e.getClass().getSimpleName() + ": " + (e.getMessage() != null ? e.getMessage() : "unknown");
+                        if (e.getCause() != null) {
+                            msg += " [caused by " + e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage() + "]";
+                        }
+                        ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", msg);
                     }
 
                     @Override
@@ -1116,7 +1144,14 @@ public class AneAwesomeUtilsContext extends FREContext {
                             int statusCode = response.code();
                             AneAwesomeUtilsLogging.d(TAG, "URL: " + url + " Status code: " + statusCode);
                             if (statusCode >= 400) {
-                                ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", "Invalid status code: " + statusCode);
+                                String errorBody = "";
+                                try { errorBody = response.body() != null ? response.body().string() : ""; } catch (Exception ignored) {}
+                                String errorMsg = "HTTP " + statusCode;
+                                if (errorBody != null && !errorBody.isEmpty()) {
+                                    if (errorBody.length() > 512) errorBody = errorBody.substring(0, 512);
+                                    errorMsg += ": " + errorBody;
+                                }
+                                ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", errorMsg);
                                 return;
                             }
                             byte[] bytes = response.body().bytes();
@@ -1127,7 +1162,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                             ctx.dispatchUrlLoaderEvent(uuid.toString(), "success", "");
                         } catch (Exception e) {
                             AneAwesomeUtilsLogging.e(TAG, "Error loading url:" + url, e);
-                            ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", e.getMessage());
+                            ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", e.getClass().getSimpleName() + ": " + e.getMessage());
                         }
                     }
                 });
@@ -1136,6 +1171,106 @@ public class AneAwesomeUtilsContext extends FREContext {
 
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error loading url", e);
+            }
+
+            return null;
+        }
+    }
+
+    public static class LoadUrlWithBody implements FREFunction {
+        public static final String KEY = "awesomeUtils_loadUrlWithBody";
+        private static final byte[] EmptyResult = new byte[]{0, 1, 2, 3};
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsLogging.d(TAG, "awesomeUtils_loadUrlWithBody");
+            try {
+                UUID uuid = UUID.randomUUID();
+                AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+
+                // args: url, method, headersJson, body (ByteArray), contentType
+                String url = args[0].getAsString();
+                String method = args[1].getAsString();
+                String headersJson = args[2].getAsString();
+
+                FREByteArray freBody = (FREByteArray) args[3];
+                freBody.acquire();
+                byte[] body = new byte[(int) freBody.getLength()];
+                freBody.getBytes().get(body);
+                freBody.release();
+
+                String contentType = args[4].getAsString();
+
+                Map<String, String> headers = new HashMap<>();
+                JsonReader reader = new JsonReader(new java.io.StringReader(headersJson));
+                if (!headersJson.isEmpty()) {
+                    reader.beginObject();
+                    while (reader.hasNext()) {
+                        String name = reader.nextName();
+                        String value = reader.nextString();
+                        headers.put(name, value);
+                    }
+                    reader.endObject();
+                }
+                reader.close();
+
+                Request.Builder requestBuilder = new Request.Builder();
+                HttpUrl parsedUrl = HttpUrl.parse(url);
+                if (parsedUrl == null) {
+                    AneAwesomeUtilsLogging.e(TAG, "Invalid URL: " + url);
+                    return null;
+                }
+
+                for (Map.Entry<String, String> entry : headers.entrySet()) {
+                    requestBuilder.addHeader(entry.getKey(), entry.getValue());
+                }
+
+                requestBuilder.url(url).method(method,
+                    okhttp3.RequestBody.create(body, okhttp3.MediaType.parse(contentType)));
+
+                Request request = requestBuilder.build();
+                OkHttpClient client = ctx.getClientForHost(parsedUrl.host());
+                client.newCall(request).enqueue(new Callback() {
+                    @Override
+                    public void onFailure(@NonNull Call call, @NonNull IOException e) {
+                        AneAwesomeUtilsLogging.e(TAG, "Error loadUrlWithBody:" + url, e);
+                        String msg = e.getClass().getSimpleName() + ": " + (e.getMessage() != null ? e.getMessage() : "unknown");
+                        if (e.getCause() != null) {
+                            msg += " [caused by " + e.getCause().getClass().getSimpleName() + ": " + e.getCause().getMessage() + "]";
+                        }
+                        ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", msg);
+                    }
+
+                    @Override
+                    public void onResponse(@NonNull Call call, @NonNull Response response) throws IOException {
+                        try {
+                            int statusCode = response.code();
+                            if (statusCode >= 400) {
+                                String errorBody = "";
+                                try { errorBody = response.body() != null ? response.body().string() : ""; } catch (Exception ignored) {}
+                                String errorMsg = "HTTP " + statusCode;
+                                if (errorBody != null && !errorBody.isEmpty()) {
+                                    if (errorBody.length() > 512) errorBody = errorBody.substring(0, 512);
+                                    errorMsg += ": " + errorBody;
+                                }
+                                ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", errorMsg);
+                                return;
+                            }
+                            byte[] bytes = response.body().bytes();
+                            if (bytes.length == 0) bytes = EmptyResult;
+                            ctx._urlLoaderResults.put(uuid, bytes);
+                            ctx.dispatchUrlLoaderEvent(uuid.toString(), "success", "");
+                        } catch (Exception e) {
+                            AneAwesomeUtilsLogging.e(TAG, "Error loadUrlWithBody:" + url, e);
+                            ctx.dispatchUrlLoaderEvent(uuid.toString(), "error", e.getClass().getSimpleName() + ": " + e.getMessage());
+                        }
+                    }
+                });
+
+                return FREObject.newObject(uuid.toString());
+
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "Error loadUrlWithBody", e);
             }
 
             return null;
@@ -1696,6 +1831,26 @@ public class AneAwesomeUtilsContext extends FREContext {
                     return null;
                 }
             }
+        }
+    }
+
+    public static class NotifyBackground implements FREFunction {
+        public static final String KEY = "awesomeUtils_notifyBackground";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            NativeLogManager.onBackground();
+            return null;
+        }
+    }
+
+    public static class NotifyForeground implements FREFunction {
+        public static final String KEY = "awesomeUtils_notifyForeground";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            NativeLogManager.onForeground();
+            return null;
         }
     }
 }

@@ -570,6 +570,32 @@ public static class ExportFunctions
         }
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_loadUrlWithBody", CallConvs = [typeof(CallConvCdecl)])]
+    public static unsafe DataArray LoadUrlWithBody(IntPtr urlPtr, int urlLen, IntPtr methodPtr, int methodLen, IntPtr headersPtr, int headersLen, IntPtr bodyPtr, int bodyLen, IntPtr contentTypePtr, int contentTypeLen)
+    {
+        if (IsDisposed()) return new DataArray();
+        try
+        {
+            var url = Encoding.UTF8.GetString((byte*)urlPtr, urlLen);
+            var method = Encoding.UTF8.GetString((byte*)methodPtr, methodLen);
+            var headers = Encoding.UTF8.GetString((byte*)headersPtr, headersLen);
+            var contentType = Encoding.UTF8.GetString((byte*)contentTypePtr, contentTypeLen);
+
+            var body = new byte[bodyLen];
+            new Span<byte>((byte*)bodyPtr, bodyLen).CopyTo(body);
+
+            var headersDictionary = string.IsNullOrEmpty(headers) ? new Dictionary<string, string>() : JsonSerializer.Deserialize(headers, JsonDictionaryHeaderContext.Default.DictionaryStringString);
+
+            var randomId = LoaderManager.Instance.StartLoadWithBody(url, method, headersDictionary, body, contentType);
+            return CreateDataArrayFromString(randomId);
+        }
+        catch (Exception e)
+        {
+            LogAll(e, _writeLogWrapper);
+            return new DataArray();
+        }
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "csharpLibrary_awesomeUtils_getLoaderResult", CallConvs = [typeof(CallConvCdecl)])]
     public static unsafe DataArray GetLoaderResult(IntPtr guidPointer, int guidLen)
     {

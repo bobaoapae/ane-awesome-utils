@@ -1,7 +1,7 @@
 package br.com.redesurftank.aneawesomeutils;
 
-import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.logging.Handler;
@@ -11,11 +11,11 @@ public class AsyncLogHandler extends Handler {
     private static final int MAX_QUEUE_SIZE = 500;
 
     private final BlockingQueue<LogRecord> queue;
-    private final FileOutputStream outputStream;
+    private final OutputStream outputStream;
     private final Thread writerThread;
     private volatile boolean running = true;
 
-    public AsyncLogHandler(FileOutputStream outputStream) {
+    public AsyncLogHandler(OutputStream outputStream) {
         this.outputStream = outputStream;
         this.queue = new LinkedBlockingQueue<>(MAX_QUEUE_SIZE);
         this.writerThread = new Thread(this::processQueue, "AsyncLogHandler-Writer");

@@ -28,6 +28,8 @@ bool startAsyncLogRead(const char* date, std::function<void(bool success, const 
 void getNativeLogReadResult(uint8_t** data, int* size);
 void disposeNativeLogReadResult();
 bool deleteNativeLogFiles(const char* date);
+void nativeLogOnBackground();
+void nativeLogOnForeground();
 void closeNativeLog();
 
 // Cross-ANE exports

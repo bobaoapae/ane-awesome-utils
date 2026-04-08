@@ -254,6 +254,34 @@ public class AneAwesomeUtils {
     }
 
 
+    /**
+     * Like loadUrl but sends a raw ByteArray as the request body.
+     * Useful for PUT/POST with binary data (zip files, images, etc).
+     */
+    public function loadUrlWithBody(url:String, method:String, body:ByteArray, contentType:String = "application/octet-stream", headers:Object = null, onResult:Function = null, onError:Function = null):void {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        if (headers is Dictionary) {
+            var headersDict:Dictionary = headers as Dictionary;
+            var headersObj:Object = {};
+            for (var key:Object in headersDict) {
+                headersObj[key] = String(headersDict[key]);
+            }
+            headers = headersObj;
+        }
+        var headersJson:String = headers ? JSON.stringify(headers) : "";
+        body.position = 0;
+        var loaderId:String = _extContext.call("awesomeUtils_loadUrlWithBody", url, method, headersJson, body, contentType) as String;
+        if (!loaderId) {
+            if (onError) {
+                onError(new Error("Error loading URL with body"));
+            }
+            return;
+        }
+        _loaders[loaderId] = {onResult: onResult, onError: onError, onProgress: null};
+    }
+
     public function getDeviceUniqueId():String {
         if (!_successInit) {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
@@ -389,6 +417,30 @@ public class AneAwesomeUtils {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
         return _extContext.call("awesomeUtils_deleteLogFile", date ? date : "") as Boolean;
+    }
+
+    /**
+     * Notify that the app went to background. Records the timestamp so that
+     * if the OS kills the process after a long time, it won't be reported
+     * as an unexpected shutdown. Short background kills (user force-close)
+     * are still reported.
+     * Only relevant on Android/iOS where the OS may kill background apps.
+     */
+    public function notifyBackground():void {
+        if (!_successInit) return;
+        if (!IsAndroid() && !IsIOS()) return;
+        _extContext.call("awesomeUtils_notifyBackground");
+    }
+
+    /**
+     * Notify that the app returned to foreground. Clears the background
+     * timestamp so that crashes in foreground are always reported.
+     * Only relevant on Android/iOS where the OS may kill background apps.
+     */
+    public function notifyForeground():void {
+        if (!_successInit) return;
+        if (!IsAndroid() && !IsIOS()) return;
+        _extContext.call("awesomeUtils_notifyForeground");
     }
 
     // --- Windows-specific methods ---
@@ -655,8 +707,8 @@ public class AneAwesomeUtils {
                 break;
             case "disconnected":
                 var responseCode:int = int(dataSplit[2]);
-                var headersBase64:String = dataSplit[3];
-                var headers:Dictionary = decodeHeaders(headersBase64);
+                headersBase64 = dataSplit[3];
+                headers = decodeHeaders(headersBase64);
                 ws.AneAwesomeUtilsInternal::onClose(dataSplit[0], responseCode, headers);
                 break;
             case "error":

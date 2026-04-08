@@ -7,11 +7,6 @@ import java.util.logging.Logger;
 
 import com.adobe.air.SharedAneLogger;
 
-import io.sentry.Sentry;
-import io.sentry.SentryEvent;
-import io.sentry.SentryLevel;
-import io.sentry.protocol.Message;
-
 public class AneAwesomeUtilsLogging {
     private static boolean enableReleaseLogging = false;
     private static Logger _logger;
@@ -34,24 +29,10 @@ public class AneAwesomeUtilsLogging {
 
     public static void e(String tag, String msg) {
         log(Log.ERROR, tag, msg);
-        SentryEvent event = new SentryEvent();
-        Message message = new Message();
-        message.setMessage(msg);
-        message.setFormatted(String.format("[%s] %s", tag, msg));
-        event.setMessage(message);
-        event.setLevel(SentryLevel.ERROR);
-        Sentry.captureEvent(event);
     }
 
     public static void e(String tag, String msg, Throwable throwable) {
         log(Log.ERROR, tag, msg, throwable);
-        SentryEvent event = new SentryEvent(throwable);
-        Message message = new Message();
-        message.setMessage(msg);
-        message.setFormatted(String.format("[%s] %s", tag, msg));
-        event.setMessage(message);
-        event.setLevel(SentryLevel.ERROR);
-        Sentry.captureEvent(event);
     }
 
     public static void i(String tag, String msg) {
