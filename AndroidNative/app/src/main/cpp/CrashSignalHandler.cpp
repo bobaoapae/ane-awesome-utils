@@ -25,6 +25,12 @@ static struct sigaction g_oldActions[32]; // big enough for any signal number we
 static const int g_signals[] = {SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSYS};
 static const int g_signalCount = sizeof(g_signals) / sizeof(g_signals[0]);
 
+// XOR key for log file encryption. Set from Java via nativeInstallSignalHandler.
+// Must match LOG_XOR_KEY in NativeLogManager.java — otherwise the crash footer
+// written here cannot be decoded when the next session reads the file back.
+static unsigned char g_logXorKey[32] = {0};
+static int g_logXorKeyLen = 0;
+
 static const char* signalName(int sig) {
     switch (sig) {
         case SIGSEGV: return "SIGSEGV";
@@ -55,15 +61,31 @@ static const char* codeDescription(int sig, int code) {
     return "";
 }
 
-// Async-signal-safe write to log file. No malloc, no stdio.
-static void writeToLog(int fd, const char* str) {
-    if (fd < 0 || !str) return;
+// Async-signal-safe XOR-encoded write. Matches Java's XorOutputStream encoding
+// so the crash footer we append here survives when the next session reads the
+// file and XOR-decrypts the whole thing. *offset tracks our running position
+// in the encrypted stream and is advanced by the bytes actually written. No
+// malloc, no stdio — everything goes through a small stack buffer.
+static void writeToLog(int fd, off_t* offset, const char* str) {
+    if (fd < 0 || !str || g_logXorKeyLen == 0 || !offset) return;
     size_t len = 0;
     while (str[len]) len++;
-    write(fd, str, len);
+    unsigned char buf[256];
+    size_t written = 0;
+    while (written < len) {
+        size_t chunk = len - written;
+        if (chunk > sizeof(buf)) chunk = sizeof(buf);
+        for (size_t i = 0; i < chunk; i++) {
+            buf[i] = (unsigned char)str[written + i] ^ g_logXorKey[(*offset + i) % g_logXorKeyLen];
+        }
+        ssize_t w = write(fd, buf, chunk);
+        if (w <= 0) break;
+        *offset += (off_t)w;
+        written += (size_t)w;
+    }
 }
 
-static void writeHex(int fd, uintptr_t val) {
+static void writeHex(int fd, off_t* offset, uintptr_t val) {
     char buf[20];
     buf[0] = '0'; buf[1] = 'x';
     int pos = 18;
@@ -74,33 +96,42 @@ static void writeHex(int fd, uintptr_t val) {
         buf[pos--] = d < 10 ? ('0' + d) : ('a' + d - 10);
         val >>= 4;
     }
-    writeToLog(fd, buf);
+    writeToLog(fd, offset, buf);
 }
 
 static void signalHandler(int sig, siginfo_t* info, void* ctx) {
-    // Open log file in append mode (async-signal-safe via open())
+    // Open log file — note: no O_APPEND. With O_APPEND the kernel would move us
+    // to EOF before each write(), so any concurrent writer could slide bytes in
+    // between our lseek and our write and we'd XOR-encode at a stale offset.
+    // Instead we lseek once to the current EOF and then write sequentially; the
+    // race window with the Java writer is narrowed to "between open and lseek".
     int fd = -1;
     if (g_logFilePath[0]) {
-        fd = open(g_logFilePath, O_WRONLY | O_APPEND | O_CREAT, 0644);
+        fd = open(g_logFilePath, O_WRONLY | O_CREAT, 0644);
     }
 
+    // Starting offset = current file size = Java's XorOutputStream offset
+    // (Java flushes after every write so kernel page cache is authoritative).
+    off_t offset = (fd >= 0) ? lseek(fd, 0, SEEK_END) : 0;
+    if (offset < 0) offset = 0;
+
     // Write crash header
-    writeToLog(fd, "\n===== NATIVE CRASH =====\n");
-    writeToLog(fd, "Signal: ");
-    writeToLog(fd, signalName(sig));
+    writeToLog(fd, &offset, "\n===== NATIVE CRASH =====\n");
+    writeToLog(fd, &offset, "Signal: ");
+    writeToLog(fd, &offset, signalName(sig));
 
     const char* desc = codeDescription(sig, info ? info->si_code : 0);
     if (desc[0]) {
-        writeToLog(fd, " (");
-        writeToLog(fd, desc);
-        writeToLog(fd, ")");
+        writeToLog(fd, &offset, " (");
+        writeToLog(fd, &offset, desc);
+        writeToLog(fd, &offset, ")");
     }
 
-    writeToLog(fd, "\nFault address: ");
-    writeHex(fd, (uintptr_t)(info ? info->si_addr : 0));
+    writeToLog(fd, &offset, "\nFault address: ");
+    writeHex(fd, &offset, (uintptr_t)(info ? info->si_addr : 0));
 
     // Minimal backtrace using libunwind (available in NDK)
-    writeToLog(fd, "\nBacktrace:\n");
+    writeToLog(fd, &offset, "\nBacktrace:\n");
     void* frames[MAX_FRAMES];
     // _Unwind_Backtrace is complex; use dladdr for the PC from ucontext instead
     if (ctx) {
@@ -121,38 +152,38 @@ static void signalHandler(int sig, siginfo_t* info, void* ctx) {
         uintptr_t pc = 0, lr = 0;
 #endif
         Dl_info dlInfo;
-        writeToLog(fd, "  PC: ");
-        writeHex(fd, pc);
+        writeToLog(fd, &offset, "  PC: ");
+        writeHex(fd, &offset, pc);
         if (dladdr((void*)pc, &dlInfo)) {
-            writeToLog(fd, " ");
-            writeToLog(fd, dlInfo.dli_fname ? dlInfo.dli_fname : "?");
+            writeToLog(fd, &offset, " ");
+            writeToLog(fd, &offset, dlInfo.dli_fname ? dlInfo.dli_fname : "?");
             if (dlInfo.dli_sname) {
-                writeToLog(fd, " (");
-                writeToLog(fd, dlInfo.dli_sname);
-                writeToLog(fd, "+");
-                writeHex(fd, pc - (uintptr_t)dlInfo.dli_saddr);
-                writeToLog(fd, ")");
+                writeToLog(fd, &offset, " (");
+                writeToLog(fd, &offset, dlInfo.dli_sname);
+                writeToLog(fd, &offset, "+");
+                writeHex(fd, &offset, pc - (uintptr_t)dlInfo.dli_saddr);
+                writeToLog(fd, &offset, ")");
             }
         }
-        writeToLog(fd, "\n");
+        writeToLog(fd, &offset, "\n");
 
         if (lr) {
-            writeToLog(fd, "  LR: ");
-            writeHex(fd, lr);
+            writeToLog(fd, &offset, "  LR: ");
+            writeHex(fd, &offset, lr);
             if (dladdr((void*)lr, &dlInfo)) {
-                writeToLog(fd, " ");
-                writeToLog(fd, dlInfo.dli_fname ? dlInfo.dli_fname : "?");
+                writeToLog(fd, &offset, " ");
+                writeToLog(fd, &offset, dlInfo.dli_fname ? dlInfo.dli_fname : "?");
                 if (dlInfo.dli_sname) {
-                    writeToLog(fd, " (");
-                    writeToLog(fd, dlInfo.dli_sname);
-                    writeToLog(fd, ")");
+                    writeToLog(fd, &offset, " (");
+                    writeToLog(fd, &offset, dlInfo.dli_sname);
+                    writeToLog(fd, &offset, ")");
                 }
             }
-            writeToLog(fd, "\n");
+            writeToLog(fd, &offset, "\n");
         }
     }
 
-    writeToLog(fd, "========================\n");
+    writeToLog(fd, &offset, "========================\n");
 
     if (fd >= 0) {
         fsync(fd);
@@ -181,12 +212,24 @@ static void signalHandler(int sig, siginfo_t* info, void* ctx) {
 extern "C" {
 
 JNIEXPORT void JNICALL
-Java_br_com_redesurftank_aneawesomeutils_NativeLogManager_nativeInstallSignalHandler(JNIEnv* env, jclass clazz, jstring logPath) {
+Java_br_com_redesurftank_aneawesomeutils_NativeLogManager_nativeInstallSignalHandler(JNIEnv* env, jclass clazz, jstring logPath, jbyteArray xorKey) {
     const char* path = env->GetStringUTFChars(logPath, nullptr);
     if (path) {
         strncpy(g_logFilePath, path, sizeof(g_logFilePath) - 1);
         g_logFilePath[sizeof(g_logFilePath) - 1] = 0;
         env->ReleaseStringUTFChars(logPath, path);
+    }
+
+    if (xorKey) {
+        jsize keyLen = env->GetArrayLength(xorKey);
+        if (keyLen > 0 && keyLen <= (jsize)sizeof(g_logXorKey)) {
+            jbyte* keyBytes = env->GetByteArrayElements(xorKey, nullptr);
+            if (keyBytes) {
+                memcpy(g_logXorKey, keyBytes, (size_t)keyLen);
+                g_logXorKeyLen = (int)keyLen;
+                env->ReleaseByteArrayElements(xorKey, keyBytes, JNI_ABORT);
+            }
+        }
     }
 
     struct sigaction sa;
@@ -199,7 +242,7 @@ Java_br_com_redesurftank_aneawesomeutils_NativeLogManager_nativeInstallSignalHan
         sigaction(g_signals[i], &sa, &g_oldActions[g_signals[i]]);
     }
 
-    __android_log_print(ANDROID_LOG_INFO, TAG, "Signal handlers installed for crash capture (log: %s)", g_logFilePath);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "Signal handlers installed for crash capture (log: %s, keyLen: %d)", g_logFilePath, g_logXorKeyLen);
 }
 
 } // extern "C"

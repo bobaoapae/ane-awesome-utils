@@ -549,7 +549,6 @@ public class AneAwesomeUtilsContext extends FREContext {
                     }
                 };
                 _connectivityManager.registerNetworkCallback(request, _networkCallback);
-                _connectivityManager.requestNetwork(request, _networkCallback);
                 AneAwesomeUtilsLogging.i(TAG, "NetworkCallback registered");
             }
         } catch (Exception e) {

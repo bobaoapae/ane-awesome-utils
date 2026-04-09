@@ -73,6 +73,11 @@ static const uint8_t LOG_XOR_KEY[] = {
 };
 static const size_t LOG_XOR_KEY_LEN = sizeof(LOG_XOR_KEY);
 
+// Log rotation knobs — must stay in sync with NativeLogManager.java on Android
+// and log.cpp on Windows.
+static constexpr int ROTATION_DAYS = 7;
+static constexpr size_t MAX_LOG_FILES = 30;
+
 static void xorTransform(uint8_t* data, size_t size, size_t offset) {
     for (size_t i = 0; i < size; i++) {
         data[i] ^= LOG_XOR_KEY[(offset + i) % LOG_XOR_KEY_LEN];
@@ -133,10 +138,10 @@ static std::string dateFromFilename(const char* filename) {
 }
 
 static bool parseDate(const char* filename, int& year, int& month, int& day) {
-    // Expected: ane-log-YYYY-MM-DD.txt
+    // Expected: ane-log-YYYY-MM-DD_HHmmss.txt (per-session) or legacy ane-log-YYYY-MM-DD.txt
     if (strncmp(filename, "ane-log-", 8) != 0) return false;
     const char* dateStart = filename + 8;
-    if (strlen(dateStart) < 14) return false; // YYYY-MM-DD.txt
+    if (strlen(dateStart) < 14) return false; // at least "YYYY-MM-DD.txt"
     if (sscanf(dateStart, "%d-%d-%d", &year, &month, &day) != 3) return false;
     return true;
 }
@@ -151,22 +156,50 @@ static time_t makeTime(int year, int month, int day) {
 
 static void rotateOldLogs(const std::string& dir) {
     time_t now = time(nullptr);
-    DIR* d = opendir(dir.c_str());
-    if (!d) return;
 
-    struct dirent* entry;
-    while ((entry = readdir(d)) != nullptr) {
-        int year, month, day;
-        if (!parseDate(entry->d_name, year, month, day)) continue;
+    // Age-based rotation: drop anything older than ROTATION_DAYS.
+    {
+        DIR* d = opendir(dir.c_str());
+        if (!d) return;
+        struct dirent* entry;
+        while ((entry = readdir(d)) != nullptr) {
+            int year, month, day;
+            if (!parseDate(entry->d_name, year, month, day)) continue;
 
-        time_t fileTime = makeTime(year, month, day);
-        double diffDays = difftime(now, fileTime) / (60.0 * 60.0 * 24.0);
-        if (diffDays > 7.0) {
-            std::string fullPath = dir + "/" + entry->d_name;
+            time_t fileTime = makeTime(year, month, day);
+            double diffDays = difftime(now, fileTime) / (60.0 * 60.0 * 24.0);
+            if (diffDays > (double)ROTATION_DAYS) {
+                std::string fullPath = dir + "/" + entry->d_name;
+                unlink(fullPath.c_str());
+            }
+        }
+        closedir(d);
+    }
+
+    // Count-based rotation: every session creates a new file, so frequent
+    // launches pile up files until the age cutoff kicks in. Cap at
+    // MAX_LOG_FILES and drop the oldest. Filenames embed a sortable timestamp
+    // ("ane-log-YYYY-MM-DD_HHmmss.txt"), so name order == age order.
+    std::vector<std::string> remaining;
+    {
+        DIR* d = opendir(dir.c_str());
+        if (!d) return;
+        struct dirent* entry;
+        while ((entry = readdir(d)) != nullptr) {
+            if (strncmp(entry->d_name, "ane-log-", 8) != 0) continue;
+            if (!strstr(entry->d_name, ".txt")) continue;
+            remaining.emplace_back(entry->d_name);
+        }
+        closedir(d);
+    }
+    if (remaining.size() > MAX_LOG_FILES) {
+        std::sort(remaining.begin(), remaining.end());
+        size_t toDelete = remaining.size() - MAX_LOG_FILES;
+        for (size_t i = 0; i < toDelete; i++) {
+            std::string fullPath = dir + "/" + remaining[i];
             unlink(fullPath.c_str());
         }
     }
-    closedir(d);
 }
 
 // forward declarations for crash handler (defined below)

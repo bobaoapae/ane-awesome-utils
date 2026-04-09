@@ -1,5 +1,7 @@
 package br.com.redesurftank.aneawesomeutils;
 
+import android.system.Os;
+import android.system.OsConstants;
 import android.util.Log;
 
 import com.adobe.air.SharedAneLogger;
@@ -7,6 +9,7 @@ import com.adobe.air.utils.AIRLogger;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FilterOutputStream;
@@ -26,10 +29,11 @@ public class NativeLogManager {
         try { System.loadLibrary("emulatordetector"); } catch (Throwable ignored) {}
     }
 
-    private static native void nativeInstallSignalHandler(String logFilePath);
+    private static native void nativeInstallSignalHandler(String logFilePath, byte[] xorKey);
     private static final String LOG_DIR_NAME = "ane-awesome-utils-logs";
     private static final String SESSION_MARKER = ".session_active";
     private static final int ROTATION_DAYS = 7;
+    private static final int MAX_LOG_FILES = 30;
 
     private static final byte[] LOG_XOR_KEY = {
         0x4A, 0x7B, 0x2C, 0x5D, 0x1E, 0x6F, 0x3A, (byte)0x8B,
@@ -54,6 +58,12 @@ public class NativeLogManager {
 
     /**
      * OutputStream wrapper that XORs all bytes written through it.
+     *
+     * <p>Both write methods are {@code synchronized} on the instance because this
+     * stream is shared between {@link NativeLogManager#write(String, String, String)}
+     * (main thread, holding {@link #lock}) and {@link AsyncLogHandler}'s writer
+     * thread. Without this, the two writers could interleave updates to
+     * {@code offset}, producing garbled bytes that decrypt to junk.
      */
     private static class XorOutputStream extends FilterOutputStream {
         private final byte[] key;
@@ -65,13 +75,13 @@ public class NativeLogManager {
         }
 
         @Override
-        public void write(int b) throws IOException {
+        public synchronized void write(int b) throws IOException {
             out.write(b ^ (key[(int)(offset % key.length)] & 0xFF));
             offset++;
         }
 
         @Override
-        public void write(byte[] buf, int off, int len) throws IOException {
+        public synchronized void write(byte[] buf, int off, int len) throws IOException {
             byte[] xored = new byte[len];
             for (int i = 0; i < len; i++) {
                 xored[i] = (byte)(buf[off + i] ^ key[(int)((offset + i) % key.length)]);
@@ -141,10 +151,17 @@ public class NativeLogManager {
             rawLogOutputStream = new FileOutputStream(currentLogFile, false);
             logOutputStream = new XorOutputStream(rawLogOutputStream, LOG_XOR_KEY);
 
-            // fsync the file + parent directory to guarantee the entry is on disk before any crash
+            // fsync the file + parent directory to guarantee the entry is on disk before any crash.
+            // Opening a FileOutputStream on a directory fails with EISDIR on Android, so use
+            // android.system.Os.open(O_RDONLY) + Os.fsync to fsync the dir's inode entry.
             rawLogOutputStream.getFD().sync();
-            try (FileOutputStream dirSync = new FileOutputStream(baseDir)) {
-                dirSync.getFD().sync();
+            try {
+                FileDescriptor dfd = Os.open(baseDir.getAbsolutePath(), OsConstants.O_RDONLY, 0);
+                try {
+                    Os.fsync(dfd);
+                } finally {
+                    Os.close(dfd);
+                }
             } catch (Exception ignored) {}
 
             // Configure SharedAneLogger with AsyncLogHandler
@@ -153,8 +170,11 @@ public class NativeLogManager {
             sharedLogger.addHandler(asyncHandler);
             sharedLogger.setLevel(Level.ALL);
 
-            // Install native signal handlers (SIGSEGV, SIGABRT, etc.) to log crash info
-            try { nativeInstallSignalHandler(currentLogFile.getAbsolutePath()); } catch (Throwable ignored) {}
+            // Install native signal handlers (SIGSEGV, SIGABRT, etc.) to log crash info.
+            // We pass LOG_XOR_KEY so the handler can encode the crash footer with the
+            // same scheme as XorOutputStream — otherwise the footer would come back as
+            // garbage when readLogFile() XOR-decrypts the whole file.
+            try { nativeInstallSignalHandler(currentLogFile.getAbsolutePath(), LOG_XOR_KEY); } catch (Throwable ignored) {}
 
             // Enable AIR runtime logging (captures internal AIR logs into SharedAneLogger)
             try { AIRLogger.Enable(true); } catch (Throwable ignored) {}
@@ -213,6 +233,8 @@ public class NativeLogManager {
         long cutoffMillis = System.currentTimeMillis() - ((long) ROTATION_DAYS * 24 * 60 * 60 * 1000);
         File[] files = baseDir.listFiles((dir, name) -> name.startsWith("ane-log-") && name.endsWith(".txt"));
         if (files == null) return;
+
+        // Age-based rotation: drop anything older than ROTATION_DAYS.
         for (File f : files) {
             try {
                 String datePart = extractDateFromFilename(f.getName());
@@ -224,6 +246,20 @@ public class NativeLogManager {
                 }
             } catch (Exception e) {
                 // Skip files with unparseable names
+            }
+        }
+
+        // Count-based rotation: every session creates a new file, so frequent
+        // launches pile up files until the age cutoff kicks in. Cap at
+        // MAX_LOG_FILES and drop the oldest. Filenames embed a sortable
+        // timestamp ("ane-log-YYYY-MM-DD_HHmmss.txt"), so name order == age order.
+        files = baseDir.listFiles((dir, name) -> name.startsWith("ane-log-") && name.endsWith(".txt"));
+        if (files == null || files.length <= MAX_LOG_FILES) return;
+        Arrays.sort(files, (a, b) -> a.getName().compareTo(b.getName()));
+        int toDelete = files.length - MAX_LOG_FILES;
+        for (int i = 0; i < toDelete; i++) {
+            if (files[i].delete()) {
+                Log.d(TAG, "Rotated excess log file: " + files[i].getName());
             }
         }
     }
@@ -254,7 +290,7 @@ public class NativeLogManager {
                         currentLogFile = new File(logDirPath, "ane-log-" + sessionTs + ".txt");
                         rawLogOutputStream = new FileOutputStream(currentLogFile, false);
                         logOutputStream = new XorOutputStream(rawLogOutputStream, LOG_XOR_KEY);
-                        try { nativeInstallSignalHandler(currentLogFile.getAbsolutePath()); } catch (Throwable ignored) {}
+                        try { nativeInstallSignalHandler(currentLogFile.getAbsolutePath(), LOG_XOR_KEY); } catch (Throwable ignored) {}
                     }
                     logOutputStream.write(line.getBytes());
                     logOutputStream.flush();
@@ -281,29 +317,13 @@ public class NativeLogManager {
                 break;
         }
 
-        // Also log to SharedAneLogger
-        try {
-            Logger sharedLogger = SharedAneLogger.getInstance().getLogger();
-            Level javaLevel;
-            switch (level.toUpperCase(Locale.US)) {
-                case "ERROR":
-                    javaLevel = Level.SEVERE;
-                    break;
-                case "WARN":
-                    javaLevel = Level.WARNING;
-                    break;
-                case "INFO":
-                    javaLevel = Level.INFO;
-                    break;
-                case "DEBUG":
-                default:
-                    javaLevel = Level.FINE;
-                    break;
-            }
-            sharedLogger.log(javaLevel, "[" + tag + "] " + message);
-        } catch (Exception e) {
-            // ignore
-        }
+        // NOTE: we intentionally do NOT forward to SharedAneLogger here. The
+        // AsyncLogHandler attached in init() would then write the same line to
+        // logOutputStream a second time (in millis format), doubling the file
+        // size for every AS3 message. SharedAneLogger still receives AIR's own
+        // internal logs (via AIRLogger.Enable) and ANE-internal logs routed
+        // through AneAwesomeUtilsLogging — those have no other sink, so the
+        // single AsyncLogHandler path is correct for them.
     }
 
     public static String getLogFiles() {

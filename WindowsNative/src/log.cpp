@@ -105,6 +105,11 @@ static const uint8_t LOG_XOR_KEY[] = {
 };
 static const size_t LOG_XOR_KEY_LEN = sizeof(LOG_XOR_KEY);
 
+// Log rotation knobs — must stay in sync with NativeLogManager.java on Android
+// and log.cpp on Apple.
+static constexpr int ROTATION_DAYS = 7;
+static constexpr size_t MAX_LOG_FILES = 30;
+
 static void xorTransform(uint8_t* data, size_t size, size_t offset) {
     for (size_t i = 0; i < size; i++) {
         data[i] ^= LOG_XOR_KEY[(offset + i) % LOG_XOR_KEY_LEN];
@@ -154,7 +159,8 @@ static std::string getSessionTimestamp() {
 }
 
 static std::string dateFromFilename(const std::string& filename) {
-    // Extract YYYY-MM-DD from "ane-log-YYYY-MM-DD.txt"
+    // Extract YYYY-MM-DD from "ane-log-YYYY-MM-DD_HHmmss.txt" (per-session)
+    // or legacy "ane-log-YYYY-MM-DD.txt".
     const char* prefix = "ane-log-";
     size_t prefixLen = 8;
     if (filename.size() >= prefixLen + 10 && filename.compare(0, prefixLen, prefix) == 0) {
@@ -274,13 +280,31 @@ const char* initNativeLog(const char* basePath, const char* profile) {
         DeleteFileA(bgPath.c_str()); // clean up stale bg marker if any
     }
 
-    // Scan and delete files older than 7 days
-    auto files = scanLogFiles(g_nativeLogDir);
-    for (auto& f : files) {
-        std::string date = dateFromFilename(f);
-        if (isDateOlderThanDays(date, 7)) {
-            std::string fullPath = g_nativeLogDir + "\\" + f;
-            DeleteFileA(fullPath.c_str());
+    // Age-based rotation: drop anything older than ROTATION_DAYS.
+    {
+        auto files = scanLogFiles(g_nativeLogDir);
+        for (auto& f : files) {
+            std::string date = dateFromFilename(f);
+            if (isDateOlderThanDays(date, ROTATION_DAYS)) {
+                std::string fullPath = g_nativeLogDir + "\\" + f;
+                DeleteFileA(fullPath.c_str());
+            }
+        }
+    }
+
+    // Count-based rotation: every session creates a new file, so frequent
+    // launches pile up files until the age cutoff kicks in. Cap at
+    // MAX_LOG_FILES and drop the oldest. scanLogFiles already returns them
+    // sorted alphabetically, which matches chronological order because the
+    // filename embeds a sortable timestamp ("ane-log-YYYY-MM-DD_HHmmss.txt").
+    {
+        auto files = scanLogFiles(g_nativeLogDir);
+        if (files.size() > MAX_LOG_FILES) {
+            size_t toDelete = files.size() - MAX_LOG_FILES;
+            for (size_t i = 0; i < toDelete; i++) {
+                std::string fullPath = g_nativeLogDir + "\\" + files[i];
+                DeleteFileA(fullPath.c_str());
+            }
         }
     }
 
