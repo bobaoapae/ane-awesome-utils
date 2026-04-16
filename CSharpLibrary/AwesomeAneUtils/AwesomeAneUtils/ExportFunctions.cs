@@ -557,11 +557,19 @@ public static class ExportFunctions
             var variables = Encoding.UTF8.GetString((byte*)variablesPtr, variablesLen);
             var headers = Encoding.UTF8.GetString((byte*)headersPtr, headersLen);
 
-            var variablesDictionary = string.IsNullOrEmpty(variables) ? new Dictionary<string, string>() : JsonSerializer.Deserialize(variables, JsonDictionaryHeaderContext.Default.DictionaryStringString);
             var headersDictionary = string.IsNullOrEmpty(headers) ? new Dictionary<string, string>() : JsonSerializer.Deserialize(headers, JsonDictionaryHeaderContext.Default.DictionaryStringString);
 
-            var randomId = LoaderManager.Instance.StartLoad(url, method, variablesDictionary, headersDictionary);
-            return CreateDataArrayFromString(randomId);
+            if (method.Equals("POST_JSON", StringComparison.OrdinalIgnoreCase))
+            {
+                var body = string.IsNullOrEmpty(variables) ? Array.Empty<byte>() : Encoding.UTF8.GetBytes(variables);
+                var randomId = LoaderManager.Instance.StartLoadWithBody(url, "POST", headersDictionary, body, "application/json");
+                return CreateDataArrayFromString(randomId);
+            }
+
+            var variablesDictionary = string.IsNullOrEmpty(variables) ? new Dictionary<string, string>() : JsonSerializer.Deserialize(variables, JsonDictionaryHeaderContext.Default.DictionaryStringString);
+
+            var randomId2 = LoaderManager.Instance.StartLoad(url, method, variablesDictionary, headersDictionary);
+            return CreateDataArrayFromString(randomId2);
         }
         catch (Exception e)
         {
