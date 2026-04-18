@@ -250,6 +250,16 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
     set_prop_u32(obj, "modeBAvailable",
                  (g_air_runtime && g_air_runtime->initialized()) ? 1u : 0u);
     set_prop_u32(obj, "modeBActive", g_runtime_forced_on ? 1u : 0u);
+    set_prop_u32(obj, "playerCaptured",
+                 (g_air_runtime && g_air_runtime->player() != nullptr) ? 1u : 0u);
+    set_prop_u32(obj, "lastError",
+                 g_air_runtime ? static_cast<std::uint32_t>(g_air_runtime->lastError()) : 0u);
+    if (g_air_runtime) {
+        set_prop_f64(obj, "diagSlotTransport",     static_cast<double>(g_air_runtime->diagSlotTransport()));
+        set_prop_f64(obj, "diagSlotTelemetry",     static_cast<double>(g_air_runtime->diagSlotTelemetry()));
+        set_prop_f64(obj, "diagSlotPlayerTel",     static_cast<double>(g_air_runtime->diagSlotPlayerTelemetry()));
+        set_prop_f64(obj, "playerPtr",             static_cast<double>(reinterpret_cast<std::uintptr_t>(g_air_runtime->player())));
+    }
     return obj;
 }
 

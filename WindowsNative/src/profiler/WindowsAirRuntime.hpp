@@ -64,11 +64,38 @@ public:
 
     std::uintptr_t platformSocketWrapperVtable() const { return psw_vtable_addr_; }
 
+    // Diagnostic: latest failure reason for forceEnableTelemetry. Cleared
+    // on a successful call. Values chosen to be stable-ish for triage
+    // without needing to map a C enum across language boundaries.
+    enum class Error : std::uint32_t {
+        Ok                       = 0,
+        NotInitialized           = 1,
+        PlayerNull               = 2,
+        BadHostOrPort            = 3,
+        AlreadyEnabled           = 4,
+        AllocSocketTransportFail = 5,
+        AllocTelemetryFail       = 6,
+        AllocPlayerTelemetryFail = 7,
+        NullGcHeap               = 8,
+    };
+    Error lastError() const { return last_error_.load(std::memory_order_acquire); }
+
+    // Diagnostic getters for the three Player slots the runtime populates
+    // inside init_telemetry. Called from the status FREFunction to debug
+    // "AlreadyEnabled" scenarios — should all be null pre-start.
+    std::uintptr_t diagSlotTransport() const     { return diag_slot_transport_.load(std::memory_order_acquire); }
+    std::uintptr_t diagSlotTelemetry() const     { return diag_slot_telemetry_.load(std::memory_order_acquire); }
+    std::uintptr_t diagSlotPlayerTelemetry() const { return diag_slot_playertel_.load(std::memory_order_acquire); }
+
 private:
     std::uintptr_t       air_base_        = 0;
     std::atomic<bool>    initialized_{false};
     std::atomic<void*>   player_{nullptr};
     std::uintptr_t       psw_vtable_addr_ = 0;
+    std::atomic<Error>         last_error_{Error::Ok};
+    std::atomic<std::uintptr_t> diag_slot_transport_{0};
+    std::atomic<std::uintptr_t> diag_slot_telemetry_{0};
+    std::atomic<std::uintptr_t> diag_slot_playertel_{0};
 };
 
 } // namespace ane::profiler

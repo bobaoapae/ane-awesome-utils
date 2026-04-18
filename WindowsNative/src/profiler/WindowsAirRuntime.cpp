@@ -4,12 +4,9 @@
 // Per-arch RVAs live in AirTelemetryRvas.h under two namespaces; this
 // translation unit switches between them at compile time via `air_rvas`.
 //
-// Calling conventions diverge between x64 and x86 so the function-pointer
-// typedefs here are gated on arch macros:
-//   x64: Microsoft fastcall (implicit; `__thiscall`/`__cdecl`/`__fastcall`
-//        all fold to the same ABI).
-//   x86: the runtime mixes `__thiscall`, `__cdecl`, `__fastcall` and
-//        callee-cleanup thunks. Each pointer type declares the right one.
+// x64 uses the Microsoft x64 ABI for everything (first 4 args in
+// rcx/rdx/r8/r9). x86 mixes `__thiscall`, `__cdecl` and `__fastcall`
+// depending on the function — each typedef below declares the right one.
 
 #include "profiler/WindowsAirRuntime.hpp"
 
@@ -25,22 +22,8 @@
 #include <cstring>
 #include <thread>
 
-#if defined(_M_IX86) || defined(__i386__)
-#  define ANE_AIR_THISCALL   __thiscall
-#  define ANE_AIR_CDECL      __cdecl
-#  define ANE_AIR_FASTCALL   __fastcall
-#else
-#  define ANE_AIR_THISCALL
-#  define ANE_AIR_CDECL
-#  define ANE_AIR_FASTCALL
-#endif
-
 namespace ane::profiler {
 
-// -------------------------------------------------------------------------
-// Compile-time guards — make sure the header actually exposed the right
-// namespace for this build's target architecture.
-// -------------------------------------------------------------------------
 #if !defined(_M_X64) && !defined(__x86_64__) && !defined(_M_IX86) && !defined(__i386__)
 #  error "Unsupported target architecture for WindowsAirRuntime"
 #endif
@@ -59,84 +42,60 @@ static bool verify_runtime_signature(std::uintptr_t air_base) {
 }
 
 // -------------------------------------------------------------------------
-// Typed function-pointer definitions (arch-aware).
+// Typed function pointers (arch-aware).
 // -------------------------------------------------------------------------
 
 #if defined(_M_X64) || defined(__x86_64__)
 
-// x64: one calling convention (MS x64). this-ptr in rcx as first arg.
 using FnGetActiveFrame      = void* (*)();
 using FnPlayerFromFrame     = void* (*)(void*);
 using FnCfgDefaultInit      = void* (*)(void*);
 using FnCfgDtor             = void  (*)(void*);
 using FnCfgParseBoolPair    = void  (*)(const char*, std::uint8_t*, std::uint8_t*);
 using FnAirStringAssign     = void  (*)(void*, const char*, std::size_t);
-using FnAirStringClear      = void  (*)(void*);
 using FnAllocSmall          = void* (*)(std::size_t, int);
 using FnAllocLocked         = void* (*)(void*, std::size_t, int);
 using FnSocketTransportCtor = void* (*)(void*, void*, const char*, std::uint32_t);
 using FnTelemetryCtor       = void* (*)(void*, void*);
 using FnTelemetryBind       = void  (*)(void*);
 using FnPlayerTelemetryCtor = void* (*)(void*, void*, void*, void*);
-using FnSocketTransportDtor = void  (*)(void*);
-using FnTelemetryDtor       = void  (*)(void*);
-using FnPlayerTelemetryDtor = void  (*)(void*);
 
 #else // x86
 
-// x86: this = ecx, args = stack (thiscall), callee cleans with `ret N`.
-// MSVC folds __thiscall to fastcall via the first-two-in-ecx/edx rule only
-// if the function is a member; for __thiscall declared via pointer we need
-// to use the __thiscall keyword explicitly (or the class-member pointer
-// syntax). Since these are C function-pointer typedefs, we use the
-// explicit calling convention keywords.
-using FnPlayerFromFrame     = void* (ANE_AIR_THISCALL*)(void*);
-using FnCfgDefaultInit      = void* (ANE_AIR_THISCALL*)(void*);
-using FnCfgDtor             = void  (ANE_AIR_THISCALL*)(void*);
-using FnCfgParseBoolPair    = void  (ANE_AIR_CDECL*   )(const char*, std::uint8_t*, std::uint8_t*);
-using FnAirStringAssign     = void  (ANE_AIR_THISCALL*)(void*, const char*, std::size_t);
-using FnAirStringClear      = void  (ANE_AIR_THISCALL*)(void*);
-using FnAllocSmall          = void* (ANE_AIR_CDECL*   )(std::size_t, int);
-using FnAllocLocked         = void* (ANE_AIR_FASTCALL*)(void*, std::size_t, int);
-using FnSocketTransportCtor = void* (ANE_AIR_THISCALL*)(void*, void*, const char*, std::uint32_t);
-using FnTelemetryCtor       = void* (ANE_AIR_THISCALL*)(void*, void*);
-using FnTelemetryBind       = void  (ANE_AIR_CDECL*   )(int); // thunk: push 1; call body
-using FnPlayerTelemetryCtor = void* (ANE_AIR_THISCALL*)(void*, void*, void*, void*);
-using FnSocketTransportDtor = void  (ANE_AIR_THISCALL*)(void*);
-using FnTelemetryDtor       = void  (ANE_AIR_THISCALL*)(void*);
-using FnPlayerTelemetryDtor = void  (ANE_AIR_THISCALL*)(void*);
+// `__thiscall` on a free-function pointer is an MSVC extension; the compiler
+// knows to put the first arg in ECX and leave the rest on the stack. Callees
+// clean with `ret N`. For `__cdecl`, caller cleans. For `__fastcall`, first
+// two args in ECX/EDX and callee cleans.
+using FnGetActiveFrame      = void* (__cdecl   *)();
+using FnPlayerFromFrame     = void* (__thiscall*)(void*);
+using FnCfgDefaultInit      = void* (__thiscall*)(void*);
+using FnCfgDtor             = void  (__thiscall*)(void*);
+using FnCfgParseBoolPair    = void  (__cdecl   *)(const char*, std::uint8_t*, std::uint8_t*);
+using FnAirStringAssign     = void  (__thiscall*)(void*, const char*, std::size_t);
+using FnAllocSmall          = void* (__cdecl   *)(std::size_t, int);
+using FnAllocLocked         = void* (__fastcall*)(void*, std::size_t, int);
+using FnSocketTransportCtor = void* (__thiscall*)(void*, void*, const char*, std::uint32_t);
+using FnTelemetryCtor       = void* (__thiscall*)(void*, void*);
+using FnTelemetryBind       = void  (__thiscall*)(void*);           // thunk at +0x389f78 fronts the real body with an extra push 1
+using FnPlayerTelemetryCtor = void* (__thiscall*)(void*, void*, void*, void*);
 
 #endif
-
-// -------------------------------------------------------------------------
-// Opaque storage for the function pointers. We store as void* in the
-// class so the header doesn't need to pull in the typedefs; every use
-// casts to the right FnXxx type at the call site.
-// -------------------------------------------------------------------------
 
 struct AirRuntimeFns {
-#if defined(_M_X64) || defined(__x86_64__)
-    FnGetActiveFrame       getActiveFrame      = nullptr;
-#endif
-    FnPlayerFromFrame      playerFromFrame     = nullptr;
-    FnCfgDefaultInit       cfgDefaultInit      = nullptr;
-    FnCfgDtor              cfgDtor             = nullptr;
-    FnCfgParseBoolPair     cfgParseBoolPair    = nullptr;
-    FnAirStringAssign      airStringAssign     = nullptr;
-    FnAllocSmall           allocSmall          = nullptr;
-    FnAllocLocked          allocLocked         = nullptr;
-    FnSocketTransportCtor  socketTransportCtor = nullptr;
-    FnTelemetryCtor        telemetryCtor       = nullptr;
-    FnTelemetryBind        telemetryBind       = nullptr;
-    FnPlayerTelemetryCtor  playerTelemetryCtor = nullptr;
-    FnSocketTransportDtor  socketTransportDtor = nullptr;
-    FnTelemetryDtor        telemetryDtor       = nullptr;
-    FnPlayerTelemetryDtor  playerTelemetryDtor = nullptr;
+    FnGetActiveFrame      getActiveFrame      = nullptr;
+    FnPlayerFromFrame     playerFromFrame     = nullptr;
+    FnCfgDefaultInit      cfgDefaultInit      = nullptr;
+    FnCfgDtor             cfgDtor             = nullptr;
+    FnCfgParseBoolPair    cfgParseBoolPair    = nullptr;
+    FnAirStringAssign     airStringAssign     = nullptr;
+    FnAllocSmall          allocSmall          = nullptr;
+    FnAllocLocked         allocLocked         = nullptr;
+    FnSocketTransportCtor socketTransportCtor = nullptr;
+    FnTelemetryCtor       telemetryCtor       = nullptr;
+    FnTelemetryBind       telemetryBind       = nullptr;
+    FnPlayerTelemetryCtor playerTelemetryCtor = nullptr;
 };
 
-// We keep one global AirRuntimeFns slot because WindowsAirRuntime is
-// effectively a singleton (there's only one AIR runtime per process). This
-// also avoids tunnelling C-style types through the class header.
 static AirRuntimeFns g_fns;
 
 // -------------------------------------------------------------------------
@@ -151,8 +110,6 @@ bool WindowsAirRuntime::initialize() {
     air_base_ = reinterpret_cast<std::uintptr_t>(mod);
 
     if (!verify_runtime_signature(air_base_)) {
-        // Wrong runtime version — Mode B disabled. Mode A via .telemetry.cfg
-        // still works because all it needs is the send() IAT hook.
         air_base_ = 0;
         return false;
     }
@@ -161,23 +118,18 @@ bool WindowsAirRuntime::initialize() {
         return reinterpret_cast<void*>(air_base_ + rva);
     };
 
-#if defined(_M_X64) || defined(__x86_64__)
-    g_fns.getActiveFrame  = reinterpret_cast<FnGetActiveFrame>(resolve(air_rvas::kRvaFreGetActiveFrame));
-#endif
-    g_fns.playerFromFrame = reinterpret_cast<FnPlayerFromFrame>(resolve(air_rvas::kRvaFrePlayerFromFrame));
-    g_fns.cfgDefaultInit  = reinterpret_cast<FnCfgDefaultInit>(resolve(air_rvas::kRvaTelemetryConfigDefaultInit));
-    g_fns.cfgDtor         = reinterpret_cast<FnCfgDtor>       (resolve(air_rvas::kRvaTelemetryConfigDtor));
-    g_fns.cfgParseBoolPair= reinterpret_cast<FnCfgParseBoolPair>(resolve(air_rvas::kRvaTelemetryConfigParseBoolPair));
-    g_fns.airStringAssign = reinterpret_cast<FnAirStringAssign>(resolve(air_rvas::kRvaAirStringAssign));
-    g_fns.allocSmall      = reinterpret_cast<FnAllocSmall>    (resolve(air_rvas::kRvaMMgcAllocSmall));
-    g_fns.allocLocked     = reinterpret_cast<FnAllocLocked>   (resolve(air_rvas::kRvaMMgcAllocLocked));
+    g_fns.getActiveFrame      = reinterpret_cast<FnGetActiveFrame>     (resolve(air_rvas::kRvaFreGetActiveFrame));
+    g_fns.playerFromFrame     = reinterpret_cast<FnPlayerFromFrame>    (resolve(air_rvas::kRvaFrePlayerFromFrame));
+    g_fns.cfgDefaultInit      = reinterpret_cast<FnCfgDefaultInit>     (resolve(air_rvas::kRvaTelemetryConfigDefaultInit));
+    g_fns.cfgDtor             = reinterpret_cast<FnCfgDtor>            (resolve(air_rvas::kRvaTelemetryConfigDtor));
+    g_fns.cfgParseBoolPair    = reinterpret_cast<FnCfgParseBoolPair>   (resolve(air_rvas::kRvaTelemetryConfigParseBoolPair));
+    g_fns.airStringAssign     = reinterpret_cast<FnAirStringAssign>    (resolve(air_rvas::kRvaAirStringAssign));
+    g_fns.allocSmall          = reinterpret_cast<FnAllocSmall>         (resolve(air_rvas::kRvaMMgcAllocSmall));
+    g_fns.allocLocked         = reinterpret_cast<FnAllocLocked>        (resolve(air_rvas::kRvaMMgcAllocLocked));
     g_fns.socketTransportCtor = reinterpret_cast<FnSocketTransportCtor>(resolve(air_rvas::kRvaSocketTransportCtor));
-    g_fns.telemetryCtor   = reinterpret_cast<FnTelemetryCtor> (resolve(air_rvas::kRvaTelemetryCtor));
-    g_fns.telemetryBind   = reinterpret_cast<FnTelemetryBind> (resolve(air_rvas::kRvaTelemetryBindTransport));
+    g_fns.telemetryCtor       = reinterpret_cast<FnTelemetryCtor>      (resolve(air_rvas::kRvaTelemetryCtor));
+    g_fns.telemetryBind       = reinterpret_cast<FnTelemetryBind>      (resolve(air_rvas::kRvaTelemetryBindTransport));
     g_fns.playerTelemetryCtor = reinterpret_cast<FnPlayerTelemetryCtor>(resolve(air_rvas::kRvaPlayerTelemetryCtor));
-    g_fns.socketTransportDtor = reinterpret_cast<FnSocketTransportDtor>(resolve(air_rvas::kRvaSocketTransportDtor));
-    g_fns.telemetryDtor   = reinterpret_cast<FnTelemetryDtor> (resolve(air_rvas::kRvaTelemetryDtor));
-    g_fns.playerTelemetryDtor = reinterpret_cast<FnPlayerTelemetryDtor>(resolve(air_rvas::kRvaPlayerTelemetryDtor));
 
     psw_vtable_addr_ = air_base_ + air_rvas::kRvaVtPlatformSocketWrapper;
 
@@ -186,18 +138,14 @@ bool WindowsAirRuntime::initialize() {
 }
 
 // -------------------------------------------------------------------------
-// tryCapturePlayer
+// tryCapturePlayer  — shared x64/x86 path via the TLS-backed FRE helper.
 // -------------------------------------------------------------------------
 
-// Loosely validates that `p` looks like a Player pointer we can dereference.
-// We require the memory range around `p + kPlayerOffsetPlayerTelemetry` to
-// be readable, since init_telemetry writes there.
 static bool looks_like_player(void* p) {
     if (p == nullptr) return false;
     MEMORY_BASIC_INFORMATION mbi{};
     if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0) return false;
     if (mbi.State != MEM_COMMIT) return false;
-    // Must include the full Player struct (up to the Telemetry slot).
     const auto need = reinterpret_cast<std::uintptr_t>(p) +
                       air_rvas::kPlayerOffsetPlayerTelemetry + sizeof(void*);
     const auto end  = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
@@ -208,64 +156,54 @@ static bool looks_like_player(void* p) {
     return true;
 }
 
-void* WindowsAirRuntime::tryCapturePlayer(void* fre_context) {
+void* WindowsAirRuntime::tryCapturePlayer(void* /*fre_context*/) {
     if (auto p = player_.load(std::memory_order_acquire); p != nullptr) return p;
     if (!initialized_.load(std::memory_order_acquire)) {
         if (!initialize()) return nullptr;
     }
 
 #if defined(_M_X64) || defined(__x86_64__)
-    // x64 has a stable TLS accessor — use it.
-    (void)fre_context;
+    // x64: TLS-backed FRE frame accessor → 4-deref chain → Player*.
     if (g_fns.getActiveFrame == nullptr || g_fns.playerFromFrame == nullptr) return nullptr;
-    void* frame = g_fns.getActiveFrame();
-    if (frame == nullptr) return nullptr;
-    void* player = g_fns.playerFromFrame(frame);
-    if (looks_like_player(player)) {
-        player_.store(player, std::memory_order_release);
-        return player;
-    }
-    return nullptr;
-#else
-    // x86: getActiveFrame_TLS was inlined by MSVC so we can't call it
-    // directly. Try walking the FREContext we were handed:
-    //   FREContext → [maybe one deref] → frame-like pointer → Player_from_Frame.
-    // The tries are guarded by VirtualQuery-based heuristics; anything
-    // that doesn't look right is skipped, and we fall back to nullptr.
-    if (g_fns.playerFromFrame == nullptr || fre_context == nullptr) return nullptr;
 
-    auto tryChain = [&](void* candidate) -> void* {
-        if (candidate == nullptr) return nullptr;
-        MEMORY_BASIC_INFORMATION mbi{};
-        if (VirtualQuery(candidate, &mbi, sizeof(mbi)) == 0) return nullptr;
-        if (mbi.State != MEM_COMMIT) return nullptr;
-        __try {
-            void* p = g_fns.playerFromFrame(candidate);
-            if (looks_like_player(p)) return p;
-        } __except(EXCEPTION_EXECUTE_HANDLER) {
-            // Bad pointer walk — ignore and continue.
-        }
+    void* frame = nullptr;
+    __try {
+        frame = g_fns.getActiveFrame();
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
         return nullptr;
-    };
+    }
+    if (frame == nullptr) return nullptr;
 
-    // Strategy 1: treat the FREContext handle itself as a frame.
-    if (void* p = tryChain(fre_context); p) { player_.store(p); return p; }
-
-    // Strategy 2: single indirection.
+    void* player = nullptr;
     __try {
-        void* deref = *static_cast<void**>(fre_context);
-        if (void* p = tryChain(deref); p) { player_.store(p); return p; }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        player = g_fns.playerFromFrame(frame);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+    if (!looks_like_player(player)) return nullptr;
 
-    // Strategy 3: double indirection.
-    __try {
-        void* d1 = *static_cast<void**>(fre_context);
-        if (d1 != nullptr) {
-            void* d2 = *static_cast<void**>(d1);
-            if (void* p = tryChain(d2); p) { player_.store(p); return p; }
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-
+    player_.store(player, std::memory_order_release);
+    return player;
+#else
+    // x86: DISABLED. The "Player_from_Frame" function at RVA 0x45fe80
+    // matched the x64 byte-pattern shape (4-deref chain, final +0x294)
+    // but empirically does NOT yield a Player pointer — reading the
+    // Player slot offsets off its return produces what looks like raw
+    // heap bytes (same 4-byte values at nominally different offsets,
+    // never zero as they should be before init_telemetry runs).
+    //
+    // Dropping this path means Mode B is not available on 32-bit. The
+    // ANE keeps working in Mode A (runtime initialises telemetry at
+    // boot from a .telemetry.cfg on disk; our IAT hook on ws2_32!send
+    // is arch-neutral and still captures the stream).
+    //
+    // To enable Mode B on x86 later we need one more RE pass to pin
+    // down the real AvmCore→Player offset. Candidates to try:
+    //   - find the caller of Player::init_telemetry that passes Player
+    //     via a simpler global chain (not the frame→top→pool→core path)
+    //   - find a "getPlayer()" helper with a single deref from AvmCore
+    //   - scan the GCHeap for an object whose +0xDB8/DBC/DC0 are all
+    //     zero pre-start and whose vtable at +0 resolves into .rdata
     return nullptr;
 #endif
 }
@@ -273,9 +211,11 @@ void* WindowsAirRuntime::tryCapturePlayer(void* fre_context) {
 // -------------------------------------------------------------------------
 // forceEnableTelemetry / forceDisableTelemetry
 //
-// These are compiled only for x64. On x86 the alloc_locked path has
-// subtle ABI and GCHeap-layout differences; a stub returning false keeps
-// the API linkable while Mode B on x86 is still being shaken out.
+// Both arches follow the same 6-step playbook — only the struct layout,
+// allocation sizes, Player offsets and GCHeap layout differ. We keep the
+// two implementations side by side instead of trying to template them,
+// because the byte-level struct writes are easier to audit in explicit
+// form.
 // -------------------------------------------------------------------------
 
 #if defined(_M_X64) || defined(__x86_64__)
@@ -283,10 +223,16 @@ void* WindowsAirRuntime::tryCapturePlayer(void* fre_context) {
 bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
                                              std::uint32_t port,
                                              const ProfilerFeatures& f) {
-    if (!initialized_.load(std::memory_order_acquire)) return false;
+    if (!initialized_.load(std::memory_order_acquire)) {
+        last_error_.store(Error::NotInitialized); return false;
+    }
     void* player = tryCapturePlayer();
-    if (player == nullptr) return false;
-    if (host.empty() || port == 0) return false;
+    if (player == nullptr) {
+        last_error_.store(Error::PlayerNull); return false;
+    }
+    if (host.empty() || port == 0) {
+        last_error_.store(Error::BadHostOrPort); return false;
+    }
 
     auto** playerTransportSlot  = reinterpret_cast<void**>(
         reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetSocketTransport);
@@ -297,7 +243,7 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
 
     if (*playerTransportSlot != nullptr || *playerTelemetrySlot != nullptr ||
         *playerPtelemetrySlot != nullptr) {
-        return false;
+        last_error_.store(Error::AlreadyEnabled); return false;
     }
 
     alignas(8) std::uint8_t cfg_mem[air_rvas::kTelemetryConfigSize];
@@ -316,12 +262,15 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
     *reinterpret_cast<std::uint32_t*>(cfg_mem + 0x08) = f.gc_allocation_traces_threshold;
 
     void* transport = g_fns.allocSmall(air_rvas::kSocketTransportSize, 1);
-    if (transport == nullptr) { g_fns.cfgDtor(cfg_mem); return false; }
+    if (transport == nullptr) {
+        last_error_.store(Error::AllocSocketTransportFail);
+        g_fns.cfgDtor(cfg_mem); return false;
+    }
     g_fns.socketTransportCtor(transport, player, host.c_str(), port);
 
     void* telemetry = g_fns.allocSmall(air_rvas::kTelemetrySize, 1);
     if (telemetry == nullptr) {
-        g_fns.socketTransportDtor(transport);
+        last_error_.store(Error::AllocTelemetryFail);
         g_fns.cfgDtor(cfg_mem);
         return false;
     }
@@ -352,8 +301,7 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
         playerTelemetry = g_fns.allocSmall(air_rvas::kPlayerTelemetrySize, 1);
     }
     if (playerTelemetry == nullptr) {
-        g_fns.telemetryDtor(telemetry);
-        g_fns.socketTransportDtor(transport);
+        last_error_.store(Error::AllocPlayerTelemetryFail);
         g_fns.cfgDtor(cfg_mem);
         return false;
     }
@@ -370,6 +318,132 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
     return true;
 }
 
+#else // x86
+
+bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
+                                             std::uint32_t port,
+                                             const ProfilerFeatures& f) {
+    if (!initialized_.load(std::memory_order_acquire)) {
+        last_error_.store(Error::NotInitialized); return false;
+    }
+    void* player = tryCapturePlayer();
+    if (player == nullptr) {
+        last_error_.store(Error::PlayerNull); return false;
+    }
+    if (host.empty() || port == 0) {
+        last_error_.store(Error::BadHostOrPort); return false;
+    }
+
+    auto** playerTransportSlot  = reinterpret_cast<void**>(
+        reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetSocketTransport);
+    auto** playerTelemetrySlot  = reinterpret_cast<void**>(
+        reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetTelemetry);
+    auto** playerPtelemetrySlot = reinterpret_cast<void**>(
+        reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetPlayerTelemetry);
+
+    diag_slot_transport_.store(reinterpret_cast<std::uintptr_t>(*playerTransportSlot),
+                                std::memory_order_release);
+    diag_slot_telemetry_.store(reinterpret_cast<std::uintptr_t>(*playerTelemetrySlot),
+                                std::memory_order_release);
+    diag_slot_playertel_.store(reinterpret_cast<std::uintptr_t>(*playerPtelemetrySlot),
+                                std::memory_order_release);
+    if (*playerTransportSlot != nullptr || *playerTelemetrySlot != nullptr ||
+        *playerPtelemetrySlot != nullptr) {
+        last_error_.store(Error::AlreadyEnabled); return false;
+    }
+
+    // x86 TelemetryConfig is 0x28 B — same 8 bool byte fields (0x00..0x07)
+    // and u32 threshold at +0x08 as x64, but AirString is 0x0C and host
+    // sits at +0x0C with port at +0x18.
+    alignas(4) std::uint8_t cfg_mem[air_rvas::kTelemetryConfigSize];
+    std::memset(cfg_mem, 0, sizeof(cfg_mem));
+    g_fns.cfgDefaultInit(cfg_mem);
+
+    g_fns.airStringAssign(cfg_mem + air_rvas::kTelemetryConfigOffHost, host.c_str(), host.size());
+    *reinterpret_cast<std::uint32_t*>(cfg_mem + air_rvas::kTelemetryConfigOffPort) = port;
+
+    g_fns.cfgParseBoolPair(f.sampler_enabled ? "1" : "0", cfg_mem + 0x03, cfg_mem + 0x04);
+    g_fns.cfgParseBoolPair(f.stage3d_capture ? "1" : "0", cfg_mem + 0x00, cfg_mem + 0x01);
+    cfg_mem[0x02] = f.display_object_capture ? 1 : 0;
+    cfg_mem[0x05] = f.cpu_capture ? 1 : 0;
+    cfg_mem[0x06] = f.script_object_allocation_traces ? 1 : 0;
+    cfg_mem[0x07] = f.all_gc_allocation_traces ? 1 : 0;
+    *reinterpret_cast<std::uint32_t*>(cfg_mem + 0x08) = f.gc_allocation_traces_threshold;
+
+    // SocketTransport — 0x20 bytes on x86.
+    void* transport = g_fns.allocSmall(air_rvas::kSocketTransportSize, 1);
+    if (transport == nullptr) {
+        last_error_.store(Error::AllocSocketTransportFail);
+        g_fns.cfgDtor(cfg_mem); return false;
+    }
+    g_fns.socketTransportCtor(transport, player, host.c_str(), port);
+
+    // Telemetry — 0xB0 bytes on x86.
+    void* telemetry = g_fns.allocSmall(air_rvas::kTelemetrySize, 1);
+    if (telemetry == nullptr) {
+        last_error_.store(Error::AllocTelemetryFail);
+        g_fns.cfgDtor(cfg_mem);
+        return false;
+    }
+    g_fns.telemetryCtor(telemetry, transport);
+    g_fns.telemetryBind(telemetry);
+
+    // PlayerTelemetry — 0x1C8 bytes via the GCHeap-locked allocator.
+    // GCHeap singleton sits at RVA 0xe08570 on x86; the spinlock is at
+    // heap+0x670 (vs heap+0xB98 on x64) and alloc_locked is __fastcall
+    // (ecx=heap, edx=size, stack=flags).
+    void* gcheap = *reinterpret_cast<void**>(air_base_ + air_rvas::kRvaGcHeapPtrSlot);
+    void* playerTelemetry = nullptr;
+    if (gcheap != nullptr) {
+        auto* lock_slot = reinterpret_cast<std::atomic<std::int32_t>*>(
+            reinterpret_cast<char*>(gcheap) + air_rvas::kGcHeapLockOffset);
+        for (int attempts = 0; attempts < 10000; ++attempts) {
+            std::int32_t expected = 0;
+            if (lock_slot->compare_exchange_weak(expected, 1,
+                                                 std::memory_order_acquire,
+                                                 std::memory_order_relaxed)) break;
+            if ((attempts & 0x3f) == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            else std::this_thread::yield();
+        }
+        playerTelemetry = g_fns.allocLocked(gcheap, air_rvas::kPlayerTelemetrySize, 1);
+        *reinterpret_cast<void**>(reinterpret_cast<char*>(gcheap) +
+                                   air_rvas::kGcHeapLastAllocPtrOffset)  = playerTelemetry;
+        *reinterpret_cast<std::uint32_t*>(reinterpret_cast<char*>(gcheap) +
+                                           air_rvas::kGcHeapLastAllocSizeOffset) =
+                                               static_cast<std::uint32_t>(air_rvas::kPlayerTelemetrySize);
+        lock_slot->store(0, std::memory_order_release);
+    } else {
+        playerTelemetry = g_fns.allocSmall(air_rvas::kPlayerTelemetrySize, 1);
+    }
+    if (playerTelemetry == nullptr) {
+        last_error_.store(Error::AllocPlayerTelemetryFail);
+        g_fns.cfgDtor(cfg_mem);
+        return false;
+    }
+
+    g_fns.playerTelemetryCtor(playerTelemetry, player, telemetry, cfg_mem);
+
+    // Player offsets on x86: SocketTransport @ +0xDB8, Telemetry @ +0xDBC,
+    // PlayerTelemetry @ +0xDC0. transport->player_telemetry at +0x1C
+    // (vs +0x38 on x64 — half because of the 4-byte pointer size).
+    *playerTransportSlot  = transport;
+    *playerTelemetrySlot  = telemetry;
+    *playerPtelemetrySlot = playerTelemetry;
+    *reinterpret_cast<void**>(reinterpret_cast<char*>(transport) +
+                               air_rvas::kSocketTransportOffsetPtel) = playerTelemetry;
+
+    g_fns.cfgDtor(cfg_mem);
+    return true;
+}
+
+#endif
+
+// -------------------------------------------------------------------------
+// forceDisableTelemetry — same on both archs: null the three Player slots
+// and let MMgc reclaim the trio. See the comment in this function for why
+// we intentionally skip the C++ destructors.
+// -------------------------------------------------------------------------
+
 void WindowsAirRuntime::forceDisableTelemetry() {
     void* player = player_.load(std::memory_order_acquire);
     if (player == nullptr || !initialized_.load(std::memory_order_acquire)) return;
@@ -381,12 +455,6 @@ void WindowsAirRuntime::forceDisableTelemetry() {
     // a subsequent force-enable because subsystems (sampler, event bus,
     // command registry) cache pointers we can't unregister without
     // deeper RE. Leaking the objects is cheap and safe.
-    //
-    // Zero-idle after stop is preserved because:
-    //   - Player.telemetry is null → runtime's getTelemetry() check skips
-    //     emission in the AS3 event dispatch path.
-    //   - The loopback listener is torn down separately by the caller, so
-    //     any straggling bytes from cached subsystems hit a closed socket.
     auto** playerTransportSlot  = reinterpret_cast<void**>(
         reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetSocketTransport);
     auto** playerTelemetrySlot  = reinterpret_cast<void**>(
@@ -398,25 +466,5 @@ void WindowsAirRuntime::forceDisableTelemetry() {
     *playerTelemetrySlot  = nullptr;
     *playerPtelemetrySlot = nullptr;
 }
-
-#else // x86
-
-// x86 Mode B is currently best-effort — we can invoke init_telemetry as
-// long as Player* is obtainable from FREContext. The force-enable path is
-// left unimplemented for now: it requires pinning down the x86 GCHeap layout
-// and the MSVC fastcall ABI for alloc_locked. Mode A (via .telemetry.cfg)
-// still works on x86 because the IAT send hook is architecture-neutral.
-
-bool WindowsAirRuntime::forceEnableTelemetry(const std::string& /*host*/,
-                                             std::uint32_t /*port*/,
-                                             const ProfilerFeatures& /*f*/) {
-    return false;
-}
-
-void WindowsAirRuntime::forceDisableTelemetry() {
-    // Nothing was forced on; nothing to tear down.
-}
-
-#endif
 
 } // namespace ane::profiler

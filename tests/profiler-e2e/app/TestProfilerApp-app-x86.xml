@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<application xmlns="http://ns.adobe.com/air/application/51.1">
+  <id>br.com.redesurftank.testprofiler</id>
+  <versionNumber>0.0.1</versionNumber>
+  <filename>TestProfilerApp</filename>
+  <name>TestProfilerApp</name>
+  <description>Automated E2E test for the profiler capture subsystem (x86)</description>
+  <copyright>SURFTANK LTDA</copyright>
+  <allowMultipleInstances>true</allowMultipleInstances>
+  <stacktraces>verbose</stacktraces>
+  <architecture>32</architecture>
+  <initialWindow>
+    <content>TestProfilerApp.swf</content>
+    <visible>true</visible>
+    <renderMode>direct</renderMode>
+    <fullScreen>false</fullScreen>
+    <maximizable>false</maximizable>
+    <minimizable>false</minimizable>
+    <resizable>false</resizable>
+    <systemChrome>standard</systemChrome>
+    <width>320</width>
+    <height>240</height>
+  </initialWindow>
+  <customUpdateUI>false</customUpdateUI>
+  <extensions>
+    <extensionID>br.com.redesurftank.aneawesomeutils</extensionID>
+  </extensions>
+</application>

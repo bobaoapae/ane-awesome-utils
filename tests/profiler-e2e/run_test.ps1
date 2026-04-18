@@ -17,6 +17,7 @@
 [CmdletBinding()]
 param(
     [int]    $TimeoutSec = 60,
+    [ValidateSet('x64', 'x86')][string] $Arch = 'x64',
     [switch] $Rebuild,
     [switch] $SkipBuild,
     [switch] $KeepOutputs,
@@ -70,9 +71,9 @@ if (-not $SkipBuild) {
         Pop-Location
     }
 
-    Write-Host "[harness] building test app"
+    Write-Host "[harness] building test app (arch=$Arch)"
     $buildBat = Join-Path $appDir 'build.bat'
-    $buildLog = & cmd.exe /c "`"$buildBat`"" 2>&1
+    $buildLog = & cmd.exe /c "`"$buildBat`" $Arch" 2>&1
     $buildExit = $LASTEXITCODE
     $buildLog | ForEach-Object { Write-Host "  [build] $_" }
     if ($buildExit -ne 0) { throw "app build.bat failed" }

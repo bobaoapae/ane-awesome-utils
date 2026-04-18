@@ -172,15 +172,15 @@ inline constexpr std::uint32_t kRvaMMgcAllocSmall   = 0x0014f323;   // __cdecl(s
 inline constexpr std::uint32_t kRvaMMgcAllocLocked  = 0x001573de;   // __fastcall(ecx=heap, edx=size, [esp]=flags)
 
 // FRE helpers ---------------------------------------------------------------
-// NOTE: getActiveFrame_TLS is inlined in the x86 MSVC build — no stable RVA.
-// Mode B on x86 must therefore obtain Player* via the FREContext path,
-// which is not yet pinned statically.  The runtime does expose
-// Player_from_Frame at a stable RVA; we'll try calling it with various
-// indirections from FREContext at runtime.
-inline constexpr std::uint32_t kRvaFrePlayerFromFrame           = 0x0045fe80;
-// Not yet resolved — marked 0 so callers know it isn't available.
-inline constexpr std::uint32_t kRvaFreContextToInternal         = 0x00000000;
-inline constexpr std::uint32_t kRvaFreGetActiveFrame            = 0x00000000;
+// getActiveFrame_TLS in x86 is located by following the first `call` of the
+// exported FREGetContextNativeData / FREGetContextActionScriptData — both
+// dispatch through this helper to pick up the current FRE frame from the
+// TLS slot (`DAT_10e13464` → TlsGetValue). The function peeks the top of
+// the frame stack via a weird pop-then-push pattern but is otherwise
+// semantically identical to the x64 helper. __cdecl, returns in eax.
+inline constexpr std::uint32_t kRvaFreGetActiveFrame            = 0x00458600;
+inline constexpr std::uint32_t kRvaFrePlayerFromFrame           = 0x0045fe80;  // __thiscall
+inline constexpr std::uint32_t kRvaFreContextToInternal         = 0x00000000;  // not needed once getActiveFrame works
 
 // Allocator sizes (x86 = roughly half of x64) -------------------------------
 inline constexpr std::size_t   kSocketTransportSize  = 0x20;
@@ -208,18 +208,17 @@ inline constexpr std::uint32_t kGcHeapLockOffset           = 0x670;
 inline constexpr std::uint32_t kGcHeapLastAllocPtrOffset   = 0x674;
 inline constexpr std::uint32_t kGcHeapLastAllocSizeOffset  = 0x678;
 
-// Init-telemetry prologue signature (x86 first 12 bytes). Used to guard
-// against wrong runtime versions.
-//
-// From disassembly of init_telemetry @ 0x0018e840:
+// Init-telemetry prologue signature (x86 first 6 bytes). Used to guard
+// against wrong runtime versions. Actual prolog sets up SEH:
 //   55              push ebp
 //   8b ec           mov ebp, esp
-//   81 ec 48 00 00 00  sub esp, 0x48
-//   a1 ?? ?? ?? ??  mov eax, ds:[imm32]   (stack cookie, 5 bytes)
-// → the mov imm32 at byte 8 has a 4-byte RIP-free operand that we accept
-// via a 12-byte pattern that stops at the mov opcode.
-inline constexpr std::uint8_t  kInitTelemetryPrologue[8] = {
-    0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x48, 0x00, 0x00
+//   6a ff           push -1                     (SEH cookie)
+//   68 XX XX XX XX  push imm32 (handler)        (rest of prolog varies)
+// We match only the first 6 bytes — enough to tell us this is
+// init_telemetry on this build, without depending on the imm32 handler
+// address which changes on rebase.
+inline constexpr std::uint8_t  kInitTelemetryPrologue[6] = {
+    0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x68
 };
 
 } // namespace ane::profiler::air_51_1_3_10_win_x86
