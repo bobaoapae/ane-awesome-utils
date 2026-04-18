@@ -30,6 +30,19 @@ link_directories(${LIBRARY_PATH})
 include_directories(${INCLUDE_PATH})
 include_directories(${CMAKE_SOURCE_DIR}/src)
 
+# Cross-platform profiler core (header-only + CaptureController + sinks).
+# Lives under shared/profiler/ at the repo root so Android/Mac/iOS can reuse
+# it with their own IRuntimeHook implementations.
+set(PROFILER_SHARED_DIR ${CMAKE_SOURCE_DIR}/../shared/profiler)
+include_directories(${PROFILER_SHARED_DIR}/include)
+include_directories(${PROFILER_SHARED_DIR}/third_party/miniz)
+
+# Compile miniz as a separate static lib so we can keep its warnings silenced
+# without polluting our own /W4 build.
+add_library(ane_miniz STATIC ${PROFILER_SHARED_DIR}/third_party/miniz/miniz.c)
+target_include_directories(ane_miniz PUBLIC ${PROFILER_SHARED_DIR}/third_party/miniz)
+set_target_properties(ane_miniz PROPERTIES COMPILE_FLAGS "/w")
+
 add_library(AneAwesomeUtilsWindows SHARED
         src/log.h
         src/log.cpp
@@ -44,9 +57,26 @@ add_library(AneAwesomeUtilsWindows SHARED
         src/AudioSafetyHookSEH.c
         src/SamplerSafetyHook.h
         src/SamplerSafetyHook.cpp
+        # ---- profiler subsystem ----
+        ${PROFILER_SHARED_DIR}/src/RawFileSink.cpp
+        ${PROFILER_SHARED_DIR}/src/ZlibFileSink.cpp
+        ${PROFILER_SHARED_DIR}/src/CaptureController.cpp
+        src/profiler/WindowsRuntimeHook.hpp
+        src/profiler/WindowsRuntimeHook.cpp
+        src/profiler/WindowsAirRuntime.hpp
+        src/profiler/WindowsAirRuntime.cpp
+        src/profiler/WindowsLoopbackListener.hpp
+        src/profiler/WindowsLoopbackListener.cpp
+        src/profiler/WindowsDiskMonitor.cpp
+        src/profiler/ProfilerAneBindings.hpp
+        src/profiler/ProfilerAneBindings.cpp
 )
 
-target_link_libraries(AneAwesomeUtilsWindows PRIVATE ${LIBRARY_PATH}/FlashRuntimeExtensions.lib version.lib)
+target_link_libraries(AneAwesomeUtilsWindows PRIVATE
+        ${LIBRARY_PATH}/FlashRuntimeExtensions.lib
+        version.lib
+        ws2_32.lib
+        ane_miniz)
 
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /GL")
 set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /LTCG /OPT:REF /OPT:ICF /DEBUG /PDBALTPATH:%_PDB%")

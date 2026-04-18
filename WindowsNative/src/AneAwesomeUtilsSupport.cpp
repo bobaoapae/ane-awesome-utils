@@ -11,13 +11,15 @@
 
 #include "log.h"
 #include "WindowsFilterInputs.h"
+#include "profiler/ProfilerAneBindings.hpp"
 
 // WDA_EXCLUDEFROMCAPTURE is not defined in older Windows SDKs (requires Windows 10 2004+)
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
 
-constexpr int EXPORT_FUNCTIONS_COUNT = 32;
+// 32 legacy functions + 4 profiler functions (start/stop/status/marker).
+constexpr int EXPORT_FUNCTIONS_COUNT = 36;
 static bool alreadyInitialized = false;
 static auto exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 
@@ -1247,6 +1249,10 @@ static void AneAwesomeUtilsSupportInitializer(
             nativeLogOnForeground();
             return nullptr;
         };
+        // Profiler subsystem — 4 entries starting at index 32.
+        int cursor = 32;
+        ane::profiler::bindings::register_all(exportedFunctions,
+                                              EXPORT_FUNCTIONS_COUNT, &cursor);
     }
     {
         std::lock_guard lock(dispatchMutex);
@@ -1264,6 +1270,8 @@ static void AneAwesomeUtilsSupportFinalizer(FREContext ctx) {
     if (g_subclassed.exchange(false, std::memory_order_acq_rel)) {
         UnsubclassMainWindow();
     }
+    // Tear down the profiler — stops any active capture and restores the IAT.
+    ane::profiler::bindings::shutdown();
     g_finalized.store(true, std::memory_order_release);
     {
         std::lock_guard lock(dispatchMutex);

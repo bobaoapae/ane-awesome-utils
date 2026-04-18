@@ -6,6 +6,7 @@ import flash.events.EventDispatcher;
 import flash.events.StatusEvent;
 import flash.external.ExtensionContext;
 import flash.net.URLVariables;
+import flash.profiler.Telemetry;
 import flash.system.Capabilities;
 import flash.utils.ByteArray;
 import flash.filesystem.File;
@@ -756,6 +757,139 @@ public class AneAwesomeUtils {
             headers[key] = headersObj[key];
         }
         return headers;
+    }
+
+    // ------------------------------------------------------------------
+    // Scout-compatible profiler capture — on-demand, zero-idle Mode B.
+    //
+    //   profilerStart(outputPath, options): Boolean
+    //       Opens an .flmc file and turns telemetry ON inside the AIR
+    //       runtime (on x64: no .telemetry.cfg needed — forced via
+    //       native replay of init_telemetry; on x86: falls back to the
+    //       legacy flow that requires a .telemetry.cfg pointing to
+    //       127.0.0.1 on the same port).
+    //
+    //       options.maxBytesMb          default 900 (0 = uncapped)
+    //       options.compressionLevel    default 6   (1..9)
+    //       options.headerJson          free-form JSON stored in the header
+    //       options.host                default "127.0.0.1"
+    //       options.port                default 7934
+    //       options.features            Object with boolean flags:
+    //           samplerEnabled                 default true
+    //           cpuCapture                     default true
+    //           displayObjectCapture           default false
+    //           stage3DCapture                 default false
+    //           scriptObjectAllocationTraces   default false
+    //           allGcAllocationTraces          default false
+    //           gcAllocationTracesThreshold    default 1024 (uint)
+    //
+    //   profilerStop():             Boolean   — finalizes the .flmc
+    //   profilerGetStatus():        Object    — {state, bytesIn, bytesOut,
+    //                                            records, drops, dropBytes,
+    //                                            elapsedMs, modeBAvailable,
+    //                                            modeBActive}
+    //   profilerTakeMarker(name):   Boolean   — annotation in header JSON
+    //
+    // State enum: 0=Idle 1=Starting 2=Recording 3=Stopping 4=Error.
+    // Only Windows is supported today. Android/Mac/iOS return false.
+    // ------------------------------------------------------------------
+
+    public static const PROFILER_STATE_IDLE:uint      = 0;
+    public static const PROFILER_STATE_STARTING:uint  = 1;
+    public static const PROFILER_STATE_RECORDING:uint = 2;
+    public static const PROFILER_STATE_STOPPING:uint  = 3;
+    public static const PROFILER_STATE_ERROR:uint     = 4;
+
+    public function profilerStart(outputPath:String, options:Object = null):Boolean {
+        if (!_successInit) return false;
+        if (!IsWindows()) return false;
+
+        var maxBytesMb:uint       = options != null && options.maxBytesMb       != null ? uint(options.maxBytesMb)    : 900;
+        var compressionLevel:int  = options != null && options.compressionLevel != null ? int(options.compressionLevel) : 6;
+        var headerJson:String     = options != null && options.headerJson       != null ? String(options.headerJson)  : "";
+        var host:String           = options != null && options.host             != null ? String(options.host)        : "127.0.0.1";
+        var port:uint             = options != null && options.port             != null ? uint(options.port)          : 7934;
+
+        var features:Object = options != null && options.features != null ? options.features : {};
+        // Normalize the features object so the native side always gets the
+        // full set of properties (FREFunction readers default-fill missing).
+        var nativeFeatures:Object = {
+            samplerEnabled:                 features.samplerEnabled                 !== undefined ? Boolean(features.samplerEnabled)                 : true,
+            cpuCapture:                     features.cpuCapture                     !== undefined ? Boolean(features.cpuCapture)                     : true,
+            displayObjectCapture:           features.displayObjectCapture           !== undefined ? Boolean(features.displayObjectCapture)           : false,
+            stage3DCapture:                 features.stage3DCapture                 !== undefined ? Boolean(features.stage3DCapture)                 : false,
+            scriptObjectAllocationTraces:   features.scriptObjectAllocationTraces   !== undefined ? Boolean(features.scriptObjectAllocationTraces)   : false,
+            allGcAllocationTraces:          features.allGcAllocationTraces          !== undefined ? Boolean(features.allGcAllocationTraces)          : false,
+            gcAllocationTracesThreshold:    features.gcAllocationTracesThreshold    !== undefined ? uint   (features.gcAllocationTracesThreshold)    : 1024
+        };
+
+        return _extContext.call("awesomeUtils_profilerStart",
+                                outputPath,
+                                maxBytesMb,
+                                compressionLevel,
+                                headerJson,
+                                nativeFeatures,
+                                host,
+                                port) as Boolean;
+    }
+
+    public function profilerStop():Boolean {
+        if (!_successInit) return false;
+        if (!IsWindows()) return false;
+        return _extContext.call("awesomeUtils_profilerStop") as Boolean;
+    }
+
+    public function profilerGetStatus():Object {
+        if (!_successInit) return null;
+        if (!IsWindows()) return null;
+        return _extContext.call("awesomeUtils_profilerGetStatus") as Object;
+    }
+
+    // Inline marker — appears in the Scout wire stream as a
+    // `.value:<name>` record. Works whenever the runtime telemetry is
+    // active (either Mode B force-enabled by us, or Mode A via
+    // .telemetry.cfg). Safe to call when the profiler is idle (no-op).
+    //
+    // Also registers the marker in the ANE's own pending list so it gets
+    // written into the .flmc header JSON at stop time — useful for
+    // viewing high-level battle boundaries without having to parse the
+    // AMF3 stream.
+    public function profilerMarker(name:String, value:Number = 1):Boolean {
+        if (!_successInit) return false;
+        // flash.profiler.Telemetry is available on all AIR platforms.
+        // When telemetry isn't connected, sendMetric is a no-op.
+        try {
+            if (Telemetry.connected) {
+                Telemetry.sendMetric(name, value);
+            }
+        } catch (e:Error) {
+            // Some builds of the runtime mark sendMetric as debug-only;
+            // swallow the failure and fall back to header-only markers.
+        }
+        if (IsWindows()) {
+            return _extContext.call("awesomeUtils_profilerTakeMarker", name) as Boolean;
+        }
+        return true;
+    }
+
+    // Backwards-compatible alias for the header-JSON-only marker.
+    public function profilerTakeMarker(name:String):Boolean {
+        return profilerMarker(name, 1);
+    }
+
+    // EXPERIMENTAL — span metric wrapper. Captures `Telemetry.spanMarker`
+    // before the closure, runs it, then emits `sendSpanMetric`. Currently
+    // unstable when used inside tight loops (can heap-corrupt the runtime
+    // after a few hundred consecutive calls during a Mode-B-forced
+    // capture). Prefer a single `profilerMarker("turn.start", ts)` +
+    // `profilerMarker("turn.end", ts)` pair until the issue is triaged.
+    public function profilerSpan(name:String, fn:Function):void {
+        var startMarker:Number = Telemetry.spanMarker;
+        try {
+            fn();
+        } finally {
+            try { Telemetry.sendSpanMetric(name, startMarker); } catch (e:Error) {}
+        }
     }
 }
 }
