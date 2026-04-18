@@ -1,0 +1,22 @@
+$$ Strategy: launch, set a sxe callback on module-load that:
+$$   - checks if the just-loaded module is Adobe AIR (by looking at the
+$$     range around the address in @$curframe), then sets the real bp.
+$$ We use a looser filter: break on *any* module load whose name contains
+$$ "Adobe". In practice only one such DLL loads.
+
+.logopen /t C:\Users\Joao\IdeaProjects\ane-awesome-utils\tests\rva-probe\probe.log
+
+$$ Break on module load. We'll filter inside the callback script because
+$$ sxe ld:<name> filters are string-matched against the unquoted module
+$$ short-name, which dislikes the space in "Adobe AIR".
+sxe -c "$$>< C:\\Users\\Joao\\IdeaProjects\\ane-awesome-utils\\tests\\rva-probe\\on_module_load.cdb" ld
+
+$$ Counter for send_bytes hits.
+r $t0 = 0x14
+
+$$ Run until a qualifying module load hits.
+g
+
+.echo [probe] process exited before 20 send_bytes hits
+.logclose
+qq

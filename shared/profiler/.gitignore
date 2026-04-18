@@ -1,0 +1,9 @@
+# Build outputs (CMake + Ninja).
+build/
+
+# Captures from poc_win_v1 runs.
+poc_win_v1/raw_capture.bin
+poc_win_v1/raw_capture.bin.log
+poc_win_v1/scout_from_listener.bin
+poc_win_v1/listener.log
+poc_win_v1/listener.log.err
