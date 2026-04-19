@@ -184,8 +184,8 @@ package {
             // Drain the sprite pool so the runtime sees .displayobject.remove
             // events in the final span.
             while (active.churnPool.length > 0) {
-                var s:Sprite = active.churnPool.shift();
-                if (s && s.parent) s.parent.removeChild(s);
+                var sp:Sprite = active.churnPool.shift();
+                if (sp && sp.parent) sp.parent.removeChild(sp);
             }
             active.allocScratch.length = 0;
 

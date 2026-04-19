@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.20)
+project(InjectTest LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+add_library(InjectTest SHARED InjectTest.cpp)
+target_link_libraries(InjectTest PRIVATE kernel32)
+set_target_properties(InjectTest PROPERTIES OUTPUT_NAME "InjectTest" PREFIX "")

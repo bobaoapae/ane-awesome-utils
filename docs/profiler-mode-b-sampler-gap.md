@@ -107,6 +107,75 @@ telemetry — the new SWF's methods should pick up sampler hooks if the
 JIT recompiles them, and would then emit samples even in Mode B.
 Neither is in scope for the current profiler target.
 
+## Validated bridge path: transient `.telemetry.cfg` at startup
+
+The sampler-startup-gate can be satisfied **without leaving a cfg file
+on disk visible to the user**. Experimentally confirmed sequence:
+
+1. Just before launching the AIR captive EXE, write
+   `C:\Users\<user>\.telemetry.cfg` with
+   `TelemetryAddress=127.0.0.1:<port>` + `SamplerEnabled=true` +
+   the alloc-trace flags the session needs.
+2. Adobe reads the cfg during Player init, runs `init_telemetry`
+   fully, and AvmCore::ctor wires the sampler + method-name map.
+3. **After ~3 seconds the cfg can be deleted**. Sampler stays armed
+   for the rest of the process lifetime — it was pinned in memory at
+   startup and no longer looks at the file. Verified via a 40-second
+   run: `.sampler.sample`, `.sampler.methodNameMap`,
+   `.sampler.{min,median,max,average}Interval`,
+   `.memory.{objectAllocation,deallocation,reallocation}` categories
+   all register cleanly and method-name payloads flow to our loopback
+   listener.
+4. Transport behaviour with no listener: if the ANE doesn't bind the
+   cfg's port at the moment Adobe tries to connect, the socket write
+   fails silently and the pump drops the batch. The sampler itself
+   keeps capturing into its in-memory ring — negligible overhead
+   (~0.1 Hz default rate). When the ANE does bind the port, the next
+   pump batch flows through normally.
+
+### Automation: InjectTest companion DLL (WIP)
+
+`WindowsNative/inject-test/` holds the scaffolding for the transparent
+injection of the cfg:
+
+- `InjectTest.cpp` — DllMain writes the cfg on `PROCESS_ATTACH` and
+  deletes it on `PROCESS_DETACH`. Static-CRT, kernel32-only, so it
+  can run as the first loaded DLL in the process.
+- `CMakeLists.txt` — x86 Win32 SHARED target with `/MT` runtime.
+- `add_import.py` — `pefile`-based patcher that rewrites a target
+  EXE's import directory into a freshly-appended section, carrying
+  over the original descriptors verbatim and adding one new entry
+  for `InjectTest.dll`.
+
+End-to-end integration on the captive EXE is not yet working: the
+loader maps InjectTest.dll (the `sxe ld:InjectTest` CDB event fires)
+but DllMain is never invoked, so the cfg never gets written. Three
+hypotheses to evaluate next:
+
+- The rebuilt descriptor's `OriginalFirstThunk` / `FirstThunk` pair
+  points at the new section, but the loader may be tripping over the
+  unbound timestamp / forwarder fields relative to the pre-existing
+  bound-import directory. Patching `add_import.py` to clear the Bound
+  Imports data directory (DD[11]) may help.
+- CaptiveAppEntry may reject a modified image in a subtle way (it
+  returned 0x65 in one direct-launch trial, though under CDB a
+  different run exited cleanly with 0). A wrapper-EXE approach —
+  ship a tiny launcher that just writes the cfg, `CreateProcess`es
+  the real captive EXE, then cleans up on exit — avoids touching
+  the captive binary entirely.
+- Direct in-place byte patch of `Adobe AIR.dll`'s `cfgDefaultInit`
+  (RVA 0x38b2a7) so it always populates the cfg with the hardcoded
+  defaults. 1-byte modifications to AIR.dll's `.rdata` padding were
+  verified to NOT trip any AIR-side integrity check (the runtime
+  launches and runs captures normally), so a focused instruction
+  patch should be safe. This matches the SDK's `binary_patch`
+  convention (see `C:/AIRSDKs/AIRSDK_51.1.3.10/patches/manifest.json`
+  for the standard layout under `patches/fix_telemetry_mode_b/`).
+
+Choosing between these three is a product decision — the functional
+outcome (full AS3 sampling, zero user-visible disk artefact,
+programmatic start/stop) is the same in all three.
+
 ## Recommended user-facing behaviour
 
 **Default**: Mode B, zero idle overhead, no AS3 function samples.
