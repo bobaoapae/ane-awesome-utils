@@ -54,9 +54,12 @@ copy /Y "%ANE_FILE%" "%EXT_DIR%\" >nul
 
 rem -------- 1. Compile SWF -------------------------------------------------
 echo [build] compiling SWF
+rem -advanced-telemetry embeds the opt-in flag so Scout can show AS3
+rem function-level sampling (Top Activities / ActionScript panel).
 call "%SDK%\bin\amxmlc.bat" ^
     -library-path+=%SWC_LIB% ^
     -external-library-path+=%AIRGLOBAL_SWC% ^
+    -advanced-telemetry ^
     -output=%OUT%\TestProfilerApp.swf ^
     TestProfilerApp.as
 if errorlevel 1 exit /b 1

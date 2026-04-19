@@ -114,6 +114,24 @@ inline constexpr std::uint8_t  kInitTelemetryPrologue[12] = {
 inline constexpr std::uint32_t kRvaTelemetrySamplerCtor         = 0x004881a4;
 inline constexpr std::uint32_t kRvaMemoryTelemetrySamplerCtor   = 0x00488060;
 
+// x64 sampler replay is not yet wired up — dynamic verification on x64 is
+// pending. x86 is the proven path (see note in the x86 namespace). These
+// placeholders keep the resolver table symmetric; forceEnableTelemetry on
+// x64 currently skips the sampler step entirely.
+inline constexpr std::uint32_t kRvaPlayerPopulateNameMaps       = 0;
+inline constexpr std::uint32_t kRvaAvmCoreRegisterSamplerMeta   = 0;
+inline constexpr std::size_t   kMemoryTelemetrySamplerSize      = 0;
+inline constexpr std::size_t   kTelemetrySamplerSize            = 0;
+inline constexpr std::uint32_t kAvmCoreOffsetSamplerSlot        = 0;
+inline constexpr std::uint32_t kAvmCoreOffsetSamplerAttached    = 0;
+inline constexpr std::uint32_t kAvmCoreOffsetSamplerDirty       = 0;
+inline constexpr std::uint32_t kAvmCoreOffsetSamplerActive      = 0;
+inline constexpr std::uint32_t kAvmCoreOffsetNameMapA           = 0;
+inline constexpr std::uint32_t kAvmCoreOffsetNameMapB           = 0;
+inline constexpr std::uint32_t kPlayerOffsetNameMapA            = 0;
+inline constexpr std::uint32_t kPlayerOffsetNameMapB            = 0;
+inline constexpr std::uint32_t kPlayerTelemetryOffsetSamplerOn  = 0;
+
 } // namespace ane::profiler::air_51_1_3_10_win_x64
 
 // =============================================================================
@@ -151,6 +169,32 @@ inline constexpr std::uint32_t kRvaTelemetryCtor                = 0x00388be7;
 // bindTransport thunk `push 1; call body` is the right entry point.
 inline constexpr std::uint32_t kRvaTelemetryBindTransport       = 0x00389f78;
 inline constexpr std::uint32_t kRvaPlayerTelemetryCtor          = 0x0038ffc9;
+
+// Sampler ctor — the missing piece for Scout's AS3 function-level sampling.
+// AvmCore::ctor normally calls this conditionally (gated on Player+0xDC0 !=
+// null, i.e. PlayerTelemetry exists). Because our Mode B enables telemetry
+// LATER than AvmCore::ctor runs, the gate evaluates false at AvmCore
+// construction time and the sampler is never created. We replay this block
+// ourselves after installing PlayerTelemetry.
+//   MTS ctor:          __thiscall(this=sampler_buffer, player)
+//   populateNameMaps:  __thiscall(player)  -- idempotent, creates player+DDC/DD8
+inline constexpr std::uint32_t kRvaMemoryTelemetrySamplerCtor   = 0x0038b02c;
+inline constexpr std::uint32_t kRvaTelemetrySamplerCtor         = 0x0038b1ae;
+inline constexpr std::uint32_t kRvaPlayerPopulateNameMaps       = 0x002151a9;
+inline constexpr std::uint32_t kRvaAvmCoreRegisterSamplerMeta   = 0x000a8754;
+inline constexpr std::size_t   kMemoryTelemetrySamplerSize      = 0x1d810;
+inline constexpr std::size_t   kTelemetrySamplerSize            = 0x1d778;
+
+// AvmCore field layout (only what we touch) --------------------------------
+inline constexpr std::uint32_t kAvmCoreOffsetSamplerSlot        = 0x5F4;   // AvmCore+0x5F4 = sampler ptr
+inline constexpr std::uint32_t kAvmCoreOffsetSamplerAttached    = 0x40;    // AvmCore+0x40 = sampler (attachSampler sets this)
+inline constexpr std::uint32_t kAvmCoreOffsetSamplerDirty       = 0x38;    // AvmCore+0x38 = 0 at attach time
+inline constexpr std::uint32_t kAvmCoreOffsetSamplerActive      = 0x3C;    // AvmCore+0x3C = (sampler!=null) byte
+inline constexpr std::uint32_t kAvmCoreOffsetNameMapA           = 0xBC;    // AvmCore+0xBC = copy of player+0xDD8
+inline constexpr std::uint32_t kAvmCoreOffsetNameMapB           = 0xC0;    // AvmCore+0xC0 = copy of player+0xDDC
+inline constexpr std::uint32_t kPlayerOffsetNameMapA            = 0xDD8;
+inline constexpr std::uint32_t kPlayerOffsetNameMapB            = 0xDDC;
+inline constexpr std::uint32_t kPlayerTelemetryOffsetSamplerOn  = 0x38;    // PlayerTelemetry+0x38 = 1 after sampler attached
 
 // Destructors (for shutdown cascade) ---------------------------------------
 inline constexpr std::uint32_t kRvaSocketTransportDtor          = 0x00390501; // TODO — not yet pinned; close via vtable slot 11 thunk works

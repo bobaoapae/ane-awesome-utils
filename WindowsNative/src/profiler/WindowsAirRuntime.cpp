@@ -60,6 +60,9 @@ using FnSocketTransportCtor = void* (*)(void*, void*, const char*, std::uint32_t
 using FnTelemetryCtor       = void* (*)(void*, void*);
 using FnTelemetryBind       = void  (*)(void*);
 using FnPlayerTelemetryCtor = void* (*)(void*, void*, void*, void*);
+using FnSamplerCtor         = void* (*)(void*, void*);
+using FnPopulateNameMaps    = void  (*)(void*);
+using FnRegisterSamplerMeta = void  (*)(void*, void*);
 
 #else // x86
 
@@ -79,6 +82,9 @@ using FnSocketTransportCtor = void* (__thiscall*)(void*, void*, const char*, std
 using FnTelemetryCtor       = void* (__thiscall*)(void*, void*);
 using FnTelemetryBind       = void  (__thiscall*)(void*);           // thunk at +0x389f78 fronts the real body with an extra push 1
 using FnPlayerTelemetryCtor = void* (__thiscall*)(void*, void*, void*, void*);
+using FnSamplerCtor         = void* (__thiscall*)(void*, void*);
+using FnPopulateNameMaps    = void  (__thiscall*)(void*);
+using FnRegisterSamplerMeta = void  (__thiscall*)(void*, void*);
 
 #endif
 
@@ -95,6 +101,10 @@ struct AirRuntimeFns {
     FnTelemetryCtor       telemetryCtor       = nullptr;
     FnTelemetryBind       telemetryBind       = nullptr;
     FnPlayerTelemetryCtor playerTelemetryCtor = nullptr;
+    FnSamplerCtor         samplerCtor         = nullptr;
+    FnPopulateNameMaps    populateNameMaps    = nullptr;
+    FnRegisterSamplerMeta registerSamplerMeta = nullptr;
+    FnSamplerCtor         basicSamplerCtor    = nullptr;  // TelemetrySampler (no memory tracking)
 };
 
 static AirRuntimeFns g_fns;
@@ -131,6 +141,12 @@ bool WindowsAirRuntime::initialize() {
     g_fns.telemetryCtor       = reinterpret_cast<FnTelemetryCtor>      (resolve(air_rvas::kRvaTelemetryCtor));
     g_fns.telemetryBind       = reinterpret_cast<FnTelemetryBind>      (resolve(air_rvas::kRvaTelemetryBindTransport));
     g_fns.playerTelemetryCtor = reinterpret_cast<FnPlayerTelemetryCtor>(resolve(air_rvas::kRvaPlayerTelemetryCtor));
+    if (air_rvas::kMemoryTelemetrySamplerSize != 0) {
+        g_fns.samplerCtor     = reinterpret_cast<FnSamplerCtor>        (resolve(air_rvas::kRvaMemoryTelemetrySamplerCtor));
+        g_fns.basicSamplerCtor = reinterpret_cast<FnSamplerCtor>       (resolve(air_rvas::kRvaTelemetrySamplerCtor));
+        g_fns.populateNameMaps = reinterpret_cast<FnPopulateNameMaps>  (resolve(air_rvas::kRvaPlayerPopulateNameMaps));
+        g_fns.registerSamplerMeta = reinterpret_cast<FnRegisterSamplerMeta>(resolve(air_rvas::kRvaAvmCoreRegisterSamplerMeta));
+    }
 
     psw_vtable_addr_ = air_base_ + air_rvas::kRvaVtPlatformSocketWrapper;
 
@@ -514,6 +530,81 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
     *playerPtelemetrySlot = playerTelemetry;
     *reinterpret_cast<void**>(reinterpret_cast<char*>(transport) +
                                air_rvas::kSocketTransportOffsetPtel) = playerTelemetry;
+
+    // --- Sampler install --------------------------------------------------
+    //
+    // AvmCore::ctor normally instantiates a MemoryTelemetrySampler conditionally
+    // on `[player+0xDC0] != null` (i.e. PlayerTelemetry already exists). In
+    // Mode B that gate always fails because AvmCore construction happens
+    // before the ANE gets a chance to force-enable. We replay the tiny
+    // sub-sequence ourselves: alloc + ctor + store at AvmCore+0x5F4 + attach.
+    //
+    // AvmCore is `step3` from tryCapturePlayer's chain walk. It's cached in
+    // diag_chain_step3_ by that function — which has already run (we depend
+    // on `player` above, also produced by tryCapturePlayer).
+    //
+    // Failure here is non-fatal: the transport/telemetry/ptel trio is already
+    // wired up, so Scout receives the non-sampler streams just as before.
+    // The only consequence of sampler-install failure is an empty "Top
+    // Activities" panel in Scout.
+    void* avmcore = reinterpret_cast<void*>(diag_chain_step3_.load(std::memory_order_acquire));
+    if (avmcore != nullptr && g_fns.samplerCtor != nullptr &&
+        *reinterpret_cast<void**>(reinterpret_cast<char*>(avmcore) +
+                                   air_rvas::kAvmCoreOffsetSamplerSlot) == nullptr)
+    {
+        // AvmCore::ctor logic chooses MemoryTelemetrySampler when memory-
+        // allocation traces are requested, or plain TelemetrySampler
+        // otherwise. We mirror that choice.
+        const bool use_mts = f.script_object_allocation_traces ||
+                             f.all_gc_allocation_traces;
+        const std::size_t sampler_size = use_mts
+            ? air_rvas::kMemoryTelemetrySamplerSize
+            : air_rvas::kTelemetrySamplerSize;
+        auto* ctor_fn = use_mts ? g_fns.samplerCtor : g_fns.basicSamplerCtor;
+        void* sampler = (ctor_fn != nullptr)
+            ? g_fns.allocSmall(sampler_size, 0)
+            : nullptr;
+        (void)ctor_fn;  // silence unused warning when x64 stubs are zero
+        if (sampler != nullptr) {
+            __try {
+                ctor_fn(sampler, player);
+                // AvmCore::attachSampler (inlined — body at RVA 0xa2ca4 is 3 writes).
+                auto* av = reinterpret_cast<char*>(avmcore);
+                auto* pl = reinterpret_cast<char*>(player);
+                *reinterpret_cast<void**>(av + air_rvas::kAvmCoreOffsetSamplerSlot)     = sampler;
+                *reinterpret_cast<void**>(av + air_rvas::kAvmCoreOffsetSamplerAttached) = sampler;
+                *reinterpret_cast<std::uint32_t*>(av + air_rvas::kAvmCoreOffsetSamplerDirty) = 0;
+                *reinterpret_cast<std::uint8_t*>(av + air_rvas::kAvmCoreOffsetSamplerActive) = 1;
+                // PlayerTelemetry::attachAvmCore (inlined — RVA 0x39482e: one byte write).
+                *reinterpret_cast<std::uint8_t*>(
+                    reinterpret_cast<char*>(playerTelemetry) +
+                    air_rvas::kPlayerTelemetryOffsetSamplerOn) = 1;
+                // Populate method-name maps and propagate to AvmCore. This creates
+                // the per-method lookup tables the sampler needs for `.sampler.sample`
+                // records to carry AS3 function names instead of raw addresses.
+                // Idempotent — player+0xDD5 guards re-allocation.
+                if (g_fns.populateNameMaps != nullptr) {
+                    g_fns.populateNameMaps(player);
+                }
+                *reinterpret_cast<void**>(av + air_rvas::kAvmCoreOffsetNameMapB) =
+                    *reinterpret_cast<void**>(pl + air_rvas::kPlayerOffsetNameMapB);
+                *reinterpret_cast<void**>(av + air_rvas::kAvmCoreOffsetNameMapA) =
+                    *reinterpret_cast<void**>(pl + air_rvas::kPlayerOffsetNameMapA);
+                // AvmCore::registerSamplerMeta wires up sampler-related rate
+                // counters (avmcore+0xEC/F0/F4). Takes (avmcore, player_addr+0x176).
+                // The +0x20+0x176 offset below mirrors the natural AvmCore::ctor
+                // call site; the arg resolves to a small struct in the player.
+                if (g_fns.registerSamplerMeta != nullptr) {
+                    auto* player_x20 = *reinterpret_cast<char**>(pl + 0x20);
+                    if (player_x20 != nullptr) {
+                        g_fns.registerSamplerMeta(avmcore, player_x20 + 0x176);
+                    }
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                // Sampler install failed — continue without it. Non-fatal.
+            }
+        }
+    }
 
     g_fns.cfgDtor(cfg_mem);
     return true;
