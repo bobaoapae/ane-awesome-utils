@@ -68,7 +68,8 @@ def load_env():
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip()
-    for var in ("MAC_HOST", "MAC_KEYCHAIN_PASS", "AIRSDK_PATH", "SIGNING_IDENTITY", "WIN_SIGN_NAME"):
+    for var in ("MAC_HOST", "MAC_KEYCHAIN_PASS", "AIRSDK_PATH", "SIGNING_IDENTITY",
+                "CODESIGNTOOL_PATH", "CODESIGNTOOL_USERNAME", "CODESIGNTOOL_PASSWORD", "CODESIGNTOOL_TOTP_SECRET"):
         if var not in env:
             raise BuildError(f"Missing '{var}' in .env")
     return env
@@ -361,14 +362,41 @@ def step_package(env):
     header("Step 9: Packaging ANE")
     airsdk = env["AIRSDK_PATH"]
     adt_jar = os.path.join(airsdk, "lib", "adt.jar")
-    win_sign = env["WIN_SIGN_NAME"]
+    codesigntool = os.path.join(env["CODESIGNTOOL_PATH"], "CodeSignTool.bat")
+    cst_user = env["CODESIGNTOOL_USERNAME"]
+    cst_pass = env["CODESIGNTOOL_PASSWORD"]
+    cst_totp = env["CODESIGNTOOL_TOTP_SECRET"]
 
+    dlls = [
+        "windows-32\\AwesomeAneUtils.dll",
+        "windows-32\\AneAwesomeUtilsWindows.dll",
+        "windows-64\\AwesomeAneUtils.dll",
+        "windows-64\\AneAwesomeUtilsWindows.dll",
+    ]
+    sign_tmp = ANE_BUILD / "codesign-tmp"
+    if sign_tmp.exists():
+        shutil.rmtree(sign_tmp)
+    sign_tmp.mkdir(parents=True)
+
+    cst_home = env["CODESIGNTOOL_PATH"]
     log("  Signing Windows DLLs...")
-    with timed("signtool"):
-        run(f'signtool sign /fd sha256 /tr http://ts.ssl.com /td sha256 /n "{win_sign}"'
-            f' "windows-32\\AwesomeAneUtils.dll" "windows-32\\AneAwesomeUtilsWindows.dll"'
-            f' "windows-64\\AwesomeAneUtils.dll" "windows-64\\AneAwesomeUtilsWindows.dll"',
-            cwd=ANE_BUILD, shell=True, quiet=True)
+    with timed("codesigntool"):
+        for dll in dlls:
+            src = ANE_BUILD / dll
+            before = src.stat().st_mtime
+            run(f'set "CODE_SIGN_TOOL_PATH={cst_home}" && '
+                f'"{codesigntool}" sign -input_file_path="{src}"'
+                f' -output_dir_path="{sign_tmp}"'
+                f' -username="{cst_user}" -password="{cst_pass}"'
+                f' -totp_secret="{cst_totp}"',
+                shell=True, quiet=True)
+            signed = sign_tmp / src.name
+            if not signed.exists():
+                raise BuildError(f"CodeSignTool produced no output for {dll}")
+            shutil.move(str(signed), str(src))
+            if src.stat().st_mtime == before:
+                raise BuildError(f"Signed DLL did not replace original: {dll}")
+        shutil.rmtree(sign_tmp)
 
     log("  Running ADT...")
     with timed("ADT"):
