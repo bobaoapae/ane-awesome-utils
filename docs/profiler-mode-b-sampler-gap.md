@@ -133,48 +133,50 @@ on disk visible to the user**. Experimentally confirmed sequence:
    (~0.1 Hz default rate). When the ANE does bind the port, the next
    pump batch flows through normally.
 
-### Automation: InjectTest companion DLL (WIP)
+### Automation attempts
 
-`WindowsNative/inject-test/` holds the scaffolding for the transparent
-injection of the cfg:
+`WindowsNative/inject-test/` holds three POCs exercising different
+injection strategies for the transient cfg:
 
-- `InjectTest.cpp` — DllMain writes the cfg on `PROCESS_ATTACH` and
-  deletes it on `PROCESS_DETACH`. Static-CRT, kernel32-only, so it
-  can run as the first loaded DLL in the process.
-- `CMakeLists.txt` — x86 Win32 SHARED target with `/MT` runtime.
-- `add_import.py` — `pefile`-based patcher that rewrites a target
-  EXE's import directory into a freshly-appended section, carrying
-  over the original descriptors verbatim and adding one new entry
-  for `InjectTest.dll`.
+- `InjectTest.cpp` — the DllMain that writes the cfg on
+  `PROCESS_ATTACH` and deletes it on `PROCESS_DETACH`. Static-CRT,
+  kernel32-only. Reused by both DLL-injection and import-patch paths.
+- `CMakeLists.txt` — x86 Win32 SHARED target with `/MT`.
+- `add_import.py` — `pefile`-based PE rewriter that appends a new
+  section containing a rebuilt import directory with our DLL added.
+- `inject_and_run.py` — CreateRemoteThread DLL injection: spawns the
+  target, waits for its kernel32 to map, allocates memory in the
+  target, writes the DLL path, and kicks off a remote thread pointed
+  at the target's LoadLibraryA. Works functionally (remote thread
+  returns a valid hmodule), but loses the race against Adobe's
+  init_telemetry unless the injection completes in < ~200ms.
+- `wrapper_launcher.py` — simpler option that skips injection
+  entirely: the wrapper process writes the cfg, launches the target,
+  sleeps ~3s to let Adobe read it, then deletes the cfg. The target
+  keeps the sampler armed for the rest of its lifetime because the
+  cfg is only read once during Player::init. End-to-end verified:
+  76 KB captured from the loopback, all sampler + memory-alloc
+  categories registered, AS3 function names in the methodNameMap
+  payload, cfg not on disk after the run (no leak).
 
-End-to-end integration on the captive EXE is not yet working: the
-loader maps InjectTest.dll (the `sxe ld:InjectTest` CDB event fires)
-but DllMain is never invoked, so the cfg never gets written. Three
-hypotheses to evaluate next:
+**Recommended**: ship the logic of `wrapper_launcher.py` as a small
+native launcher (portable C++, statically linked) next to the captive
+EXE. User runs the launcher; the captive EXE gets the cfg transient
+during init. Zero modifications to Adobe AIR.dll or the captive EXE.
+The launcher's cost is one file write + 3s sleep + one file delete,
+measured in microseconds.
 
-- The rebuilt descriptor's `OriginalFirstThunk` / `FirstThunk` pair
-  points at the new section, but the loader may be tripping over the
-  unbound timestamp / forwarder fields relative to the pre-existing
-  bound-import directory. Patching `add_import.py` to clear the Bound
-  Imports data directory (DD[11]) may help.
-- CaptiveAppEntry may reject a modified image in a subtle way (it
-  returned 0x65 in one direct-launch trial, though under CDB a
-  different run exited cleanly with 0). A wrapper-EXE approach —
-  ship a tiny launcher that just writes the cfg, `CreateProcess`es
-  the real captive EXE, then cleans up on exit — avoids touching
-  the captive binary entirely.
+Alternative closures (all yield the same functional outcome):
+
+- PE import-patch approach (`add_import.py` + InjectTest.dll as a new
+  import): the DLL maps but DllMain never fires in our tests —
+  loader-field detail to sort out before this becomes usable.
 - Direct in-place byte patch of `Adobe AIR.dll`'s `cfgDefaultInit`
-  (RVA 0x38b2a7) so it always populates the cfg with the hardcoded
-  defaults. 1-byte modifications to AIR.dll's `.rdata` padding were
-  verified to NOT trip any AIR-side integrity check (the runtime
-  launches and runs captures normally), so a focused instruction
-  patch should be safe. This matches the SDK's `binary_patch`
-  convention (see `C:/AIRSDKs/AIRSDK_51.1.3.10/patches/manifest.json`
-  for the standard layout under `patches/fix_telemetry_mode_b/`).
-
-Choosing between these three is a product decision — the functional
-outcome (full AS3 sampling, zero user-visible disk artefact,
-programmatic start/stop) is the same in all three.
+  (RVA 0x38b2a7): hardcode the defaults so no cfg file is ever needed.
+  1-byte padding mods to AIR.dll's `.rdata` confirm the captive
+  runtime has no self-integrity check, so a focused instruction
+  patch should be safe. Fits the SDK's `binary_patch` method under
+  `patches/fix_telemetry_mode_b/`.
 
 ## Recommended user-facing behaviour
 
