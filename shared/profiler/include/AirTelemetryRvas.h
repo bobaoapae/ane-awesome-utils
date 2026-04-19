@@ -183,23 +183,25 @@ inline constexpr std::uint32_t kRvaMMgcAllocLocked  = 0x001573de;   // __fastcal
 //     Stage3D or similar.) The REAL Player is at +0x04 of the 3rd step.
 //     24 independent call-sites in .text use the [+0x04] tail.
 //
-// So on x86 we synthesise the chain in C++:
-//   frame  = <peek top of FRE framestack in TLS>
-//   Player = *(*(*(*(frame + 0x08) + 0x14) + 0x04) + 0x04)
+// We use FRE::getActiveFrame_TLS directly (safe enough — same pattern x64
+// uses) and then apply the 4-step chain:
+//   frame  = getActiveFrame_TLS()
+//   Player = *(*(*(*(frame + 0x08) + 0x14) + 0x04) + 0x5E8)
 //
-// The TLS slot index sits in a DWORD at RVA kRvaFreFrameStackTlsIdx.
-// Filled once by TlsAlloc during Adobe AIR.dll init; stable thereafter.
-inline constexpr std::uint32_t kRvaFreGetActiveFrame            = 0x00458600;  // NOT USED — kept for reference
+// The +0x5E8 step4 was dynamically verified in CDB: consistent across
+// 3 runs under ASLR, and corresponds to x64's +0xAC0 slot (roughly halved
+// because half the fields in this AvmCore-ish struct are pointer-sized).
+inline constexpr std::uint32_t kRvaFreGetActiveFrame            = 0x00458600;  // TLS-backed active-frame accessor
 inline constexpr std::uint32_t kRvaFrePlayerFromFrame           = 0x0045fe80;  // WRONG OFFSET — DO NOT USE
 inline constexpr std::uint32_t kRvaFreContextToInternal         = 0x00000000;
 
-inline constexpr std::uint32_t kRvaFreFrameStackTlsIdx          = 0x00e13464;  // DWORD in .data holding the TLS slot index
+inline constexpr std::uint32_t kRvaFreFrameStackTlsIdx          = 0x00e13464;  // DWORD in .data holding the TLS slot index (reference only; we call getActiveFrame_TLS)
 inline constexpr std::uint32_t kFreFrameStackOffArray           = 0x04;        // frame_stack+0x04 = void** array
 inline constexpr std::uint32_t kFreFrameStackOffCount           = 0x08;        // frame_stack+0x08 = int32 count
 inline constexpr std::uint32_t kFramePlayerChainStep1           = 0x08;        // frame → AbcEnv/MethodEnv
 inline constexpr std::uint32_t kFramePlayerChainStep2           = 0x14;        // step1 → MethodInfo
 inline constexpr std::uint32_t kFramePlayerChainStep3           = 0x04;        // step2 → PoolObject
-inline constexpr std::uint32_t kFramePlayerChainStep4           = 0x04;        // step3 → AvmCore → Player (x86 only)
+inline constexpr std::uint32_t kFramePlayerChainStep4           = 0x5E8;       // step3 → AvmCore → Player (x86 only, dynamically verified)
 
 // Allocator sizes (x86 = roughly half of x64) -------------------------------
 inline constexpr std::size_t   kSocketTransportSize  = 0x20;
