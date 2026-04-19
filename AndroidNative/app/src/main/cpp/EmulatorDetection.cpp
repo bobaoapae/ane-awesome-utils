@@ -5,7 +5,7 @@
 
 namespace EmulatorDetection
 {
-    std::vector<std::string> detections;
+    thread_local std::vector<std::string> detections;
 }
 
 void EmulatorDetection::checkHardwareProps() {
@@ -148,9 +148,7 @@ void EmulatorDetection::findEmulatorMemory() {
 }
 
 bool EmulatorDetection::isDetected() {
-    if (!detections.empty()) {
-        return true;
-    }
+    detections.clear();
 
     checkHardwareProps();
     checkMounts();

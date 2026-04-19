@@ -66,10 +66,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -103,16 +105,16 @@ import okio.ByteString;
 
 public class AneAwesomeUtilsContext extends FREContext {
 
-    private OkHttpClient _client;
-    private final Map<UUID, byte[]> _urlLoaderResults = new HashMap<>();
-    private final Map<UUID, RealWebSocket> _webSockets = new HashMap<>();
+    private volatile OkHttpClient _client;
+    private final Map<UUID, byte[]> _urlLoaderResults = new ConcurrentHashMap<>();
+    private final Map<UUID, RealWebSocket> _webSockets = new ConcurrentHashMap<>();
     private final Queue<byte[]> _byteBufferQueue = new ConcurrentLinkedQueue<>();
 
     // Add message queue and processor for WebSocket messages
-    private final Map<UUID, ConcurrentLinkedQueue<WebSocketMessage>> _webSocketMessageQueues = new HashMap<>();
-    private final Map<UUID, Thread> _webSocketSenderThreads = new HashMap<>();
+    private final Map<UUID, LinkedBlockingQueue<WebSocketMessage>> _webSocketMessageQueues = new ConcurrentHashMap<>();
+    private final Map<UUID, Thread> _webSocketSenderThreads = new ConcurrentHashMap<>();
     private final Object _webSocketLock = new Object();
-    private final Executor _backGroundExecutor = Executors.newCachedThreadPool();
+    private final Executor _backGroundExecutor = Executors.newFixedThreadPool(4);
 
     private final Object _clientCertificateLock = new Object();
     private final Map<String, ClientCertificateEntry> _clientCertificates = new HashMap<>();
@@ -214,32 +216,23 @@ public class AneAwesomeUtilsContext extends FREContext {
 
             // Create message queue if it doesn't exist
             if (!_webSocketMessageQueues.containsKey(uuid)) {
-                _webSocketMessageQueues.put(uuid, new ConcurrentLinkedQueue<>());
+                _webSocketMessageQueues.put(uuid, new LinkedBlockingQueue<>());
             }
 
             Thread senderThread = new Thread(() -> {
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_FOREGROUND);
                 AneAwesomeUtilsLogging.d(TAG, "Starting WebSocket sender thread for " + uuid);
-                ConcurrentLinkedQueue<WebSocketMessage> queue = _webSocketMessageQueues.get(uuid);
+                LinkedBlockingQueue<WebSocketMessage> queue = _webSocketMessageQueues.get(uuid);
 
                 while (!Thread.currentThread().isInterrupted()) {
                     try {
-                        WebSocketMessage message = queue.poll();
-                        if (message != null) {
-                            WebSocket webSocket;
-                            synchronized (_webSocketLock) {
-                                webSocket = _webSockets.get(uuid);
-                            }
-                            if (webSocket != null) {
-                                message.send(webSocket);
-                            } else {
-                                AneAwesomeUtilsLogging.d(TAG, "WebSocket gone for " + uuid + ", sender thread exiting");
-                                break;
-                            }
-                        } else {
-                            // Sleep a bit when the queue is empty
-                            Thread.sleep(10);
+                        WebSocketMessage message = queue.take();
+                        WebSocket webSocket = _webSockets.get(uuid);
+                        if (webSocket == null) {
+                            AneAwesomeUtilsLogging.d(TAG, "WebSocket gone for " + uuid + ", sender thread exiting");
+                            break;
                         }
+                        message.send(webSocket);
                     } catch (InterruptedException e) {
                         // Thread interrupted - exit gracefully
                         break;
@@ -314,9 +307,10 @@ public class AneAwesomeUtilsContext extends FREContext {
     }
 
     private OkHttpClient getClientForHost(String host) {
+        OkHttpClient client = _client;
         if (host == null || host.isEmpty()) {
             AneAwesomeUtilsLogging.d(TAG, "getClientForHost: host is null or empty, using default client");
-            return _client;
+            return client;
         }
         ClientCertificateEntry entry = null;
         synchronized (_clientCertificateLock) {
@@ -325,15 +319,15 @@ public class AneAwesomeUtilsContext extends FREContext {
         }
         if (entry == null) {
             AneAwesomeUtilsLogging.d(TAG, "getClientForHost: no certificate for host, using default client");
-            return _client;
+            return client;
         }
         try {
             X509TrustManager trustManager = entry.trustManager != null ? entry.trustManager : _defaultTrustManager;
             AneAwesomeUtilsLogging.d(TAG, "getClientForHost: building client with mTLS for host: " + host);
-            return _client.newBuilder().sslSocketFactory(entry.sslSocketFactory, trustManager).build();
+            return client.newBuilder().sslSocketFactory(entry.sslSocketFactory, trustManager).build();
         } catch (Exception e) {
             AneAwesomeUtilsLogging.e(TAG, "Error building client for host with client certificate", e);
-            return _client;
+            return client;
         }
     }
 
@@ -688,6 +682,8 @@ public class AneAwesomeUtilsContext extends FREContext {
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
                 ctx._client = ctx.buildClient();
                 ctx.acquireConnectionResources();
+                // AirIMEGuard and LayoutExceptionGuard are installed earlier in
+                // AneAwesomeUtilsExtension.initialize() — don't re-install here.
                 return FREObject.newObject(true);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "Error initializing", e);
@@ -728,7 +724,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                     return null;
                 }
                 // Get or create the message queue for this WebSocket
-                ConcurrentLinkedQueue<WebSocketMessage> queue = ctx._webSocketMessageQueues.get(uuid);
+                LinkedBlockingQueue<WebSocketMessage> queue = ctx._webSocketMessageQueues.get(uuid);
                 if (queue == null) {
                     AneAwesomeUtilsLogging.e(TAG, "Message queue not found for WebSocket");
                     return null;
@@ -915,9 +911,7 @@ public class AneAwesomeUtilsContext extends FREContext {
                         if (headers.isEmpty()) {
                             headers = receivedHeaders;
                         }
-                        synchronized (ctx._webSocketLock) {
-                            ctx._webSockets.remove(id);
-                        }
+                        ctx._webSockets.remove(id);
                         ctx.dispatchWebSocketEvent(id.toString(), "disconnected", reason + ";" + closeCode + ";" + responseCode + ";" + getHeadersAsBase64(headers));
                     }
 
@@ -986,7 +980,7 @@ public class AneAwesomeUtilsContext extends FREContext {
     }
 
     public static class LoadUrl implements FREFunction {
-        private static final ExecutorService FILE_IO = Executors.newCachedThreadPool();
+        private static final ExecutorService FILE_IO = Executors.newFixedThreadPool(4);
         private static final byte[] EmptyResult = new byte[]{0, 1, 2, 3};
         public static final String KEY = "awesomeUtils_loadUrl";
 

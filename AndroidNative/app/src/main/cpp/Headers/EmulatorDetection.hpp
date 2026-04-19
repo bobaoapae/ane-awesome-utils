@@ -14,7 +14,7 @@
 
 namespace EmulatorDetection
 {
-    extern std::vector<std::string> detections;
+    extern thread_local std::vector<std::string> detections;
 
     void checkHardwareProps();
     void checkMounts();
