@@ -172,15 +172,34 @@ inline constexpr std::uint32_t kRvaMMgcAllocSmall   = 0x0014f323;   // __cdecl(s
 inline constexpr std::uint32_t kRvaMMgcAllocLocked  = 0x001573de;   // __fastcall(ecx=heap, edx=size, [esp]=flags)
 
 // FRE helpers ---------------------------------------------------------------
-// getActiveFrame_TLS in x86 is located by following the first `call` of the
-// exported FREGetContextNativeData / FREGetContextActionScriptData — both
-// dispatch through this helper to pick up the current FRE frame from the
-// TLS slot (`DAT_10e13464` → TlsGetValue). The function peeks the top of
-// the frame stack via a weird pop-then-push pattern but is otherwise
-// semantically identical to the x64 helper. __cdecl, returns in eax.
-inline constexpr std::uint32_t kRvaFreGetActiveFrame            = 0x00458600;
-inline constexpr std::uint32_t kRvaFrePlayerFromFrame           = 0x0045fe80;  // __thiscall
-inline constexpr std::uint32_t kRvaFreContextToInternal         = 0x00000000;  // not needed once getActiveFrame works
+//
+// Two AIR-internal helpers exist on x86 but the ANE DOES NOT use them:
+//
+//   - `getActiveFrame_TLS` @ 0x00458600 reads the TLS slot and pops-then-
+//     pushes-back the top frame. Effectively non-destructive, but fragile
+//     under concurrent GC. We reimplement the peek in pure C++ instead.
+//   - `FRE::Player_from_Frame` @ 0x0045fe80 does 4 derefs ending at
+//     +0x294 — which is NOT Player. (+0x294 is a sibling field, probably
+//     Stage3D or similar.) The REAL Player is at +0x04 of the 3rd step.
+//     24 independent call-sites in .text use the [+0x04] tail.
+//
+// So on x86 we synthesise the chain in C++:
+//   frame  = <peek top of FRE framestack in TLS>
+//   Player = *(*(*(*(frame + 0x08) + 0x14) + 0x04) + 0x04)
+//
+// The TLS slot index sits in a DWORD at RVA kRvaFreFrameStackTlsIdx.
+// Filled once by TlsAlloc during Adobe AIR.dll init; stable thereafter.
+inline constexpr std::uint32_t kRvaFreGetActiveFrame            = 0x00458600;  // NOT USED — kept for reference
+inline constexpr std::uint32_t kRvaFrePlayerFromFrame           = 0x0045fe80;  // WRONG OFFSET — DO NOT USE
+inline constexpr std::uint32_t kRvaFreContextToInternal         = 0x00000000;
+
+inline constexpr std::uint32_t kRvaFreFrameStackTlsIdx          = 0x00e13464;  // DWORD in .data holding the TLS slot index
+inline constexpr std::uint32_t kFreFrameStackOffArray           = 0x04;        // frame_stack+0x04 = void** array
+inline constexpr std::uint32_t kFreFrameStackOffCount           = 0x08;        // frame_stack+0x08 = int32 count
+inline constexpr std::uint32_t kFramePlayerChainStep1           = 0x08;        // frame → AbcEnv/MethodEnv
+inline constexpr std::uint32_t kFramePlayerChainStep2           = 0x14;        // step1 → MethodInfo
+inline constexpr std::uint32_t kFramePlayerChainStep3           = 0x04;        // step2 → PoolObject
+inline constexpr std::uint32_t kFramePlayerChainStep4           = 0x04;        // step3 → AvmCore → Player (x86 only)
 
 // Allocator sizes (x86 = roughly half of x64) -------------------------------
 inline constexpr std::size_t   kSocketTransportSize  = 0x20;

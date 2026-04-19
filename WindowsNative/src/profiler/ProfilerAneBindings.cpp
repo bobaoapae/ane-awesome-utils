@@ -158,17 +158,18 @@ FREObject profiler_start(FREContext ctx, void*, std::uint32_t argc, FREObject* a
     if (!g_loopback)    g_loopback    = std::make_unique<WindowsLoopbackListener>();
     if (!g_disk)        g_disk        = IDiskMonitor::create();
 
-    // Initialize the AIR function-pointer cache if we haven't already.
-    // If this fails (wrong runtime version / DLL not loaded), the rest of
-    // the Mode B path is unavailable — fall through to legacy mode where
-    // the caller is responsible for a `.telemetry.cfg` on disk.
-    const bool air_ok = g_air_runtime->initialize();
-
-    // Capture Player*. On x64 this reads TLS directly (fre_context ignored).
-    // On x86 the TLS helper was inlined by MSVC, so we try to walk the
-    // FREContext pointer we were handed via heuristic indirections.
-    const bool have_player = air_ok
-        && (g_air_runtime->tryCapturePlayer(static_cast<void*>(ctx)) != nullptr);
+    // The profiler is strictly Mode B: we refuse to start unless we can
+    // force the runtime telemetry on ourselves. This guarantees zero idle
+    // overhead — without a successful Start, no runtime telemetry ever
+    // runs — AND it means a stale .telemetry.cfg on disk can never turn
+    // the profiler on silently. `profilerStop` is the only way back to
+    // idle; the next `profilerStart` re-allocates and re-wires from scratch.
+    if (!g_air_runtime->initialize()) {
+        return make_bool(false);
+    }
+    if (g_air_runtime->tryCapturePlayer(static_cast<void*>(ctx)) == nullptr) {
+        return make_bool(false);
+    }
 
     // Disk-space gate.
     if (g_disk) {
@@ -177,6 +178,16 @@ FREObject profiler_start(FREContext ctx, void*, std::uint32_t argc, FREObject* a
         if (free != UINT64_MAX && free < kMinFree) return make_bool(false);
     }
 
+    // Reject non-loopback / zero-port configs — without the internal
+    // loopback listener there is no peer for the runtime to connect to,
+    // and forceEnable would time out.
+    const bool is_loopback = (host == "127.0.0.1" || host == "localhost" || host == "::1");
+    if (!is_loopback || port == 0 || port > 65535) {
+        return make_bool(false);
+    }
+
+    // File + hook + listener all come up first, then we force-enable the
+    // runtime. Symmetric teardown on stop or on any failure below.
     CaptureController::Config cfg;
     cfg.output_path       = std::move(output_path);
     cfg.max_bytes_out     = (max_bytes_mb == 0) ? 0ull
@@ -194,21 +205,17 @@ FREObject profiler_start(FREContext ctx, void*, std::uint32_t argc, FREObject* a
         return make_bool(false);
     }
 
-    // Each Start fully initialises the runtime telemetry chain; each Stop
-    // fully tears it down. This preserves the "zero-idle between captures"
-    // guarantee that is the whole point of Mode B.
-    const bool is_loopback = (host == "127.0.0.1" || host == "localhost" || host == "::1");
-    if (have_player && is_loopback && port > 0 && port <= 65535) {
-        g_loopback->start(static_cast<std::uint16_t>(port));
+    g_loopback->start(static_cast<std::uint16_t>(port));
+
+    g_runtime_forced_on = g_air_runtime->forceEnableTelemetry(host, port, features);
+    if (!g_runtime_forced_on) {
+        // Mode B refused — roll everything back.
+        g_loopback->stop();
+        g_hook->uninstall();
+        g_ctrl->stop();
+        return make_bool(false);
     }
 
-    g_runtime_forced_on = false;
-    if (have_player) {
-        g_runtime_forced_on = g_air_runtime->forceEnableTelemetry(host, port, features);
-        if (!g_runtime_forced_on && g_loopback->running()) {
-            g_loopback->stop();
-        }
-    }
     g_pending_markers.clear();
     return make_bool(true);
 }
@@ -259,6 +266,11 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
         set_prop_f64(obj, "diagSlotTelemetry",     static_cast<double>(g_air_runtime->diagSlotTelemetry()));
         set_prop_f64(obj, "diagSlotPlayerTel",     static_cast<double>(g_air_runtime->diagSlotPlayerTelemetry()));
         set_prop_f64(obj, "playerPtr",             static_cast<double>(reinterpret_cast<std::uintptr_t>(g_air_runtime->player())));
+        set_prop_f64(obj, "diagChainFrame",        static_cast<double>(g_air_runtime->diagChainFrame()));
+        set_prop_f64(obj, "diagChainStep1",        static_cast<double>(g_air_runtime->diagChainStep1()));
+        set_prop_f64(obj, "diagChainStep2",        static_cast<double>(g_air_runtime->diagChainStep2()));
+        set_prop_f64(obj, "diagChainStep3",        static_cast<double>(g_air_runtime->diagChainStep3()));
+        set_prop_f64(obj, "diagPlayerVtable",      static_cast<double>(g_air_runtime->diagPlayerVtable()));
     }
     return obj;
 }

@@ -16,6 +16,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <psapi.h>
 
 #include <atomic>
 #include <chrono>
@@ -141,7 +142,7 @@ bool WindowsAirRuntime::initialize() {
 // tryCapturePlayer  — shared x64/x86 path via the TLS-backed FRE helper.
 // -------------------------------------------------------------------------
 
-static bool looks_like_player(void* p) {
+static bool looks_like_player(void* p, std::uintptr_t air_base) {
     if (p == nullptr) return false;
     MEMORY_BASIC_INFORMATION mbi{};
     if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0) return false;
@@ -153,6 +154,28 @@ static bool looks_like_player(void* p) {
     if ((mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ |
                         PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY |
                         PAGE_EXECUTE_WRITECOPY)) == 0) return false;
+
+    // A real Player has its vtable in the Adobe AIR.dll module. If *p
+    // (the vtable pointer) doesn't fall inside the AIR module's image,
+    // we captured something other than Player (a MethodInfo, a PoolObject,
+    // or some intermediate struct that happens to have readable memory at
+    // the Player-telemetry offsets).
+    HMODULE air = GetModuleHandleA(air_rvas::kDllName);
+    if (air == nullptr) return false;
+    MODULEINFO mi{};
+    if (!GetModuleInformation(GetCurrentProcess(), air, &mi, sizeof(mi))) return false;
+    const auto air_start = reinterpret_cast<std::uintptr_t>(mi.lpBaseOfDll);
+    const auto air_end   = air_start + mi.SizeOfImage;
+
+    std::uintptr_t vt = 0;
+    __try {
+        vt = *reinterpret_cast<std::uintptr_t*>(p);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (vt < air_start || vt >= air_end) return false;
+
+    (void)air_base; // parameter kept for symmetry; vtable check uses GetModuleHandle
     return true;
 }
 
@@ -180,31 +203,91 @@ void* WindowsAirRuntime::tryCapturePlayer(void* /*fre_context*/) {
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return nullptr;
     }
-    if (!looks_like_player(player)) return nullptr;
+    if (!looks_like_player(player, air_base_)) return nullptr;
 
     player_.store(player, std::memory_order_release);
     return player;
 #else
-    // x86: DISABLED. The "Player_from_Frame" function at RVA 0x45fe80
-    // matched the x64 byte-pattern shape (4-deref chain, final +0x294)
-    // but empirically does NOT yield a Player pointer — reading the
-    // Player slot offsets off its return produces what looks like raw
-    // heap bytes (same 4-byte values at nominally different offsets,
-    // never zero as they should be before init_telemetry runs).
+    // ---- x86 ----
     //
-    // Dropping this path means Mode B is not available on 32-bit. The
-    // ANE keeps working in Mode A (runtime initialises telemetry at
-    // boot from a .telemetry.cfg on disk; our IAT hook on ws2_32!send
-    // is arch-neutral and still captures the stream).
+    // The FRE-frame-stack accessor is inlined by MSVC on this build, and
+    // the existing FRE::Player_from_Frame at RVA 0x45fe80 ends at +0x294
+    // which is NOT Player (it's a sibling field, probably Stage3D). We
+    // bypass both and synthesise the chain in pure C++.
     //
-    // To enable Mode B on x86 later we need one more RE pass to pin
-    // down the real AvmCore→Player offset. Candidates to try:
-    //   - find the caller of Player::init_telemetry that passes Player
-    //     via a simpler global chain (not the frame→top→pool→core path)
-    //   - find a "getPlayer()" helper with a single deref from AvmCore
-    //   - scan the GCHeap for an object whose +0xDB8/DBC/DC0 are all
-    //     zero pre-start and whose vtable at +0 resolves into .rdata
-    return nullptr;
+    // Chain derived from 24 identical call-sites in .text (static analysis
+    // cross-validated by 111 Player-method identifications):
+    //   frame  = <peek top of FRE framestack stored in TLS slot>
+    //   Player = *(*(*(*(frame + 0x08) + 0x14) + 0x04) + 0x04)
+    //
+    // The TLS slot index is held in a DWORD at RVA 0x00e13464, filled
+    // once by TlsAlloc during AIR.dll init. We read it fresh every call
+    // so a zero/uninitialised value simply fails the capture instead of
+    // dereferencing an invalid slot.
+
+    const auto* tls_idx_slot = reinterpret_cast<const volatile DWORD*>(
+        air_base_ + air_rvas::kRvaFreFrameStackTlsIdx);
+    const DWORD tls_idx = *tls_idx_slot;
+    if (tls_idx == 0 || tls_idx == TLS_OUT_OF_INDEXES) return nullptr;
+
+    void* frame_stack = nullptr;
+    __try {
+        frame_stack = ::TlsGetValue(tls_idx);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+    if (frame_stack == nullptr) return nullptr;
+
+    // FRE frame-stack struct:
+    //   +0x04  void**  array
+    //   +0x08  int32_t count
+    // We peek array[count - 1] — safe to call from inside an FREFunction
+    // because count >= 1 (we're in the middle of an AS3→native call).
+    void* frame = nullptr;
+    __try {
+        auto* array = *reinterpret_cast<void* const**>(
+            reinterpret_cast<char*>(frame_stack) + air_rvas::kFreFrameStackOffArray);
+        const std::int32_t count = *reinterpret_cast<const std::int32_t*>(
+            reinterpret_cast<char*>(frame_stack) + air_rvas::kFreFrameStackOffCount);
+        if (count <= 0 || array == nullptr) return nullptr;
+        frame = array[count - 1];
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+    if (frame == nullptr) return nullptr;
+
+    // Walk frame → step1 → step2 → step3 → Player.
+    void* player = nullptr;
+    __try {
+        const auto* p0 = static_cast<char*>(frame);
+        const auto* p1 = *reinterpret_cast<char* const*>(p0 + air_rvas::kFramePlayerChainStep1);
+        diag_chain_frame_.store(reinterpret_cast<std::uintptr_t>(frame), std::memory_order_release);
+        diag_chain_step1_.store(reinterpret_cast<std::uintptr_t>(p1), std::memory_order_release);
+        if (p1 == nullptr) return nullptr;
+        const auto* p2 = *reinterpret_cast<char* const*>(p1 + air_rvas::kFramePlayerChainStep2);
+        diag_chain_step2_.store(reinterpret_cast<std::uintptr_t>(p2), std::memory_order_release);
+        if (p2 == nullptr) return nullptr;
+        const auto* p3 = *reinterpret_cast<char* const*>(p2 + air_rvas::kFramePlayerChainStep3);
+        diag_chain_step3_.store(reinterpret_cast<std::uintptr_t>(p3), std::memory_order_release);
+        if (p3 == nullptr) return nullptr;
+        player = *reinterpret_cast<void* const*>(p3 + air_rvas::kFramePlayerChainStep4);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+
+    // Read the candidate's vtable pointer for diagnostic purposes.
+    __try {
+        void* vt = *reinterpret_cast<void* const*>(player);
+        diag_player_vtable_.store(reinterpret_cast<std::uintptr_t>(vt), std::memory_order_release);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        // player wasn't readable at all
+        return nullptr;
+    }
+
+    if (!looks_like_player(player, air_base_)) return nullptr;
+
+    player_.store(player, std::memory_order_release);
+    return player;
 #endif
 }
 

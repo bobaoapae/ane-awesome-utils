@@ -87,6 +87,18 @@ public:
     std::uintptr_t diagSlotTelemetry() const     { return diag_slot_telemetry_.load(std::memory_order_acquire); }
     std::uintptr_t diagSlotPlayerTelemetry() const { return diag_slot_playertel_.load(std::memory_order_acquire); }
 
+    // Capture chain diagnostics — each step of the FRE-frame-to-Player walk
+    // on x86. All zero on x64 (we use the TLS helper directly there).
+    std::uintptr_t diagChainFrame() const  { return diag_chain_frame_.load(std::memory_order_acquire); }
+    std::uintptr_t diagChainStep1() const  { return diag_chain_step1_.load(std::memory_order_acquire); }
+    std::uintptr_t diagChainStep2() const  { return diag_chain_step2_.load(std::memory_order_acquire); }
+    std::uintptr_t diagChainStep3() const  { return diag_chain_step3_.load(std::memory_order_acquire); }
+
+    // Vtable pointer at *(player) — a valid Player has its vtable in
+    // Adobe AIR.dll's .rdata section. Non-.rdata value means we captured
+    // something that isn't Player.
+    std::uintptr_t diagPlayerVtable() const { return diag_player_vtable_.load(std::memory_order_acquire); }
+
 private:
     std::uintptr_t       air_base_        = 0;
     std::atomic<bool>    initialized_{false};
@@ -96,6 +108,11 @@ private:
     std::atomic<std::uintptr_t> diag_slot_transport_{0};
     std::atomic<std::uintptr_t> diag_slot_telemetry_{0};
     std::atomic<std::uintptr_t> diag_slot_playertel_{0};
+    std::atomic<std::uintptr_t> diag_chain_frame_{0};
+    std::atomic<std::uintptr_t> diag_chain_step1_{0};
+    std::atomic<std::uintptr_t> diag_chain_step2_{0};
+    std::atomic<std::uintptr_t> diag_chain_step3_{0};
+    std::atomic<std::uintptr_t> diag_player_vtable_{0};
 };
 
 } // namespace ane::profiler
