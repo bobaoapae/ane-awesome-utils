@@ -113,6 +113,14 @@ private:
     std::atomic<std::uintptr_t> diag_chain_step2_{0};
     std::atomic<std::uintptr_t> diag_chain_step3_{0};
     std::atomic<std::uintptr_t> diag_player_vtable_{0};
+    // True when forceEnableTelemetry constructed the SocketTransport /
+    // Telemetry / PlayerTelemetry trio ourselves (the legacy pre-patch
+    // path). False when we attached to a trio Adobe had already wired at
+    // startup (post-fix_telemetry_mode_b state). forceDisableTelemetry
+    // uses this to decide whether it is safe to null the Player slots —
+    // nulling them on the attach path would disconnect Adobe's live
+    // sampler pump from the Player and break everything.
+    std::atomic<bool>           we_own_transport_{false};
 };
 
 } // namespace ane::profiler

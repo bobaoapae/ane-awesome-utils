@@ -31,6 +31,12 @@ std::unique_ptr<WindowsLoopbackListener> g_loopback;
 std::unique_ptr<IDiskMonitor>            g_disk;
 std::vector<std::string>                 g_pending_markers;
 bool                                     g_runtime_forced_on = false;
+// Post-patch Adobe wires its SocketTransport once at startup and keeps it
+// alive for the process lifetime. Tearing down the loopback listener /
+// IAT hook between profiler_start cycles would ECONNRESET that transport
+// and Adobe would stop sending. So once the pump is up we leave it up —
+// recording is toggled purely via CaptureController::start/stop.
+bool                                     g_runtime_pump_started = false;
 } // namespace
 
 // ----------- small FRE helpers --------------------------------------------
@@ -200,20 +206,31 @@ FREObject profiler_start(FREContext ctx, void*, std::uint32_t argc, FREObject* a
 
     if (!g_ctrl->start(cfg)) return make_bool(false);
 
-    if (!g_hook->install(g_ctrl.get())) {
-        g_ctrl->stop();
-        return make_bool(false);
-    }
+    if (!g_runtime_pump_started) {
+        // First start in this process: bring up the IAT hook, bind the
+        // loopback listener, and force-enable telemetry. These stay up
+        // across subsequent start/stop cycles.
+        if (!g_hook->install(g_ctrl.get())) {
+            g_ctrl->stop();
+            return make_bool(false);
+        }
 
-    g_loopback->start(static_cast<std::uint16_t>(port));
+        g_loopback->start(static_cast<std::uint16_t>(port));
 
-    g_runtime_forced_on = g_air_runtime->forceEnableTelemetry(host, port, features);
-    if (!g_runtime_forced_on) {
-        // Mode B refused — roll everything back.
-        g_loopback->stop();
-        g_hook->uninstall();
-        g_ctrl->stop();
-        return make_bool(false);
+        g_runtime_forced_on = g_air_runtime->forceEnableTelemetry(host, port, features);
+        if (!g_runtime_forced_on) {
+            g_loopback->stop();
+            g_hook->uninstall();
+            g_ctrl->stop();
+            return make_bool(false);
+        }
+
+        g_runtime_pump_started = true;
+    } else {
+        // Pump already running from a prior cycle — just repoint the
+        // hook's controller at the new CaptureController instance so
+        // in-flight bytes land in the fresh .flmc.
+        g_hook->install(g_ctrl.get());
     }
 
     g_pending_markers.clear();
@@ -223,15 +240,13 @@ FREObject profiler_start(FREContext ctx, void*, std::uint32_t argc, FREObject* a
 FREObject profiler_stop(FREContext, void*, std::uint32_t, FREObject*) {
     std::lock_guard<std::mutex> g(g_mu);
 
-    // Symmetric teardown: runtime telemetry destroyed, loopback listener
-    // closed, capture finalised. After stop(), the process is back to the
-    // zero-idle state it was in before Start.
-    if (g_runtime_forced_on && g_air_runtime) {
-        g_air_runtime->forceDisableTelemetry();
-        g_runtime_forced_on = false;
-    }
-    if (g_loopback) g_loopback->stop();
-    if (g_ctrl)     g_ctrl->stop();
+    // Toggle recording off — the capture file is finalised, but the
+    // loopback listener, IAT hook, and Adobe's forced-on telemetry pump
+    // stay live. Any further bytes Adobe pushes while we're idle are
+    // dropped by CaptureController (state=Idle bumps a drop counter).
+    // Tearing those three down here would ECONNRESET Adobe's long-lived
+    // SocketTransport and the next profiler_start would never see a byte.
+    if (g_ctrl) g_ctrl->stop();
     return make_bool(true);
 }
 

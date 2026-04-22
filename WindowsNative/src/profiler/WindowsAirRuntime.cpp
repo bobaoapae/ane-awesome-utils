@@ -340,9 +340,23 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
     auto** playerPtelemetrySlot = reinterpret_cast<void**>(
         reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetPlayerTelemetry);
 
-    if (*playerTransportSlot != nullptr || *playerTelemetrySlot != nullptr ||
+    // Post-patch state: if all three slots are already populated it means
+    // the captive Adobe AIR.dll has the fix_telemetry_mode_b patch applied
+    // (see C:/AIRSDKs/.../patches/fix_telemetry_mode_b/). In that scenario
+    // Adobe's startup already wired SocketTransport + Telemetry +
+    // PlayerTelemetry and — critically — AvmCore::ctor ran WITH
+    // PlayerTelemetry populated, so the sampler + method-name map are
+    // live. We don't want to recreate any of that; just note success and
+    // let the caller install the IAT send-hook. All start/stop control
+    // flows through the hook + loopback from here.
+    if (*playerTransportSlot != nullptr &&
+        *playerTelemetrySlot != nullptr &&
         *playerPtelemetrySlot != nullptr) {
-        last_error_.store(Error::AlreadyEnabled); return false;
+        last_error_.store(Error::Ok);
+        we_own_transport_.store(false, std::memory_order_release);
+        // `player` is already cached in player_ by tryCapturePlayer(); nothing
+        // else to persist.
+        return true;
     }
 
     alignas(8) std::uint8_t cfg_mem[air_rvas::kTelemetryConfigSize];
@@ -414,6 +428,7 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
                                air_rvas::kSocketTransportOffsetPtel) = playerTelemetry;
 
     g_fns.cfgDtor(cfg_mem);
+    we_own_transport_.store(true, std::memory_order_release);
     return true;
 }
 
@@ -446,9 +461,17 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
                                 std::memory_order_release);
     diag_slot_playertel_.store(reinterpret_cast<std::uintptr_t>(*playerPtelemetrySlot),
                                 std::memory_order_release);
-    if (*playerTransportSlot != nullptr || *playerTelemetrySlot != nullptr ||
+    // Post-patch state: all three slots already populated means the
+    // captive Adobe AIR.dll has the fix_telemetry_mode_b patch applied.
+    // Adobe's startup wired the trio AND AvmCore::ctor saw PlayerTelemetry
+    // populated at its gate, so the sampler + method-name map are live.
+    // Skip the replay and just succeed.
+    if (*playerTransportSlot != nullptr &&
+        *playerTelemetrySlot != nullptr &&
         *playerPtelemetrySlot != nullptr) {
-        last_error_.store(Error::AlreadyEnabled); return false;
+        last_error_.store(Error::Ok);
+        we_own_transport_.store(false, std::memory_order_release);
+        return true;
     }
 
     // x86 TelemetryConfig is 0x28 B — same 8 bool byte fields (0x00..0x07)
@@ -607,28 +630,38 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
     }
 
     g_fns.cfgDtor(cfg_mem);
+    we_own_transport_.store(true, std::memory_order_release);
     return true;
 }
 
 #endif
 
 // -------------------------------------------------------------------------
-// forceDisableTelemetry — same on both archs: null the three Player slots
-// and let MMgc reclaim the trio. See the comment in this function for why
-// we intentionally skip the C++ destructors.
+// forceDisableTelemetry — on the we-own-transport legacy path, null the
+// three Player slots so a fresh force-enable can build a new trio. On the
+// post-patch attach path, do NOTHING: Adobe's own SocketTransport +
+// Telemetry + PlayerTelemetry are wired through AvmCore's sampler and
+// any live pump callbacks; nulling them mid-flight would dangle those
+// references and crash on the next sample batch. Start/stop in the
+// patched world is controlled entirely through the IAT send-hook and
+// the loopback listener.
 // -------------------------------------------------------------------------
 
 void WindowsAirRuntime::forceDisableTelemetry() {
     void* player = player_.load(std::memory_order_acquire);
     if (player == nullptr || !initialized_.load(std::memory_order_acquire)) return;
 
-    // Just null the Player slots. The previous trio (SocketTransport,
-    // Telemetry, PlayerTelemetry) are unreachable from the Player after
-    // this; MMgc will reclaim them on the next GC cycle. We intentionally
-    // DO NOT call their C++ destructors — doing so crashes the runtime on
-    // a subsequent force-enable because subsystems (sampler, event bus,
-    // command registry) cache pointers we can't unregister without
-    // deeper RE. Leaking the objects is cheap and safe.
+    if (!we_own_transport_.load(std::memory_order_acquire)) {
+        // Post-patch attach path — leave Adobe's state alone.
+        return;
+    }
+
+    // Legacy path: we constructed the trio. Null the slots so a subsequent
+    // force-enable can build a fresh set. We intentionally DO NOT call the
+    // C++ destructors — doing so crashes the runtime on the next
+    // force-enable because subsystems (sampler, event bus, command
+    // registry) cache pointers we can't unregister without deeper RE.
+    // Leaking the objects until the process exits is cheap and safe.
     auto** playerTransportSlot  = reinterpret_cast<void**>(
         reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetSocketTransport);
     auto** playerTelemetrySlot  = reinterpret_cast<void**>(
@@ -639,6 +672,7 @@ void WindowsAirRuntime::forceDisableTelemetry() {
     *playerTransportSlot  = nullptr;
     *playerTelemetrySlot  = nullptr;
     *playerPtelemetrySlot = nullptr;
+    we_own_transport_.store(false, std::memory_order_release);
 }
 
 } // namespace ane::profiler
