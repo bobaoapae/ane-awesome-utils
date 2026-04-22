@@ -28,6 +28,9 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import okhttp3.Dns;
 
@@ -50,7 +53,17 @@ public class InternalDnsResolver {
         _staticHosts = new HashMap<>();
         _resolvedHosts = new HashMap<>();
         _negativeCache = new HashMap<>();
-        _executor= Executors.newCachedThreadPool();
+        // Bounded pool sized for max fan-out of a single lookup (7 resolvers:
+        // 3 DoH + 3 UDP + 1 system). Previous newCachedThreadPool was unbounded
+        // and kept idle threads for 60s, letting reconnect storms pile up 50+
+        // threads and contributing to Thread.nativeCreate OOM (Play Console #3/#12).
+        // DiscardOldestPolicy drops the oldest queued task under overload — DNS
+        // results are idempotently cached so a dropped lookup just retries.
+        _executor = new ThreadPoolExecutor(
+                2, 7,
+                30L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(21),
+                new ThreadPoolExecutor.DiscardOldestPolicy());
     }
 
     public void addStaticHost(String host, String address) {
