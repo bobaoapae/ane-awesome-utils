@@ -36,8 +36,11 @@ struct GuardFrame {
 
 static pthread_key_t g_tlsKey;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
-static void* g_origGetBefore = nullptr;
-static void* g_origGetAfter  = nullptr;
+static void* g_coreHandle    = nullptr;
+static void* g_origGetBefore    = nullptr;
+static void* g_origGetAfter     = nullptr;
+static void* g_origSetSelection = nullptr;
+static void* g_origGetMaxChars  = nullptr;
 
 static void makeKey() {
     pthread_key_create(&g_tlsKey, nullptr);
@@ -63,6 +66,12 @@ typedef jstring (*GetTextFn)(JNIEnv*, jobject, jint);
 static jstring callProtected(JNIEnv* env, jobject self, jint n, GetTextFn orig, const char* label) {
     if (!orig) return env->NewStringUTF("");
     pthread_once(&g_once, makeKey);
+
+    // Validation log — confirms wrapper is actually dispatched by ART (i.e.
+    // RegisterNatives targeted the correct classloader). Absence of this line
+    // when the user focuses an EditText means the guard is inert and needs
+    // the classloader probe revisited.
+    __android_log_print(ANDROID_LOG_DEBUG, TAG, "%s dispatched (n=%d)", label, n);
 
     GuardFrame frame;
     frame.prev = (GuardFrame*)pthread_getspecific(g_tlsKey);
@@ -96,6 +105,60 @@ static jstring JNICALL wrapGetAfter(JNIEnv* env, jobject self, jint n) {
     return callProtected(env, self, n, (GetTextFn)g_origGetAfter, "nativeGetTextAfterCursor");
 }
 
+// ── void(II) wrapper: nativeSetSelection(int start, int end) ──
+typedef void (*SetSelectionFn)(JNIEnv*, jobject, jint, jint);
+
+static void JNICALL wrapSetSelection(JNIEnv* env, jobject self, jint start, jint end) {
+    SetSelectionFn orig = (SetSelectionFn)g_origSetSelection;
+    if (!orig) return;
+    pthread_once(&g_once, makeKey);
+
+    __android_log_print(ANDROID_LOG_DEBUG, TAG,
+        "nativeSetSelection dispatched (start=%d end=%d)", start, end);
+
+    GuardFrame frame;
+    frame.prev = (GuardFrame*)pthread_getspecific(g_tlsKey);
+    pthread_setspecific(g_tlsKey, &frame);
+
+    if (sigsetjmp(frame.jb, 1) == 0) {
+        orig(env, self, start, end);
+    } else {
+        __android_log_print(ANDROID_LOG_WARN, TAG,
+            "recovered SIGSEGV in nativeSetSelection");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+
+    pthread_setspecific(g_tlsKey, frame.prev);
+}
+
+// ── int() wrapper: nativeGetTextBoxMaxChars() ──
+typedef jint (*GetMaxCharsFn)(JNIEnv*, jobject);
+
+static jint JNICALL wrapGetMaxChars(JNIEnv* env, jobject self) {
+    GetMaxCharsFn orig = (GetMaxCharsFn)g_origGetMaxChars;
+    if (!orig) return 0;
+    pthread_once(&g_once, makeKey);
+
+    __android_log_print(ANDROID_LOG_DEBUG, TAG,
+        "nativeGetTextBoxMaxChars dispatched");
+
+    GuardFrame frame;
+    frame.prev = (GuardFrame*)pthread_getspecific(g_tlsKey);
+    pthread_setspecific(g_tlsKey, &frame);
+
+    jint result = 0;
+    if (sigsetjmp(frame.jb, 1) == 0) {
+        result = orig(env, self);
+    } else {
+        __android_log_print(ANDROID_LOG_WARN, TAG,
+            "recovered SIGSEGV in nativeGetTextBoxMaxChars");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+
+    pthread_setspecific(g_tlsKey, frame.prev);
+    return result;
+}
+
 // from CrashSignalHandler.cpp
 extern "C" void AneAwesomeUtils_installSignalHandlerIfNeeded();
 
@@ -109,32 +172,73 @@ Java_br_com_redesurftank_aneawesomeutils_AirIMEGuard_nativeInstall(
     // would intercept first and the longjmp never fires.
     AneAwesomeUtils_installSignalHandlerIfNeeded();
 
+    // Android's System.loadLibrary dlopen's with RTLD_LOCAL, so libCore.so's
+    // symbols are NOT visible via RTLD_DEFAULT from other .so's. Open a fresh
+    // handle — dlopen of an already-loaded library returns the existing handle
+    // with the reference count bumped (cheap, safe, idempotent) and lets us
+    // dlsym through a specific scope that WILL resolve the JNI entries.
+    if (!g_coreHandle) {
+        g_coreHandle = dlopen("libCore.so", RTLD_NOW);
+        if (!g_coreHandle) {
+            __android_log_print(ANDROID_LOG_WARN, TAG,
+                "dlopen libCore.so failed: %s — AIR runtime not loaded yet",
+                dlerror());
+            return JNI_FALSE;
+        }
+        __android_log_print(ANDROID_LOG_INFO, TAG,
+            "dlopen libCore.so handle=%p", g_coreHandle);
+    }
     if (!g_origGetBefore) {
-        g_origGetBefore = dlsym(RTLD_DEFAULT,
+        g_origGetBefore = dlsym(g_coreHandle,
             "Java_com_adobe_air_AndroidInputConnection_nativeGetTextBeforeCursor");
     }
     if (!g_origGetAfter) {
-        g_origGetAfter = dlsym(RTLD_DEFAULT,
+        g_origGetAfter = dlsym(g_coreHandle,
             "Java_com_adobe_air_AndroidInputConnection_nativeGetTextAfterCursor");
     }
+    if (!g_origSetSelection) {
+        g_origSetSelection = dlsym(g_coreHandle,
+            "Java_com_adobe_air_AndroidInputConnection_nativeSetSelection");
+    }
+    if (!g_origGetMaxChars) {
+        g_origGetMaxChars = dlsym(g_coreHandle,
+            "Java_com_adobe_air_AndroidInputConnection_nativeGetTextBoxMaxChars");
+    }
+    // before/after are the primary known UAF sites — mandatory. set/maxChars
+    // are defensive coverage; if they're missing in this AIR build, skip them
+    // but still register the primary pair.
     if (!g_origGetBefore || !g_origGetAfter) {
         __android_log_print(ANDROID_LOG_WARN, TAG,
-            "symbol resolve failed (before=%p after=%p) — libCore not loaded yet?",
-            g_origGetBefore, g_origGetAfter);
+            "dlsym failed (before=%p after=%p) — libCore handle=%p, symbols missing?",
+            g_origGetBefore, g_origGetAfter, g_coreHandle);
         return JNI_FALSE;
     }
 
-    JNINativeMethod methods[] = {
-        {(char*)"nativeGetTextBeforeCursor", (char*)"(I)Ljava/lang/String;", (void*)wrapGetBefore},
-        {(char*)"nativeGetTextAfterCursor",  (char*)"(I)Ljava/lang/String;", (void*)wrapGetAfter},
-    };
-    jint rc = env->RegisterNatives(aicCls, methods, 2);
+    // Build methods array dynamically so a missing optional symbol doesn't
+    // skip the mandatory ones. RegisterNatives is all-or-nothing per call,
+    // and we want best-effort coverage.
+    JNINativeMethod methods[4];
+    int methodCount = 0;
+    methods[methodCount++] = {(char*)"nativeGetTextBeforeCursor",
+        (char*)"(I)Ljava/lang/String;", (void*)wrapGetBefore};
+    methods[methodCount++] = {(char*)"nativeGetTextAfterCursor",
+        (char*)"(I)Ljava/lang/String;", (void*)wrapGetAfter};
+    if (g_origSetSelection) {
+        methods[methodCount++] = {(char*)"nativeSetSelection",
+            (char*)"(II)V", (void*)wrapSetSelection};
+    }
+    if (g_origGetMaxChars) {
+        methods[methodCount++] = {(char*)"nativeGetTextBoxMaxChars",
+            (char*)"()I", (void*)wrapGetMaxChars};
+    }
+    jint rc = env->RegisterNatives(aicCls, methods, methodCount);
     if (rc != JNI_OK) {
         __android_log_print(ANDROID_LOG_WARN, TAG, "RegisterNatives failed rc=%d", rc);
         if (env->ExceptionCheck()) env->ExceptionClear();
         return JNI_FALSE;
     }
     __android_log_print(ANDROID_LOG_INFO, TAG,
-        "installed (before=%p after=%p)", g_origGetBefore, g_origGetAfter);
+        "installed %d methods (before=%p after=%p setSel=%p maxChars=%p)",
+        methodCount, g_origGetBefore, g_origGetAfter, g_origSetSelection, g_origGetMaxChars);
     return JNI_TRUE;
 }
