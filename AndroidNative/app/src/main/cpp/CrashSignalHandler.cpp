@@ -17,6 +17,9 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <unwind.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <linux/limits.h>
 
 #define TAG "CrashSignalHandler"
 #define MAX_FRAMES 32
@@ -50,6 +53,20 @@ static bool g_signalsInstalled = false;
 // written here cannot be decoded when the next session reads the file back.
 static unsigned char g_logXorKey[32] = {0};
 static int g_logXorKeyLen = 0;
+
+// ── Breadcrumb: runtime snapshot updated by RuntimeStatsCollector every 30s.
+// Read async-signal-safely from the signal handler to append a "state at
+// moment of death" footer to the crash log. volatile because it's written
+// from the main looper thread and read from whichever thread crashed — we
+// tolerate stale/inconsistent reads (single-tick skew is acceptable for
+// diagnosis; no synchronization needed to keep signal handler safe).
+static volatile int  g_bc_threads      = -1;
+static volatile long g_bc_jvm_used_kb  = -1;
+static volatile long g_bc_jvm_max_kb   = -1;
+static volatile long g_bc_native_kb    = -1;
+static volatile long g_bc_vmrss_kb     = -1;
+static volatile long g_bc_vmsize_kb    = -1;
+static volatile long g_bc_time_sec     =  0;  // 0 = never updated
 
 // Weak hook — defined by AirIMEGuard.cpp when linked in. Called at the top of
 // signalHandler to let the guard intercept SIGSEGV raised inside a protected
@@ -123,6 +140,111 @@ static void writeHex(int fd, off_t* offset, uintptr_t val) {
         val >>= 4;
     }
     writeToLog(fd, offset, buf);
+}
+
+// Manual base-10 itoa — async-signal-safe (no locale, no malloc, no snprintf).
+// Writes into caller's fd/offset via writeToLog which is already safe.
+static void writeDec(int fd, off_t* offset, long val) {
+    char buf[24];
+    buf[23] = 0;
+    int pos = 23;
+    bool negative = val < 0;
+    unsigned long u = negative ? (unsigned long)(-(val + 1)) + 1UL : (unsigned long)val;
+    if (u == 0UL) {
+        buf[--pos] = '0';
+    } else {
+        while (u && pos > 0) {
+            buf[--pos] = (char)('0' + (u % 10UL));
+            u /= 10UL;
+        }
+    }
+    if (negative && pos > 0) buf[--pos] = '-';
+    writeToLog(fd, offset, buf + pos);
+}
+
+// Copy the contents of a small /proc file (maps, status, comm) into the log,
+// XOR-encoded the same way. Reads chunked into a stack buffer. Async-signal-safe:
+// open/read/close are syscalls, no libc allocation. Returns false if file missing.
+static bool writeFileContents(int destFd, off_t* offset, const char* srcPath) {
+    int src = open(srcPath, O_RDONLY);
+    if (src < 0) return false;
+    char buf[512];
+    ssize_t n;
+    while ((n = read(src, buf, sizeof(buf) - 1)) > 0) {
+        buf[n] = 0;
+        writeToLog(destFd, offset, buf);
+    }
+    close(src);
+    return true;
+}
+
+// Dump the `comm` (thread name) plus minimal scheduling state for every thread
+// under /proc/self/task. One line per thread: "tid=<N> name=<str>".
+// Signal-safe: only opendir/readdir/open/read/close. Never reads user-space memory.
+// Reused from the faulting thread's signal handler; listing /proc is OK from a
+// signal context because the kernel serves it from in-kernel structures.
+static void writeThreadList(int destFd, off_t* offset) {
+    // Poor-man's opendir: read /proc/self/task directly via getdents is messy —
+    // use opendir/readdir which are async-signal-safe on bionic (they're thin
+    // wrappers around getdents64 + a stack-allocated dirent buffer).
+    int taskFd = open("/proc/self/task", O_RDONLY | O_DIRECTORY);
+    if (taskFd < 0) return;
+
+    // Use linux_dirent64 layout directly — bionic's opendir allocates, which we
+    // want to avoid in the signal path. getdents64 returns a packed array.
+    char buf[4096];
+    for (;;) {
+        long n = syscall(SYS_getdents64, taskFd, buf, sizeof(buf));
+        if (n <= 0) break;
+        for (long pos = 0; pos < n; ) {
+            struct linux_dirent64 {
+                ino64_t        d_ino;
+                off64_t        d_off;
+                unsigned short d_reclen;
+                unsigned char  d_type;
+                char           d_name[];
+            };
+            auto* d = (linux_dirent64*)(buf + pos);
+            pos += d->d_reclen;
+            const char* name = d->d_name;
+            // Skip "." / ".."
+            if (name[0] == '.' && (name[1] == 0 || (name[1] == '.' && name[2] == 0))) continue;
+            writeToLog(destFd, offset, "  tid=");
+            writeToLog(destFd, offset, name);
+            // Read /proc/self/task/<tid>/comm for the thread name
+            char commPath[64];
+            int cp = 0;
+            const char* pre = "/proc/self/task/";
+            while (pre[cp]) { commPath[cp] = pre[cp]; cp++; }
+            int nlen = 0;
+            while (name[nlen] && cp + nlen < 58) {
+                commPath[cp + nlen] = name[nlen];
+                nlen++;
+            }
+            const char* suf = "/comm";
+            int s = 0;
+            while (suf[s] && cp + nlen + s < 63) {
+                commPath[cp + nlen + s] = suf[s];
+                s++;
+            }
+            commPath[cp + nlen + s] = 0;
+            int commFd = open(commPath, O_RDONLY);
+            if (commFd >= 0) {
+                char commBuf[24];
+                ssize_t cr = read(commFd, commBuf, sizeof(commBuf) - 1);
+                close(commFd);
+                if (cr > 0) {
+                    // strip trailing \n
+                    while (cr > 0 && (commBuf[cr-1] == '\n' || commBuf[cr-1] == '\r')) cr--;
+                    commBuf[cr] = 0;
+                    writeToLog(destFd, offset, " name=");
+                    writeToLog(destFd, offset, commBuf);
+                }
+            }
+            writeToLog(destFd, offset, "\n");
+        }
+    }
+    close(taskFd);
 }
 
 static void signalHandler(int sig, siginfo_t* info, void* ctx) {
@@ -247,6 +369,106 @@ static void signalHandler(int sig, siginfo_t* info, void* ctx) {
         }
     }
 
+    // Register dump of the faulting thread — every arm64 general-purpose
+    // register, SP, PC, and PSTATE. Unlike the tombstone's minimal dump we
+    // include x0-x30 so later Ghidra analysis can correlate argument/return
+    // slots, callee-saved regs, and frame layouts at the fault site. All
+    // values are stable in the signal context; reading them is free.
+    if (ctx) {
+        writeToLog(fd, &offset, "---REGISTERS---\n");
+        ucontext_t* uc = (ucontext_t*)ctx;
+#if defined(__aarch64__)
+        for (int i = 0; i < 31; i++) {
+            writeToLog(fd, &offset, "x");
+            writeDec(fd, &offset, (long)i);
+            writeToLog(fd, &offset, "=");
+            writeHex(fd, &offset, (uintptr_t)uc->uc_mcontext.regs[i]);
+            writeToLog(fd, &offset, (i % 4 == 3) ? "\n" : " ");
+        }
+        writeToLog(fd, &offset, "sp=");
+        writeHex(fd, &offset, (uintptr_t)uc->uc_mcontext.sp);
+        writeToLog(fd, &offset, " pc=");
+        writeHex(fd, &offset, (uintptr_t)uc->uc_mcontext.pc);
+        writeToLog(fd, &offset, " pstate=");
+        writeHex(fd, &offset, (uintptr_t)uc->uc_mcontext.pstate);
+        writeToLog(fd, &offset, "\n");
+#elif defined(__arm__)
+        const char* names[] = {
+            "r0","r1","r2","r3","r4","r5","r6","r7",
+            "r8","r9","r10","fp","ip","sp","lr","pc"
+        };
+        unsigned long regs[16];
+        regs[0]  = uc->uc_mcontext.arm_r0;
+        regs[1]  = uc->uc_mcontext.arm_r1;
+        regs[2]  = uc->uc_mcontext.arm_r2;
+        regs[3]  = uc->uc_mcontext.arm_r3;
+        regs[4]  = uc->uc_mcontext.arm_r4;
+        regs[5]  = uc->uc_mcontext.arm_r5;
+        regs[6]  = uc->uc_mcontext.arm_r6;
+        regs[7]  = uc->uc_mcontext.arm_r7;
+        regs[8]  = uc->uc_mcontext.arm_r8;
+        regs[9]  = uc->uc_mcontext.arm_r9;
+        regs[10] = uc->uc_mcontext.arm_r10;
+        regs[11] = uc->uc_mcontext.arm_fp;
+        regs[12] = uc->uc_mcontext.arm_ip;
+        regs[13] = uc->uc_mcontext.arm_sp;
+        regs[14] = uc->uc_mcontext.arm_lr;
+        regs[15] = uc->uc_mcontext.arm_pc;
+        for (int i = 0; i < 16; i++) {
+            writeToLog(fd, &offset, names[i]);
+            writeToLog(fd, &offset, "=");
+            writeHex(fd, &offset, (uintptr_t)regs[i]);
+            writeToLog(fd, &offset, (i % 4 == 3) ? "\n" : " ");
+        }
+        writeToLog(fd, &offset, "cpsr=");
+        writeHex(fd, &offset, (uintptr_t)uc->uc_mcontext.arm_cpsr);
+        writeToLog(fd, &offset, "\n");
+#else
+        writeToLog(fd, &offset, "(unsupported arch)\n");
+#endif
+    }
+
+    // /proc/self/maps — full memory map of every loaded .so with base addresses.
+    // ESSENTIAL for symbolication: converts raw PCs from the backtrace into
+    // (library_name, offset_within_library) pairs that we can feed into
+    // addr2line/Ghidra for every loaded library, not just the stripped ones.
+    writeToLog(fd, &offset, "---MAPS---\n");
+    writeFileContents(fd, &offset, "/proc/self/maps");
+
+    // /proc/self/status — complete process-level counters (thread count, VmPeak,
+    // VmLck, SigQ, etc). Superset of the 30s breadcrumb.
+    writeToLog(fd, &offset, "---STATUS---\n");
+    writeFileContents(fd, &offset, "/proc/self/status");
+
+    // Thread roster — name + tid for every live thread. Useful when the ANR
+    // or crash happens due to contention: we can identify which worker was
+    // stuck by name even without a full stack for it.
+    writeToLog(fd, &offset, "---THREADS---\n");
+    writeThreadList(fd, &offset);
+
+    // Breadcrumb footer — runtime snapshot from the last RuntimeStatsCollector
+    // tick (updated every 30s). Attaches thread count + heap pressure at the
+    // moment of death. Critical for OOM diagnosis: Play Console SIGABRT tombstones
+    // alone don't tell us if the process was near memory limits; these numbers do.
+    if (g_bc_time_sec > 0) {
+        writeToLog(fd, &offset, "---BREADCRUMB---\n");
+        writeToLog(fd, &offset, "snapshot_age_sec=");
+        writeDec(fd, &offset, (long)(time(nullptr) - g_bc_time_sec));
+        writeToLog(fd, &offset, "\nthreads=");
+        writeDec(fd, &offset, (long)g_bc_threads);
+        writeToLog(fd, &offset, "\njvm_used_kb=");
+        writeDec(fd, &offset, g_bc_jvm_used_kb);
+        writeToLog(fd, &offset, "\njvm_max_kb=");
+        writeDec(fd, &offset, g_bc_jvm_max_kb);
+        writeToLog(fd, &offset, "\nnative_kb=");
+        writeDec(fd, &offset, g_bc_native_kb);
+        writeToLog(fd, &offset, "\nvmrss_kb=");
+        writeDec(fd, &offset, g_bc_vmrss_kb);
+        writeToLog(fd, &offset, "\nvmsize_kb=");
+        writeDec(fd, &offset, g_bc_vmsize_kb);
+        writeToLog(fd, &offset, "\n");
+    }
+
     writeToLog(fd, &offset, "========================\n");
 
     if (fd >= 0) {
@@ -319,6 +541,27 @@ Java_br_com_redesurftank_aneawesomeutils_NativeLogManager_nativeInstallSignalHan
 
     AneAwesomeUtils_installSignalHandlerIfNeeded();
     __android_log_print(ANDROID_LOG_INFO, TAG, "Crash log configured (log: %s, keyLen: %d)", g_logFilePath, g_logXorKeyLen);
+}
+
+/**
+ * Called from RuntimeStatsCollector.tick() on the main looper every 30s.
+ * Writes breadcrumb slots that the crash signal handler reads without
+ * synchronization — tolerating single-tick skew in exchange for signal
+ * safety. No allocations, no logging, ~6 aligned stores. Zero overhead
+ * when not called.
+ */
+JNIEXPORT void JNICALL
+Java_br_com_redesurftank_aneawesomeutils_RuntimeStatsCollector_nativeUpdateBreadcrumb(
+        JNIEnv* /*env*/, jclass /*clazz*/,
+        jint threads, jlong jvmUsedKb, jlong jvmMaxKb,
+        jlong nativeKb, jlong vmRssKb, jlong vmSizeKb) {
+    g_bc_threads     = threads;
+    g_bc_jvm_used_kb = jvmUsedKb;
+    g_bc_jvm_max_kb  = jvmMaxKb;
+    g_bc_native_kb   = nativeKb;
+    g_bc_vmrss_kb    = vmRssKb;
+    g_bc_vmsize_kb   = vmSizeKb;
+    g_bc_time_sec    = (long)time(nullptr);
 }
 
 } // extern "C"
