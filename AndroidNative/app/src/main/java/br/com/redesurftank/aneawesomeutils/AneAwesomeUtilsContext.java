@@ -165,6 +165,8 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(ReadLogFile.KEY, new ReadLogFile());
         functionMap.put(GetLogResult.KEY, new GetLogResult());
         functionMap.put(DeleteLogFile.KEY, new DeleteLogFile());
+        functionMap.put(PackageCrashBundle.KEY, new PackageCrashBundle());
+        functionMap.put(DeleteCrashBundle.KEY, new DeleteCrashBundle());
         functionMap.put(NotifyBackground.KEY, new NotifyBackground());
         functionMap.put(NotifyForeground.KEY, new NotifyForeground());
 
@@ -1763,7 +1765,10 @@ public class AneAwesomeUtilsContext extends FREContext {
             try {
                 String date = args[0].getAsString();
                 AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
-                new Thread(() -> {
+                // Reuse the shared 4-thread background executor instead of spawning
+                // a raw Thread per call — prevents unbounded thread accumulation
+                // under AS3 polling patterns.
+                ctx._backGroundExecutor.execute(() -> {
                     try {
                         byte[] data = NativeLogManager.readLogFile(date);
                         synchronized (ctx) {
@@ -1773,11 +1778,70 @@ public class AneAwesomeUtilsContext extends FREContext {
                     } catch (Exception e) {
                         ctx.safeDispatchEvent("log;readError", e.getMessage());
                     }
-                }).start();
+                });
             } catch (Exception e) {
                 ((AneAwesomeUtilsContext) context).safeDispatchEvent("log;readError", e.getMessage());
             }
             return null;
+        }
+    }
+
+    /**
+     * Packages a crash session's log + metadata into a ZIP on disk and dispatches
+     * "log;bundleReady" with the absolute path (or "log;bundleError" on failure).
+     * AS3 then reads the ZIP bytes via readFileToByteArray and uploads as
+     * application/zip. Replaces the old decrypt-then-upload-plaintext flow —
+     * log stays encrypted-at-rest until packaged, then travels as ZIP bytes.
+     *
+     * args[0] = date ("YYYY-MM-DD" or "")
+     * args[1] = appVersion (string)
+     * args[2] = sessionId (string, optional)
+     */
+    public static class PackageCrashBundle implements FREFunction {
+        public static final String KEY = "awesomeUtils_packageCrashBundle";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            final AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+            try {
+                final String date = args.length > 0 ? args[0].getAsString() : "";
+                final String appVersion = args.length > 1 ? args[1].getAsString() : "";
+                final String sessionId = args.length > 2 ? args[2].getAsString() : "";
+                final String storagePath = ctx.getActivity().getFilesDir().getAbsolutePath();
+                ctx._backGroundExecutor.execute(() -> {
+                    try {
+                        String zipPath = CrashBundleBuilder.build(storagePath, date, appVersion, sessionId);
+                        if (zipPath == null) {
+                            ctx.safeDispatchEvent("log;bundleError", "build returned null");
+                            return;
+                        }
+                        ctx.safeDispatchEvent("log;bundleReady", zipPath);
+                    } catch (Exception e) {
+                        ctx.safeDispatchEvent("log;bundleError", String.valueOf(e.getMessage()));
+                    }
+                });
+            } catch (Exception e) {
+                ctx.safeDispatchEvent("log;bundleError", String.valueOf(e.getMessage()));
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Deletes a ZIP bundle by absolute path — called by AS3 after a successful
+     * upload to free disk. Synchronous; returns true on success.
+     */
+    public static class DeleteCrashBundle implements FREFunction {
+        public static final String KEY = "awesomeUtils_deleteCrashBundle";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String path = args[0].getAsString();
+                return FREObject.newObject(CrashBundleBuilder.delete(path));
+            } catch (Exception e) {
+                try { return FREObject.newObject(false); } catch (Exception ignored) { return null; }
+            }
         }
     }
 

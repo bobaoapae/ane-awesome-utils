@@ -69,6 +69,7 @@ public class AneAwesomeUtils {
     private var _networkEventDispatcher:EventDispatcher;
     private var _logReadCallbacks:Object;
     private var _unexpectedShutdownCallback:Function;
+    private var _bundleCallbacks:Object;
 
     function AneAwesomeUtils() {
         _extContext = ExtensionContext.createExtensionContext("br.com.redesurftank.aneawesomeutils", "");
@@ -120,6 +121,7 @@ public class AneAwesomeUtils {
         _networkEventDispatcher = null;
         _logReadCallbacks = null;
         _unexpectedShutdownCallback = null;
+        _bundleCallbacks = null;
     }
 
     private function getWebSocket(id:String):AneWebSocket {
@@ -418,6 +420,43 @@ public class AneAwesomeUtils {
             throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
         }
         return _extContext.call("awesomeUtils_deleteLogFile", date ? date : "") as Boolean;
+    }
+
+    /**
+     * Package a crash session's log + device metadata into a single ZIP on disk.
+     * The native side XOR-decrypts the log, writes crash.log + metadata.json into
+     * a ZIP under {appStorage}/crash-bundles/, and asynchronously dispatches
+     * either "log;bundleReady" (with the zip path) or "log;bundleError".
+     *
+     * Typical flow: app detects unexpected shutdown → calls this → receives the
+     * path in onSuccess → reads the ZIP bytes (via readFileToByteArray) → uploads
+     * them as application/zip → calls deleteCrashBundle(path) on success.
+     *
+     * @param date        "YYYY-MM-DD" for a specific day, or null/empty for "all logs on the latest day"
+     * @param appVersion  version string included in metadata.json
+     * @param sessionId   optional session identifier surfaced in metadata.json
+     * @param onSuccess   Function(zipPath:String):void
+     * @param onError     Function(error:Error):void
+     */
+    public function packageCrashBundle(date:String, appVersion:String, sessionId:String,
+                                        onSuccess:Function = null, onError:Function = null):void {
+        if (!_successInit) {
+            throw new Error("ANE not initialized properly. Please check if the extension is added to your AIR project.");
+        }
+        _bundleCallbacks = {onSuccess: onSuccess, onError: onError};
+        _extContext.call("awesomeUtils_packageCrashBundle",
+                         date ? date : "",
+                         appVersion ? appVersion : "",
+                         sessionId ? sessionId : "");
+    }
+
+    /**
+     * Delete a crash bundle ZIP by absolute path. Call after successful upload.
+     * Synchronous; returns true on success.
+     */
+    public function deleteCrashBundle(zipPath:String):Boolean {
+        if (!_successInit || !zipPath) return false;
+        return _extContext.call("awesomeUtils_deleteCrashBundle", zipPath) as Boolean;
     }
 
     /**
@@ -745,6 +784,18 @@ public class AneAwesomeUtils {
                     _logReadCallbacks.onError(new Error(param1.level));
                 }
                 _logReadCallbacks = null;
+                break;
+            case "bundleReady":
+                if (_bundleCallbacks && _bundleCallbacks.onSuccess) {
+                    _bundleCallbacks.onSuccess(param1.level);
+                }
+                _bundleCallbacks = null;
+                break;
+            case "bundleError":
+                if (_bundleCallbacks && _bundleCallbacks.onError) {
+                    _bundleCallbacks.onError(new Error(param1.level));
+                }
+                _bundleCallbacks = null;
                 break;
         }
     }
