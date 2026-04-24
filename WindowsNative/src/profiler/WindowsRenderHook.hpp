@@ -19,6 +19,7 @@ public:
     ~WindowsRenderHook();
 
     bool install(DeepProfilerController* controller);
+    void pause();
     void uninstall();
     bool installed() const noexcept { return installed_; }
 

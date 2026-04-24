@@ -206,7 +206,7 @@ FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv)
 FREObject profiler_stop(FREContext, void*, std::uint32_t, FREObject*) {
     std::lock_guard<std::mutex> g(g_mu);
     if (!g_ctrl) return make_bool(true);
-    if (g_render_hook) g_render_hook->uninstall();
+    if (g_render_hook) g_render_hook->pause();
     if (g_as3_object_hook) g_as3_object_hook->uninstall();
     if (g_memory_hook) g_memory_hook->uninstall();
     return make_bool(g_ctrl->stop());

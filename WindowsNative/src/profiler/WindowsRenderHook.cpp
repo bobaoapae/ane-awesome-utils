@@ -1685,7 +1685,9 @@ bool WindowsRenderHook::install(DeepProfilerController* controller) {
     HWND primary_window = process_window != nullptr ? process_window : g_dummy_window;
     bool installed_any = false;
 
-    g_d3d9_module = LoadLibraryA("d3d9.dll");
+    if (g_d3d9_module == nullptr) {
+        g_d3d9_module = LoadLibraryA("d3d9.dll");
+    }
     if (g_d3d9_module == nullptr) {
         g_last_failure_stage.store(1, std::memory_order_relaxed);
     } else {
@@ -1738,6 +1740,23 @@ bool WindowsRenderHook::install(DeepProfilerController* controller) {
     return true;
 }
 
+void WindowsRenderHook::pause() {
+    g_render_capture_active.store(false, std::memory_order_release);
+    g_controller.store(nullptr, std::memory_order_release);
+    reset_frame_accumulators();
+    {
+        std::lock_guard<std::mutex> lock(g_texture_mu);
+        g_textures.clear();
+        g_texture_locks.clear();
+        g_surfaces.clear();
+        g_surface_locks.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_runtime_device_mu);
+        g_runtime_devices.clear();
+    }
+}
+
 void WindowsRenderHook::uninstall() {
     g_render_capture_active.store(false, std::memory_order_release);
     g_controller.store(nullptr, std::memory_order_release);
@@ -1757,14 +1776,11 @@ void WindowsRenderHook::uninstall() {
         DestroyWindow(g_dummy_window);
         g_dummy_window = nullptr;
     }
-    if (g_d3d9_module != nullptr) {
-        FreeLibrary(g_d3d9_module);
-        g_d3d9_module = nullptr;
-    }
-    if (g_d3d11_module != nullptr) {
-        FreeLibrary(g_d3d11_module);
-        g_d3d11_module = nullptr;
-    }
+    // Do not FreeLibrary D3D modules here. AIR can continue rendering after a
+    // capture stops, and some renderer paths keep COM vtables/function pointers
+    // whose module lifetime is not obvious from the ANE side. Restoring vtable
+    // slots removes hook overhead; keeping the modules loaded avoids invalidating
+    // a renderer that is still alive.
     installed_ = false;
 }
 

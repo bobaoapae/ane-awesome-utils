@@ -199,8 +199,10 @@ by scanning allocation events whose timestamps fall inside that frame interval.
 
 `profilerStart(..., { render: true })` enables optional Windows render
 instrumentation. This is intentionally disabled by default and has no active
-runtime hook when a capture is not running. `profilerStop()` restores patched
-vtable slots so later non-render captures do not pay render-hook overhead.
+runtime hook until the first render-enabled capture. `profilerStop()` pauses
+render capture, clears the active controller and stops writing events
+immediately. The physical vtable restore is deferred to extension shutdown to
+avoid racing AIR's renderer while it still owns live D3D/DXGI objects.
 
 On AIR SDK `51.1.3.10`, the hook currently installs the stable Present paths:
 
@@ -208,12 +210,8 @@ On AIR SDK `51.1.3.10`, the hook currently installs the stable Present paths:
   swap-chain `Present`, `GetSwapChain`, `CreateAdditionalSwapChain`
 - D3D9 texture creation/update, render-target changes, clears and draw calls
 - DXGI `Present` / `Present1`
-
-D3D11 device/context draw and upload hooks are intentionally not installed by
-default yet. The AIR E2E runtime uses a D3D11/DXGI renderer, and the stable
-validated signal is DXGI Present timing. Detailed D3D11 draw/upload slots need
-separate isolated validation before they can be enabled without risking runtime
-heap corruption.
+- D3D11 texture creation, `UpdateSubresource`, draw calls, render-target
+  changes and clears, discovered from a dummy D3D11 device/context
 
 The profiler writes one `render_frame` event per observed Present instead of
 one event per draw call. The event aggregates counters since the previous
@@ -222,7 +220,7 @@ Present:
 - frame interval and Present call duration
 - estimated CPU time between Present calls
 - draw/blit calls and primitive estimates when the backend goes through hooked
-  D3D9 methods
+  D3D9/D3D11 methods
 - texture/surface create and upload byte estimates when dimensions/formats are
   known
 - render-target changes and clears
@@ -232,8 +230,8 @@ Known limits:
 - The CPU time field is `interval - present`, so it is a frame-interval signal,
   not an exact AS3/display-list CPU attribution.
 - Draw/upload counters are backend dependent. The x64 and x86 E2E scenarios
-  currently observe real DXGI Presents and emit render frames, but AIR does not
-  route that synthetic scene through the installed D3D9 draw/blit/upload hooks,
+  currently observe real Presents and emit render frames, but AIR does not
+  route that synthetic scene through the hooked D3D9/D3D11 draw/upload slots,
   so draw/upload counters are zero in that smoke test.
 - If a runtime uses an unhooked renderer path, `renderDiagnosticsReady` can be
   true while `renderHookPresentCalls` or `renderHookFrames` stays zero; this is
@@ -277,9 +275,9 @@ Check `profilerGetStatus()` during a capture:
   render-enabled capture when a hooked Present path is active.
 - `renderHookDrawCalls`, `renderHookPrimitiveCount`,
   `renderHookTextureUploadBytes` and `renderHookTextureCreateBytes` grow only
-  when the active AIR renderer uses a hooked D3D9 operation that exposes those
-  details. They are expected to stay zero for the current AIR D3D11/DXGI E2E
-  renderer because only Present timing is installed for that path.
+  when the active AIR renderer uses a hooked D3D9/D3D11 operation that exposes
+  those details. They are expected to stay zero for the current E2E renderer
+  even though Present timing is captured.
 
 ## Validation
 
