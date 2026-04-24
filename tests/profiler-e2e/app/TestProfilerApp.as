@@ -15,7 +15,7 @@
 //                memory hooks and periodic snapshots enabled.
 //                Output: test_capture_C.aneprof
 //
-//   Scenario P:  Render performance capture with D3D9 hook enabled.
+//   Scenario P:  Render performance capture with D3D/DXGI hook enabled.
 //                Output: test_capture_P.aneprof
 //
 //   Scenario E:  Hidden listener leak: short-lived views are removed from the

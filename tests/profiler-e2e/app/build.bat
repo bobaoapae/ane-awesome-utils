@@ -5,10 +5,10 @@ rem Builds the TestProfilerApp SWF and packages it into a captive-runtime
 rem bundle so the app is fully self-contained (no adl, no installed AIR).
 rem
 rem Usage:
-rem   build.bat                 -- x64 build (default)
-rem   build.bat x86             -- x86 build
-rem   build.bat clean           -- wipes output then x64
-rem   build.bat clean x86       -- wipes output then x86
+rem   build.bat                      -- x64 build, maxD3D 14 (default)
+rem   build.bat x86                  -- x86 build, maxD3D 14
+rem   build.bat d3d9                 -- x64 build, maxD3D 9
+rem   build.bat clean x86 d3d9       -- clean, x86 build, maxD3D 9
 
 cd /d "%~dp0"
 
@@ -23,21 +23,43 @@ set CERT=%OUT%\.testcert.p12
 set CERT_PASS=testpass
 
 set ARCH=x64
+set CLEAN=0
+set MAXD3D=14
+
+:parse_args
+if "%~1"=="" goto args_done
+if /I "%~1"=="clean" set CLEAN=1
+if /I "%~1"=="x86" set ARCH=x86
+if /I "%~1"=="x64" set ARCH=x64
+if /I "%~1"=="d3d9" set MAXD3D=9
+if /I "%~1"=="d3d11" set MAXD3D=14
+shift
+goto parse_args
+
+:args_done
 set DESCRIPTOR=TestProfilerApp-app.xml
-if /I "%~1"=="clean" (
-    if exist "%OUT%" rmdir /s /q "%OUT%"
-    if /I "%~2"=="x86" set ARCH=x86
-) else (
-    if /I "%~1"=="x86" set ARCH=x86
-)
 if /I "%ARCH%"=="x86" set DESCRIPTOR=TestProfilerApp-app-x86.xml
-echo [build] target architecture: %ARCH% (descriptor: %DESCRIPTOR%)
+set GENERATED_DESCRIPTOR=%OUT%\TestProfilerApp-%ARCH%-d3d%MAXD3D%-app.xml
+if "%CLEAN%"=="1" (
+    if exist "%OUT%" rmdir /s /q "%OUT%"
+)
+echo [build] target architecture: %ARCH% (descriptor: %DESCRIPTOR%, maxD3D=%MAXD3D%)
 
 if not exist "%OUT%" mkdir "%OUT%"
 if exist "%OUT%\TestProfilerApp" rmdir /s /q "%OUT%\TestProfilerApp"
 if exist "%OUT%\TestProfilerApp.swf" del /q "%OUT%\TestProfilerApp.swf"
 if exist "%EXT_DIR%" rmdir /s /q "%EXT_DIR%"
 mkdir "%EXT_DIR%"
+
+set SOURCE_DESCRIPTOR=%CD%\%DESCRIPTOR%
+set MAXD3D_VALUE=%MAXD3D%
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$xml = [IO.File]::ReadAllText($env:SOURCE_DESCRIPTOR); $nl = [Environment]::NewLine; $block = '  <windows>' + $nl + '    <maxD3D>' + $env:MAXD3D_VALUE + '</maxD3D>' + $nl + '  </windows>' + $nl; if ($xml -match '<windows>') { $xml = [regex]::Replace($xml, '(?s)\s*<windows>.*?</windows>\s*', $nl + $block) } else { $xml = $xml -replace '</initialWindow>', ('</initialWindow>' + $nl + $block) }; $enc = New-Object System.Text.UTF8Encoding($false); [IO.File]::WriteAllText($env:GENERATED_DESCRIPTOR, $xml, $enc)"
+if errorlevel 1 exit /b 1
+if not exist "%GENERATED_DESCRIPTOR%" (
+    echo [build] ERROR: generated descriptor missing: %GENERATED_DESCRIPTOR%
+    exit /b 1
+)
 
 if not exist "%ANE_FILE%" (
     echo [build] ERROR: ANE not found at %ANE_FILE%. Run `python build-all.py package`.
@@ -73,7 +95,7 @@ call "%SDK%\bin\adt.bat" -package ^
     -storetype pkcs12 -keystore "%CERT%" -storepass %CERT_PASS% -tsa none ^
     -target bundle ^
     "%OUT%\TestProfilerApp" ^
-    %DESCRIPTOR% ^
+    "%GENERATED_DESCRIPTOR%" ^
     -extdir "%EXT_DIR%" ^
     -C "%OUT%" TestProfilerApp.swf
 if errorlevel 1 exit /b 1

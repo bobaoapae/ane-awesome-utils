@@ -292,6 +292,7 @@ The E2E harness runs scenarios A/B/P/C/R/E/T/M/S/L for both architectures:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x64
+powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x64 -D3D d3d9
 powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x86
 ```
 
@@ -300,7 +301,10 @@ kill-test and only runs with `-WithKillTest`.
 
 Scenario C validates timing + memory with real runtime allocation/free pairing.
 Scenario P validates render-enabled captures by requiring native Present calls,
-`render_frame` events and `render_frame_summary` output.
+`render_frame` events and `render_frame_summary` output. The harness injects
+`<windows><maxD3D>14</maxD3D></windows>` by default, matching the client D3D11
+path. Pass `-D3D d3d9` to generate `<maxD3D>9</maxD3D>` and validate the D3D9
+path.
 Scenario R validates the real AS3 typed edge hooks by requiring display-list and
 event-listener add/remove counters plus active `as3_reference_ex` /
 `as3_reference_remove` analyzer output.

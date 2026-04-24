@@ -1,6 +1,7 @@
 # Automated E2E test harness for the .aneprof profiler subsystem.
 #
 #   pwsh run_test.ps1                 # normal run: scenarios A+B+P+C+R+E+T+M+S+L
+#   pwsh run_test.ps1 -D3D d3d9       # force descriptor <maxD3D>9</maxD3D>
 #   pwsh run_test.ps1 -Rebuild        # force rebuild
 #   pwsh run_test.ps1 -SkipBuild      # launch + inspect only
 #   pwsh run_test.ps1 -WithKillTest   # additionally run scenario D with kill
@@ -26,6 +27,7 @@
 param(
     [int]    $TimeoutSec = 120,
     [ValidateSet('x64', 'x86')][string] $Arch = 'x64',
+    [ValidateSet('d3d11', 'd3d9')][string] $D3D = 'd3d11',
     [switch] $Rebuild,
     [switch] $SkipBuild,
     [switch] $KeepOutputs,
@@ -80,9 +82,9 @@ if (-not $SkipBuild) {
         Pop-Location
     }
 
-    Write-Host "[harness] building test app (arch=$Arch)"
+    Write-Host "[harness] building test app (arch=$Arch, d3d=$D3D)"
     $buildBat = Join-Path $appDir 'build.bat'
-    $buildLog = & cmd.exe /c "`"$buildBat`" $Arch" 2>&1
+    $buildLog = & cmd.exe /c "`"$buildBat`" $Arch $D3D" 2>&1
     $buildExit = $LASTEXITCODE
     $buildLog | ForEach-Object { Write-Host "  [build] $_" }
     if ($buildExit -ne 0) { throw "app build.bat failed" }
@@ -318,10 +320,11 @@ if ($result1 -and $cap["P"].analysis -and $cap["P"].analysis.result) {
     $presentCalls = if ($pre -and $pre.renderHookPresentCalls -ne $null) { [double]$pre.renderHookPresentCalls } else { 0 }
     $renderFrames = [double]$cap["P"].analysis.result.render_frame_summary.frame_count
     $drawCalls = [double]$cap["P"].analysis.result.render_frame_summary.total_draw_calls
+    $renderLabels = @($cap["P"].analysis.result.render_frames | ForEach-Object { $_.label } | Select-Object -Unique) -join ","
     $renderOk = ($ready -and $installed -ge 1 -and $patchedSlots -gt 0 -and $presentCalls -gt 0 -and $renderFrames -gt 0)
     if (-not $renderOk) { $allPass = $false }
-    Write-Host ("  Render hook P: ready={0} installed={1} slots={2} present={3} frames={4} draws={5} {6}" -f `
-        $ready, $installed, $patchedSlots, $presentCalls, $renderFrames, $drawCalls,
+    Write-Host ("  Render hook P: ready={0} installed={1} slots={2} present={3} frames={4} draws={5} labels={6} {7}" -f `
+        $ready, $installed, $patchedSlots, $presentCalls, $renderFrames, $drawCalls, $renderLabels,
         $(if ($renderOk) {"OK"} else {"FAIL"}))
 } else {
     $allPass = $false
