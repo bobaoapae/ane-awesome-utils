@@ -31,6 +31,7 @@ public:
         std::string header_json;
         bool timing_enabled = true;
         bool memory_enabled = false;
+        bool render_enabled = false;
         bool snapshots_enabled = true;
         std::uint32_t max_live_allocations_per_snapshot = 4096;
         std::uint32_t snapshot_interval_ms = 0;
@@ -62,6 +63,7 @@ public:
         std::uint64_t writer_bytes_written = 0;
         bool timing_enabled = false;
         bool memory_enabled = false;
+        bool render_enabled = false;
         bool snapshots_enabled = false;
     };
 
@@ -120,6 +122,21 @@ public:
                       std::uint32_t allocation_count,
                       std::uint64_t allocation_bytes,
                       const std::string& label = std::string());
+    bool record_render_frame(std::uint64_t frame_index,
+                             std::uint64_t interval_ns,
+                             std::uint64_t cpu_between_presents_ns,
+                             std::uint64_t present_ns,
+                             std::uint64_t draw_calls,
+                             std::uint64_t primitive_count,
+                             std::uint64_t texture_upload_bytes,
+                             std::uint64_t texture_create_bytes,
+                             std::uint32_t texture_create_count,
+                             std::uint32_t texture_update_count,
+                             std::uint32_t set_texture_count,
+                             std::uint32_t render_target_change_count,
+                             std::uint32_t clear_count,
+                             std::uint32_t present_result,
+                             const std::string& label = std::string());
     bool record_gc_cycle(std::uint64_t gc_id,
                          aneprof::GcCycleKind kind,
                          std::uint64_t before_live_count,

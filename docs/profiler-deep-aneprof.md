@@ -29,6 +29,7 @@ Supported options:
 
 - `timing:Boolean` default `true`
 - `memory:Boolean` default `false`
+- `render:Boolean` default `false`
 - `snapshots:Boolean` default `true`
 - `snapshotIntervalMs:uint` default `0`
 - `maxLiveAllocationsPerSnapshot:uint` default `4096`
@@ -51,6 +52,7 @@ It then stores fixed event headers plus typed payloads:
 - AS3 reference/dependent edges from the runtime memory sampler
 - optional AS3 typed references, roots and native payload ownership
 - optional frame summaries and requested/observed GC cycle summaries
+- optional render frame summaries from native Present hooks
 
 The footer uses `ANEPEND\0` and records event counts, payload bytes, dropped
 events, final live allocations and final live bytes.
@@ -70,6 +72,7 @@ Append-only event IDs currently reserved by the `.aneprof` backend:
 | 18 | `frame` | no | frame or interval duration plus allocation count/bytes |
 | 19 | `gc_cycle` | no | requested or observed GC cycle counters before/after collection |
 | 20 | `as3_reference_remove` | no | factual removal of a previously emitted typed AS3 edge |
+| 21 | `render_frame` | no | native render interval summary around a D3D/DXGI Present |
 
 ## Probe Surface
 
@@ -132,6 +135,9 @@ from raw events. The JSON output includes:
   AS3 owners, plus inferred unowned pseudo-payloads such as `.mem.bitmap.data`
 - `lifetime_summary`, `allocation_rate`, `frame_summary`, `gc_summary` and
   `performance_suspects`
+- `render_frames` and `render_frame_summary` for native frame intervals,
+  Present time, CPU time between Presents, draw/blit counters, texture
+  upload/create counters and slow/present-bound/upload-heavy frame suspects
 
 The inline detours are guarded by byte signatures from `Adobe AIR.dll`
 `51.1.3.10`, and the IAT patches verify the expected slot RVAs. Broad IAT
@@ -189,6 +195,50 @@ The AS3 test bridge uses this to write one `frame` event per `ENTER_FRAME` when
 contains the measured frame duration; the analyzer fills `allocation_rate.by_frame`
 by scanning allocation events whose timestamps fall inside that frame interval.
 
+## Render Performance Hooks
+
+`profilerStart(..., { render: true })` enables optional Windows render
+instrumentation. This is intentionally disabled by default and has no active
+runtime hook when a capture is not running. `profilerStop()` restores patched
+vtable slots so later non-render captures do not pay render-hook overhead.
+
+On AIR SDK `51.1.3.10`, the hook currently installs the stable Present paths:
+
+- D3D9/9Ex `CreateDevice`, `CreateDeviceEx`, device `Present`, `PresentEx`,
+  swap-chain `Present`, `GetSwapChain`, `CreateAdditionalSwapChain`
+- D3D9 texture creation/update, render-target changes, clears and draw calls
+- DXGI `Present` / `Present1`
+
+D3D11 device/context draw and upload hooks are intentionally not installed by
+default yet. The AIR E2E runtime uses a D3D11/DXGI renderer, and the stable
+validated signal is DXGI Present timing. Detailed D3D11 draw/upload slots need
+separate isolated validation before they can be enabled without risking runtime
+heap corruption.
+
+The profiler writes one `render_frame` event per observed Present instead of
+one event per draw call. The event aggregates counters since the previous
+Present:
+
+- frame interval and Present call duration
+- estimated CPU time between Present calls
+- draw/blit calls and primitive estimates when the backend goes through hooked
+  D3D9 methods
+- texture/surface create and upload byte estimates when dimensions/formats are
+  known
+- render-target changes and clears
+
+Known limits:
+
+- The CPU time field is `interval - present`, so it is a frame-interval signal,
+  not an exact AS3/display-list CPU attribution.
+- Draw/upload counters are backend dependent. The x64 and x86 E2E scenarios
+  currently observe real DXGI Presents and emit render frames, but AIR does not
+  route that synthetic scene through the installed D3D9 draw/blit/upload hooks,
+  so draw/upload counters are zero in that smoke test.
+- If a runtime uses an unhooked renderer path, `renderDiagnosticsReady` can be
+  true while `renderHookPresentCalls` or `renderHookFrames` stays zero; this is
+  exposed in `profilerGetStatus()` and the `.aneprof` remains valid.
+
 AIR exposes a single active `IMemorySampler` slot. If the SWF/runtime already
 owns that slot, for example through `flash.sampler.startSampling()`,
 `setSamplerCallback()`, or Scout/advanced telemetry creating Adobe's
@@ -222,6 +272,14 @@ Check `profilerGetStatus()` during a capture:
 - `memoryLeakDiagnosticsReady=true` with `as3LeakDiagnosticsReady=false` now
   indicates a lower-level attach/prologue failure rather than normal sampler
   contention.
+- `renderDiagnosticsReady=true` means optional render hooks installed.
+- `renderHookPresentCalls` and `renderHookFrames` should grow during a
+  render-enabled capture when a hooked Present path is active.
+- `renderHookDrawCalls`, `renderHookPrimitiveCount`,
+  `renderHookTextureUploadBytes` and `renderHookTextureCreateBytes` grow only
+  when the active AIR renderer uses a hooked D3D9 operation that exposes those
+  details. They are expected to stay zero for the current AIR D3D11/DXGI E2E
+  renderer because only Present timing is installed for that path.
 
 ## Validation
 
@@ -232,17 +290,19 @@ python tools\profiler-cli\aneprof_validate.py path\to\capture.aneprof
 python tools\profiler-cli\aneprof_analyze.py path\to\capture.aneprof --require-free-events
 ```
 
-The E2E harness runs scenarios A/B/C/E/T/M/S/L for both architectures:
+The E2E harness runs scenarios A/B/P/C/R/E/T/M/S/L for both architectures:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x64
 powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x86
 ```
 
-Current standard coverage is A/B/C/R/E/T/M/S/L. Scenario D is an optional
+Current standard coverage is A/B/P/C/R/E/T/M/S/L. Scenario D is an optional
 kill-test and only runs with `-WithKillTest`.
 
 Scenario C validates timing + memory with real runtime allocation/free pairing.
+Scenario P validates render-enabled captures by requiring native Present calls,
+`render_frame` events and `render_frame_summary` output.
 Scenario R validates the real AS3 typed edge hooks by requiring display-list and
 event-listener add/remove counters plus active `as3_reference_ex` /
 `as3_reference_remove` analyzer output.
@@ -260,8 +320,8 @@ python -m unittest discover tests\profiler-cli -v
 cmd /c shared\profiler\build.bat
 python build-all.py windows-native
 python build-all.py package
-powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x64 -SkipBuild -KeepOutputs
-powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x86 -SkipBuild -KeepOutputs
+powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x64 -KeepOutputs
+powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x86 -KeepOutputs
 ```
 
 After packaging, verify the Windows DLL signatures with:

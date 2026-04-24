@@ -145,6 +145,7 @@ TEST("controller writes extended AS3 graph payloads") {
     cfg.output_path = path;
     cfg.header_json = R"({"format":"aneprof","test":"as3-extended"})";
     cfg.memory_enabled = true;
+    cfg.render_enabled = true;
     EXPECT(cc.start(cfg));
     EXPECT(cc.record_as3_reference_ex(0x1000u,
                                       0x2000u,
@@ -164,6 +165,21 @@ TEST("controller writes extended AS3 graph payloads") {
                                  "bitmap",
                                  false));
     EXPECT(cc.record_frame(7, 20'000'000, 3, 12288, "enterFrame"));
+    EXPECT(cc.record_render_frame(7,
+                                  20'000'000,
+                                  4'000'000,
+                                  12'000'000,
+                                  1200,
+                                  2400,
+                                  2'097'152,
+                                  4'194'304,
+                                  2,
+                                  3,
+                                  18,
+                                  1,
+                                  4,
+                                  0,
+                                  "d3d9.present"));
     EXPECT(cc.record_gc_cycle(1,
                               ap::GcCycleKind::NativeRequested,
                               5,
@@ -184,6 +200,7 @@ TEST("controller writes extended AS3 graph payloads") {
     bool found_root = false;
     bool found_payload = false;
     bool found_frame = false;
+    bool found_render_frame = false;
     bool found_gc = false;
     while (off < end) {
         ap::EventHeader eh{};
@@ -229,6 +246,16 @@ TEST("controller writes extended AS3 graph payloads") {
             EXPECT_EQ(payload.frame_index, static_cast<std::uint64_t>(7));
             EXPECT_EQ(payload.allocation_count, 3u);
             found_frame = true;
+        } else if (eh.type == static_cast<std::uint16_t>(ap::EventType::RenderFrame)) {
+            ap::RenderFrameEvent payload{};
+            EXPECT(eh.payload_size >= sizeof(payload));
+            std::memcpy(&payload, bytes.data() + off, sizeof(payload));
+            EXPECT_EQ(payload.frame_index, static_cast<std::uint64_t>(7));
+            EXPECT_EQ(payload.present_ns, static_cast<std::uint64_t>(12'000'000));
+            EXPECT_EQ(payload.draw_calls, static_cast<std::uint64_t>(1200));
+            EXPECT_EQ(payload.texture_upload_bytes, static_cast<std::uint64_t>(2'097'152));
+            EXPECT_EQ(payload.texture_create_count, 2u);
+            found_render_frame = true;
         } else if (eh.type == static_cast<std::uint16_t>(ap::EventType::GcCycle)) {
             ap::GcCycleEvent payload{};
             EXPECT(eh.payload_size >= sizeof(payload));
@@ -246,6 +273,7 @@ TEST("controller writes extended AS3 graph payloads") {
     EXPECT(found_root);
     EXPECT(found_payload);
     EXPECT(found_frame);
+    EXPECT(found_render_frame);
     EXPECT(found_gc);
     std::filesystem::remove(path);
 }

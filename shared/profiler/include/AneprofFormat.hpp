@@ -39,6 +39,7 @@ enum class EventType : std::uint16_t {
     Frame         = 18,
     GcCycle       = 19,
     As3ReferenceRemove = 20,
+    RenderFrame   = 21,
 };
 
 enum class As3ReferenceKind : std::uint16_t {
@@ -208,6 +209,24 @@ struct GcCycleEvent {
     std::uint16_t reserved;
     std::uint32_t label_len;
 };
+
+struct RenderFrameEvent {
+    std::uint64_t frame_index;
+    std::uint64_t interval_ns;
+    std::uint64_t cpu_between_presents_ns;
+    std::uint64_t present_ns;
+    std::uint64_t draw_calls;
+    std::uint64_t primitive_count;
+    std::uint64_t texture_upload_bytes;
+    std::uint64_t texture_create_bytes;
+    std::uint32_t texture_create_count;
+    std::uint32_t texture_update_count;
+    std::uint32_t set_texture_count;
+    std::uint32_t render_target_change_count;
+    std::uint32_t clear_count;
+    std::uint32_t present_result;
+    std::uint32_t label_len;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(FileHeader) == 24, "FileHeader size drift");
@@ -220,6 +239,7 @@ static_assert(sizeof(As3RootEvent) == 16, "As3RootEvent size drift");
 static_assert(sizeof(As3PayloadEvent) == 40, "As3PayloadEvent size drift");
 static_assert(sizeof(FrameEvent) == 32, "FrameEvent size drift");
 static_assert(sizeof(GcCycleEvent) == 48, "GcCycleEvent size drift");
+static_assert(sizeof(RenderFrameEvent) == 92, "RenderFrameEvent size drift");
 
 inline std::array<std::uint8_t, sizeof(FileHeader)>
 make_header_bytes(std::uint32_t header_json_len, std::uint64_t started_utc) {
@@ -289,7 +309,7 @@ inline bool parse_event_header_bytes(const void* src, EventHeader* out) noexcept
     if (src == nullptr || out == nullptr) return false;
     std::memcpy(out, src, sizeof(EventHeader));
     return out->type >= static_cast<std::uint16_t>(EventType::Start) &&
-           out->type <= static_cast<std::uint16_t>(EventType::As3ReferenceRemove);
+           out->type <= static_cast<std::uint16_t>(EventType::RenderFrame);
 }
 
 inline bool parse_footer_bytes(const void* src, FileFooter* out) noexcept {

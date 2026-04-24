@@ -818,6 +818,7 @@ public class AneAwesomeUtils {
     //
     //       options.timing                       default true
     //       options.memory                       default false
+    //       options.render                       default false, D3D/DXGI render summaries
     //       options.snapshots                    default true
     //       options.frameEvents                  AS3 test bridge option;
     //                                            ignored by native start
@@ -857,6 +858,8 @@ public class AneAwesomeUtils {
                 ? Boolean(options.timing) : true;
         var memory:Boolean = options != null && options.memory !== undefined
                 ? Boolean(options.memory) : false;
+        var render:Boolean = options != null && options.render !== undefined
+                ? Boolean(options.render) : false;
         var snapshots:Boolean = options != null && options.snapshots !== undefined
                 ? Boolean(options.snapshots) : true;
         var snapshotIntervalMs:uint = options != null && options.snapshotIntervalMs !== undefined
@@ -865,7 +868,7 @@ public class AneAwesomeUtils {
                 ? uint(options.maxLiveAllocationsPerSnapshot) : 4096;
         var headerJson:String = options != null && options.headerJson !== undefined
                 ? String(options.headerJson)
-                : buildProfilerHeaderJson(options, timing, memory, snapshots,
+                : buildProfilerHeaderJson(options, timing, memory, render, snapshots,
                                           snapshotIntervalMs, maxLive);
 
         var ok:Boolean = _extContext.call("awesomeUtils_profilerStart",
@@ -875,7 +878,8 @@ public class AneAwesomeUtils {
                                           memory,
                                           snapshots,
                                           maxLive,
-                                          snapshotIntervalMs) as Boolean;
+                                          snapshotIntervalMs,
+                                          render) as Boolean;
         if (!ok) return false;
         return true;
     }
@@ -959,6 +963,7 @@ public class AneAwesomeUtils {
     private function buildProfilerHeaderJson(options:Object,
                                              timing:Boolean,
                                              memory:Boolean,
+                                             render:Boolean,
                                              snapshots:Boolean,
                                              snapshotIntervalMs:uint,
                                              maxLive:uint):String {
@@ -970,6 +975,7 @@ public class AneAwesomeUtils {
             airSdk: "51.1.3.10",
             timing: timing,
             memory: memory,
+            render: render,
             snapshots: snapshots,
             snapshotIntervalMs: snapshotIntervalMs,
             maxLiveAllocationsPerSnapshot: maxLive

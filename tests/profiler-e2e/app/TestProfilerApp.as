@@ -15,6 +15,9 @@
 //                memory hooks and periodic snapshots enabled.
 //                Output: test_capture_C.aneprof
 //
+//   Scenario P:  Render performance capture with D3D9 hook enabled.
+//                Output: test_capture_P.aneprof
+//
 //   Scenario E:  Hidden listener leak: short-lived views are removed from the
 //                display list but remain retained by a strong listener on a
 //                long-lived dispatcher.
@@ -51,6 +54,7 @@
 
 package {
     import flash.desktop.NativeApplication;
+    import flash.display.Bitmap;
     import flash.display.BitmapData;
     import flash.display.Shape;
     import flash.display.Sprite;
@@ -98,7 +102,7 @@ package {
             storage.resolvePath("").createDirectory();
 
             // Clean prior outputs.
-            for each (var n:String in ["A", "B", "C", "D", "E", "T", "M", "S", "L", "R"]) {
+            for each (var n:String in ["A", "B", "C", "D", "E", "T", "M", "S", "L", "R", "P"]) {
                 removeIfPresent(storage.resolvePath("test_capture_" + n + ".aneprof"));
             }
             removeIfPresent(storage.resolvePath("test_result.json"));
@@ -124,6 +128,9 @@ package {
                       timing:true, memory:false, snapshots:true },
                     { name:"B", label:"second-run-after-stop", frames:80,
                       timing:true, memory:false, snapshots:true },
+                    { name:"P", label:"render-performance", frames:120,
+                      timing:true, memory:false, render:true, snapshots:true,
+                      renderStress:true },
                     { name:"C", label:"timing-memory-snapshots", frames:240,
                       timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000 },
                     { name:"R", label:"real-edge-hooks", frames:80,
@@ -170,6 +177,7 @@ package {
                 closureLeak:    Boolean(sc.closureLeak),
                 staticCacheLeak:Boolean(sc.staticCacheLeak),
                 realEdgeHooks:  Boolean(sc.realEdgeHooks),
+                renderStress:   Boolean(sc.renderStress),
                 listenerLeakCreated: 0,
                 timerLeakCreated: 0,
                 closureLeakCreated: 0,
@@ -179,6 +187,7 @@ package {
                 realEdgeRoot:   null,
                 realEdgeBus:    null,
                 realEdgeLive:   [],
+                renderPool:     new Vector.<Sprite>(),
                 nativeGcRequested: false,
                 frameCount:    0,
                 lastMarkerSec: -1,
@@ -190,6 +199,7 @@ package {
             var options:Object = {
                 timing:           Boolean(sc.timing),
                 memory:           Boolean(sc.memory),
+                render:           Boolean(sc.render),
                 snapshots:        Boolean(sc.snapshots),
                 snapshotIntervalMs: sc.snapshotIntervalMs !== undefined ? uint(sc.snapshotIntervalMs) : 0,
                 metadata:         {
@@ -202,7 +212,8 @@ package {
                     timerLeak: Boolean(sc.timerLeak),
                     closureLeak: Boolean(sc.closureLeak),
                     staticCacheLeak: Boolean(sc.staticCacheLeak),
-                    realEdgeHooks: Boolean(sc.realEdgeHooks)
+                    realEdgeHooks: Boolean(sc.realEdgeHooks),
+                    renderStress: Boolean(sc.renderStress)
                 }
             };
             var ok:Boolean = util.profilerStart(active.outPath, options);
@@ -224,6 +235,7 @@ package {
             ++active.frameCount;
 
             doSpriteChurn();
+            doRenderStressWork();
             doAllocationWork();
             doHiddenListenerLeakWork();
             doTimerClosureLeakWork();
@@ -285,6 +297,7 @@ package {
             } else {
                 active.allocScratch.length = 0;
             }
+            cleanupRenderStressWork();
 
             active.nativeGcRequested = util.profilerRequestGc();
             util.profilerMarker("gc.native.request", {
@@ -404,6 +417,54 @@ package {
                 leak.position = leak.length - 1;
                 leak.writeByte(active.frameCount & 0xFF);
                 retainedLeaks.push(leak);
+            }
+        }
+
+        private function doRenderStressWork():void {
+            if (!active.renderStress) return;
+            for (var i:int = 0; i < 4; i++) {
+                var holder:Sprite = new Sprite();
+                holder.x = 20 + ((active.frameCount * 17 + i * 37) % 580);
+                holder.y = 20 + ((active.frameCount * 23 + i * 29) % 420);
+                holder.graphics.beginFill(0x2244AA + i * 0x111100, 0.35);
+                holder.graphics.drawRect(-8, -8, 48, 48);
+                holder.graphics.endFill();
+
+                var bd:BitmapData = new BitmapData(32, 32, false, 0x203040 + active.frameCount + i);
+                bd.noise(active.frameCount * 31 + i, 0, 255, 7, true);
+                var bmp:Bitmap = new Bitmap(bd);
+                bmp.x = 4;
+                bmp.y = 4;
+                holder.addChild(bmp);
+
+                addChild(holder);
+                active.renderPool.push(holder);
+            }
+            while (active.renderPool.length > 64) {
+                disposeRenderSprite(active.renderPool.shift());
+            }
+        }
+
+        private function cleanupRenderStressWork():void {
+            if (!active || !active.renderPool) return;
+            while (active.renderPool.length > 0) {
+                disposeRenderSprite(active.renderPool.shift());
+            }
+        }
+
+        private function disposeRenderSprite(sprite:Sprite):void {
+            if (!sprite) return;
+            if (sprite.parent) sprite.parent.removeChild(sprite);
+            for (var i:int = sprite.numChildren - 1; i >= 0; i--) {
+                var child:* = sprite.getChildAt(i);
+                if (child is Bitmap) {
+                    var bmp:Bitmap = Bitmap(child);
+                    if (bmp.bitmapData) {
+                        bmp.bitmapData.dispose();
+                        bmp.bitmapData = null;
+                    }
+                }
+                sprite.removeChildAt(i);
             }
         }
 

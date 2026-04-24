@@ -556,6 +556,46 @@ bool DeepProfilerController::record_frame(std::uint64_t frame_index,
                        static_cast<std::uint32_t>(payload.size()));
 }
 
+bool DeepProfilerController::record_render_frame(std::uint64_t frame_index,
+                                                 std::uint64_t interval_ns,
+                                                 std::uint64_t cpu_between_presents_ns,
+                                                 std::uint64_t present_ns,
+                                                 std::uint64_t draw_calls,
+                                                 std::uint64_t primitive_count,
+                                                 std::uint64_t texture_upload_bytes,
+                                                 std::uint64_t texture_create_bytes,
+                                                 std::uint32_t texture_create_count,
+                                                 std::uint32_t texture_update_count,
+                                                 std::uint32_t set_texture_count,
+                                                 std::uint32_t render_target_change_count,
+                                                 std::uint32_t clear_count,
+                                                 std::uint32_t present_result,
+                                                 const std::string& label) {
+    if (!cfg_.render_enabled) return true;
+    if (state_.load(std::memory_order_acquire) != State::Recording) return false;
+
+    aneprof::RenderFrameEvent fixed{};
+    fixed.frame_index = frame_index;
+    fixed.interval_ns = interval_ns;
+    fixed.cpu_between_presents_ns = cpu_between_presents_ns;
+    fixed.present_ns = present_ns;
+    fixed.draw_calls = draw_calls;
+    fixed.primitive_count = primitive_count;
+    fixed.texture_upload_bytes = texture_upload_bytes;
+    fixed.texture_create_bytes = texture_create_bytes;
+    fixed.texture_create_count = texture_create_count;
+    fixed.texture_update_count = texture_update_count;
+    fixed.set_texture_count = set_texture_count;
+    fixed.render_target_change_count = render_target_change_count;
+    fixed.clear_count = clear_count;
+    fixed.present_result = present_result;
+    fixed.label_len = static_cast<std::uint32_t>(label.size());
+    auto payload = fixed_with_label_payload(fixed, label);
+    return write_event(aneprof::EventType::RenderFrame,
+                       payload.data(),
+                       static_cast<std::uint32_t>(payload.size()));
+}
+
 bool DeepProfilerController::record_gc_cycle(std::uint64_t gc_id,
                                              aneprof::GcCycleKind kind,
                                              std::uint64_t before_live_count,
@@ -599,6 +639,7 @@ DeepProfilerController::Status DeepProfilerController::status() const {
     s.writer_bytes_written = writer_bytes_written_.load(std::memory_order_relaxed);
     s.timing_enabled = cfg_.timing_enabled;
     s.memory_enabled = cfg_.memory_enabled;
+    s.render_enabled = cfg_.render_enabled;
     s.snapshots_enabled = cfg_.snapshots_enabled;
     if (s.state == State::Recording || s.state == State::Stopping) {
         s.elapsed_ms = (now_ns() - started_ns_) / 1000000ull;

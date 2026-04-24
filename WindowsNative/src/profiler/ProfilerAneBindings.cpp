@@ -5,6 +5,7 @@
 #include "profiler/WindowsAirRuntime.hpp"
 #include "profiler/WindowsAs3ObjectHook.hpp"
 #include "profiler/WindowsDeepMemoryHook.hpp"
+#include "profiler/WindowsRenderHook.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -21,6 +22,7 @@ std::unique_ptr<DeepProfilerController> g_ctrl;
 std::unique_ptr<IDiskMonitor> g_disk;
 std::unique_ptr<WindowsDeepMemoryHook> g_memory_hook;
 std::unique_ptr<WindowsAs3ObjectHook> g_as3_object_hook;
+std::unique_ptr<WindowsRenderHook> g_render_hook;
 std::unique_ptr<WindowsAirRuntime> g_air_runtime;
 
 FREObject make_bool(bool v) {
@@ -116,6 +118,7 @@ bool ensure_controller() {
     if (!g_disk) g_disk = IDiskMonitor::create();
     if (!g_memory_hook) g_memory_hook = std::make_unique<WindowsDeepMemoryHook>();
     if (!g_as3_object_hook) g_as3_object_hook = std::make_unique<WindowsAs3ObjectHook>();
+    if (!g_render_hook) g_render_hook = std::make_unique<WindowsRenderHook>();
     return static_cast<bool>(g_ctrl);
 }
 
@@ -133,7 +136,8 @@ WindowsAirRuntime* ensure_air_runtime() {
 //               memory:Boolean,
 //               snapshots:Boolean,
 //               maxLive:uint,
-//               snapshotIntervalMs:uint): Boolean
+//               snapshotIntervalMs:uint,
+//               render:Boolean): Boolean
 FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv) {
     std::lock_guard<std::mutex> g(g_mu);
     if (argc < 1) return make_bool(false);
@@ -150,6 +154,7 @@ FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv)
     std::string header_json;
     bool timing = true;
     bool memory = false;
+    bool render = false;
     bool snapshots = true;
     std::uint32_t max_live = 4096;
     std::uint32_t snapshot_interval_ms = 0;
@@ -159,6 +164,7 @@ FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv)
     if (argc >= 5) read_bool(argv[4], snapshots);
     if (argc >= 6) read_u32(argv[5], max_live);
     if (argc >= 7) read_u32(argv[6], snapshot_interval_ms);
+    if (argc >= 8) read_bool(argv[7], render);
 
     if (g_disk) {
         constexpr std::uint64_t kMinFree = 200ull * 1024ull * 1024ull;
@@ -171,6 +177,7 @@ FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv)
     cfg.header_json = std::move(header_json);
     cfg.timing_enabled = timing;
     cfg.memory_enabled = memory;
+    cfg.render_enabled = render;
     cfg.snapshots_enabled = snapshots;
     cfg.max_live_allocations_per_snapshot = max_live == 0 ? 4096 : max_live;
     cfg.snapshot_interval_ms = snapshot_interval_ms;
@@ -188,12 +195,18 @@ FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv)
             // expose the AS3 hook failure through profilerGetStatus().
         }
     }
+    if (render) {
+        // Render metrics are optional enrichment. A D3D/DXGI hook failure should
+        // not invalidate memory/timing captures; profilerGetStatus exposes it.
+        g_render_hook->install(g_ctrl.get());
+    }
     return make_bool(true);
 }
 
 FREObject profiler_stop(FREContext, void*, std::uint32_t, FREObject*) {
     std::lock_guard<std::mutex> g(g_mu);
     if (!g_ctrl) return make_bool(true);
+    if (g_render_hook) g_render_hook->uninstall();
     if (g_as3_object_hook) g_as3_object_hook->uninstall();
     if (g_memory_hook) g_memory_hook->uninstall();
     return make_bool(g_ctrl->stop());
@@ -270,6 +283,7 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
     set_prop_f64(obj, "writerBytesWritten", static_cast<double>(s.writer_bytes_written));
     set_prop_bool(obj, "timingEnabled", s.timing_enabled);
     set_prop_bool(obj, "memoryEnabled", s.memory_enabled);
+    set_prop_bool(obj, "renderEnabled", s.render_enabled);
     set_prop_bool(obj, "snapshotsEnabled", s.snapshots_enabled);
     set_prop_u32(obj, "memoryHookInstalled",
                  (g_memory_hook && g_memory_hook->installed()) ? 1u : 0u);
@@ -289,6 +303,43 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
                   s.memory_enabled &&
                   g_as3_object_hook &&
                   g_as3_object_hook->installed());
+    set_prop_bool(obj, "renderDiagnosticsReady",
+                  s.render_enabled &&
+                  g_render_hook &&
+                  g_render_hook->installed() &&
+                  g_render_hook->patchedSlots() > 0);
+    if (g_render_hook) {
+        set_prop_u32(obj, "renderHookInstalled",
+                     g_render_hook->installed() ? 1u : 0u);
+        set_prop_f64(obj, "renderHookFailedInstalls",
+                     static_cast<double>(g_render_hook->failedInstalls()));
+        set_prop_u32(obj, "renderHookLastFailureStage",
+                     g_render_hook->lastFailureStage());
+        set_prop_f64(obj, "renderHookPatchedSlots",
+                     static_cast<double>(g_render_hook->patchedSlots()));
+        set_prop_f64(obj, "renderHookVtablePatches",
+                     static_cast<double>(g_render_hook->hookInstalls()));
+        set_prop_f64(obj, "renderHookDevicePatches",
+                     static_cast<double>(g_render_hook->deviceHookInstalls()));
+        set_prop_f64(obj, "renderHookTexturePatches",
+                     static_cast<double>(g_render_hook->textureHookInstalls()));
+        set_prop_f64(obj, "renderHookFrames",
+                     static_cast<double>(g_render_hook->renderFrames()));
+        set_prop_f64(obj, "renderHookPresentCalls",
+                     static_cast<double>(g_render_hook->presentCalls()));
+        set_prop_f64(obj, "renderHookDrawCalls",
+                     static_cast<double>(g_render_hook->drawCalls()));
+        set_prop_f64(obj, "renderHookPrimitiveCount",
+                     static_cast<double>(g_render_hook->primitiveCount()));
+        set_prop_f64(obj, "renderHookTextureCreates",
+                     static_cast<double>(g_render_hook->textureCreates()));
+        set_prop_f64(obj, "renderHookTextureUpdates",
+                     static_cast<double>(g_render_hook->textureUpdates()));
+        set_prop_f64(obj, "renderHookTextureUploadBytes",
+                     static_cast<double>(g_render_hook->textureUploadBytes()));
+        set_prop_f64(obj, "renderHookTextureCreateBytes",
+                     static_cast<double>(g_render_hook->textureCreateBytes()));
+    }
     if (g_memory_hook) {
         set_prop_f64(obj, "memoryHookAllocCalls",
                      static_cast<double>(g_memory_hook->allocCalls()));
@@ -511,6 +562,7 @@ void register_all(FRENamedFunction* out_functions, int capacity, int* cursor) {
 
 void shutdown() {
     std::lock_guard<std::mutex> g(g_mu);
+    if (g_render_hook) g_render_hook->uninstall();
     if (g_as3_object_hook) g_as3_object_hook->uninstall();
     if (g_memory_hook) g_memory_hook->uninstall();
     if (g_ctrl) g_ctrl->stop();
@@ -518,6 +570,7 @@ void shutdown() {
     g_disk.reset();
     g_memory_hook.reset();
     g_as3_object_hook.reset();
+    g_render_hook.reset();
     g_air_runtime.reset();
 }
 

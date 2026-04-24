@@ -46,6 +46,7 @@ EVENT_TYPES = {
     18: "frame",
     19: "gc_cycle",
     20: "as3_reference_remove",
+    21: "render_frame",
 }
 
 EVENT_FLAG_INFERRED = 1 << 0
@@ -454,6 +455,48 @@ def parse_frame_payload(payload: bytes) -> dict[str, Any]:
         "allocation_bytes": allocation_bytes,
         "allocation_count": allocation_count,
         "label": payload_label(payload, 32, label_len, "frame"),
+    }
+
+
+def parse_render_frame_payload(payload: bytes) -> dict[str, Any]:
+    if len(payload) < 92:
+        raise ValueError("truncated render-frame payload")
+    (
+        frame_index,
+        interval_ns,
+        cpu_between_presents_ns,
+        present_ns,
+        draw_calls,
+        primitive_count,
+        texture_upload_bytes,
+        texture_create_bytes,
+        texture_create_count,
+        texture_update_count,
+        set_texture_count,
+        render_target_change_count,
+        clear_count,
+        present_result,
+        label_len,
+    ) = struct.unpack_from("<QQQQQQQQIIIIIII", payload, 0)
+    return {
+        "frame_index": frame_index,
+        "interval_ns": interval_ns,
+        "interval_ms": fmt_ms(interval_ns),
+        "cpu_between_presents_ns": cpu_between_presents_ns,
+        "cpu_between_presents_ms": fmt_ms(cpu_between_presents_ns),
+        "present_ns": present_ns,
+        "present_ms": fmt_ms(present_ns),
+        "draw_calls": draw_calls,
+        "primitive_count": primitive_count,
+        "texture_upload_bytes": texture_upload_bytes,
+        "texture_create_bytes": texture_create_bytes,
+        "texture_create_count": texture_create_count,
+        "texture_update_count": texture_update_count,
+        "set_texture_count": set_texture_count,
+        "render_target_change_count": render_target_change_count,
+        "clear_count": clear_count,
+        "present_result": present_result,
+        "label": payload_label(payload, 92, label_len, "render frame"),
     }
 
 
@@ -1344,6 +1387,77 @@ def build_frame_summary(frames: list[dict[str, Any]], allocation_rate: dict[str,
     }
 
 
+def render_frame_reasons(frame: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    interval_ms = float(frame.get("interval_ms") or 0)
+    present_ms = float(frame.get("present_ms") or 0)
+    cpu_ms = float(frame.get("cpu_between_presents_ms") or 0)
+    draw_calls = int(frame.get("draw_calls") or 0)
+    upload_bytes = int(frame.get("texture_upload_bytes") or 0)
+    create_bytes = int(frame.get("texture_create_bytes") or 0)
+    if interval_ms >= 16.667:
+        reasons.append("render frame interval exceeded 16.667ms")
+    if present_ms >= 8 or (interval_ms and present_ms >= interval_ms * 0.5):
+        reasons.append("high Present/vsync/GPU wait time")
+    if cpu_ms >= 8 and present_ms < max(4.0, cpu_ms * 0.75):
+        reasons.append("high CPU work between Present calls")
+    if draw_calls >= 1000:
+        reasons.append("high D3D9 draw call count")
+    if upload_bytes + create_bytes >= 4 * 1024 * 1024:
+        reasons.append("large texture upload/create traffic")
+    if int(frame.get("texture_update_count") or 0) >= 64:
+        reasons.append("many texture updates")
+    return reasons
+
+
+def build_render_frame_summary(render_frames: list[dict[str, Any]]) -> dict[str, Any]:
+    slow_frames = [frame for frame in render_frames if frame.get("interval_ms", 0) >= 16.667]
+    present_bound = [
+        frame for frame in render_frames
+        if frame.get("present_ms", 0) >= 8
+        or (frame.get("interval_ms", 0) and frame.get("present_ms", 0) >= frame.get("interval_ms", 0) * 0.5)
+    ]
+    upload_heavy = [
+        frame for frame in render_frames
+        if int(frame.get("texture_upload_bytes") or 0) + int(frame.get("texture_create_bytes") or 0)
+        >= 4 * 1024 * 1024
+    ]
+    draw_heavy = [frame for frame in render_frames if int(frame.get("draw_calls") or 0) >= 1000]
+    total_interval = sum(int(frame.get("interval_ns") or 0) for frame in render_frames)
+    total_present = sum(int(frame.get("present_ns") or 0) for frame in render_frames)
+    total_cpu = sum(int(frame.get("cpu_between_presents_ns") or 0) for frame in render_frames)
+    total_draws = sum(int(frame.get("draw_calls") or 0) for frame in render_frames)
+    total_primitives = sum(int(frame.get("primitive_count") or 0) for frame in render_frames)
+    total_upload = sum(int(frame.get("texture_upload_bytes") or 0) for frame in render_frames)
+    total_create = sum(int(frame.get("texture_create_bytes") or 0) for frame in render_frames)
+    count = len(render_frames)
+    return {
+        "frame_count": count,
+        "slow_frame_count": len(slow_frames),
+        "present_bound_count": len(present_bound),
+        "upload_heavy_count": len(upload_heavy),
+        "draw_heavy_count": len(draw_heavy),
+        "max_interval_ms": max((frame.get("interval_ms", 0) for frame in render_frames), default=0),
+        "avg_interval_ms": fmt_ms(total_interval / count) if count else 0,
+        "max_present_ms": max((frame.get("present_ms", 0) for frame in render_frames), default=0),
+        "avg_present_ms": fmt_ms(total_present / count) if count else 0,
+        "avg_cpu_between_presents_ms": fmt_ms(total_cpu / count) if count else 0,
+        "total_draw_calls": total_draws,
+        "avg_draw_calls": round(total_draws / count, 2) if count else 0,
+        "total_primitives": total_primitives,
+        "total_texture_upload_bytes": total_upload,
+        "total_texture_create_bytes": total_create,
+        "slow_frames": sorted(slow_frames, key=lambda item: item.get("interval_ms", 0), reverse=True)[:50],
+        "present_bound_frames": sorted(present_bound, key=lambda item: item.get("present_ms", 0), reverse=True)[:50],
+        "upload_heavy_frames": sorted(
+            upload_heavy,
+            key=lambda item: int(item.get("texture_upload_bytes") or 0) + int(item.get("texture_create_bytes") or 0),
+            reverse=True,
+        )[:50],
+        "draw_heavy_frames": sorted(draw_heavy, key=lambda item: item.get("draw_calls", 0), reverse=True)[:50],
+    }
+
+
 def build_gc_summary(
     gc_cycles: list[dict[str, Any]],
     snapshots: list[dict[str, Any]],
@@ -1366,6 +1480,7 @@ def build_performance_suspects(
     top_method_timing: list[dict[str, Any]],
     marker_allocations: list[dict[str, Any]],
     frame_summary: dict[str, Any],
+    render_frame_summary: dict[str, Any],
     top_as3_allocation_sites: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     suspects: list[dict[str, Any]] = []
@@ -1403,6 +1518,38 @@ def build_performance_suspects(
                 "name": str(frame.get("frame_index")),
                 "score": frame.get("duration_ms", 0),
                 "reasons": ["frame duration exceeded 16.667ms"],
+                "details": frame,
+            }
+        )
+    render_candidates: list[dict[str, Any]] = []
+    for bucket in (
+        "slow_frames",
+        "present_bound_frames",
+        "upload_heavy_frames",
+        "draw_heavy_frames",
+    ):
+        render_candidates.extend(render_frame_summary.get(bucket, [])[:20])
+    seen_render_frames: set[int] = set()
+    for frame in render_candidates:
+        frame_index = int(frame.get("frame_index") or 0)
+        if frame_index in seen_render_frames:
+            continue
+        seen_render_frames.add(frame_index)
+        reasons = render_frame_reasons(frame)
+        if not reasons:
+            continue
+        score = (
+            float(frame.get("interval_ms") or 0)
+            + float(frame.get("present_ms") or 0)
+            + float(frame.get("draw_calls") or 0) / 100.0
+            + (int(frame.get("texture_upload_bytes") or 0) + int(frame.get("texture_create_bytes") or 0)) / 1048576.0
+        )
+        suspects.append(
+            {
+                "kind": "render_frame",
+                "name": str(frame.get("frame_index")),
+                "score": round(score, 3),
+                "reasons": reasons,
                 "details": frame,
             }
         )
@@ -1451,6 +1598,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     as3_roots: list[dict[str, Any]] = []
     as3_payloads: list[dict[str, Any]] = []
     frames: list[dict[str, Any]] = []
+    render_frames: list[dict[str, Any]] = []
     gc_cycles: list[dict[str, Any]] = []
     allocation_events: list[dict[str, Any]] = []
     as3_unknown_frees = 0
@@ -1751,6 +1899,14 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
             parsed["start_ns"] = max(0, timestamp_ns - int(parsed.get("duration_ns") or 0))
             parsed["thread_id"] = thread_id
             frames.append(parsed)
+        elif name == "render_frame":
+            parsed = parse_render_frame_payload(payload)
+            parsed["timestamp_ns"] = timestamp_ns
+            parsed["end_ns"] = timestamp_ns
+            parsed["start_ns"] = max(0, timestamp_ns - int(parsed.get("interval_ns") or 0))
+            parsed["thread_id"] = thread_id
+            parsed["reasons"] = render_frame_reasons(parsed)
+            render_frames.append(parsed)
         elif name == "gc_cycle":
             parsed = parse_gc_cycle_payload(payload, flags)
             parsed["timestamp_ns"] = timestamp_ns
@@ -2078,6 +2234,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         last_event_ns,
     )
     frame_summary = build_frame_summary(frames, allocation_rate)
+    render_frame_summary = build_render_frame_summary(render_frames)
     gc_summary = build_gc_summary(gc_cycles, snapshots, as3_snapshot_summaries)
     lifetime_summary = build_lifetime_summary(
         as3_objects,
@@ -2092,6 +2249,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         top_method_timing,
         allocation_rate["by_marker"],
         frame_summary,
+        render_frame_summary,
         top_as3_allocation_sites,
     )
 
@@ -2178,6 +2336,8 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         "allocation_rate": allocation_rate,
         "frames": frames,
         "frame_summary": frame_summary,
+        "render_frames": render_frames,
+        "render_frame_summary": render_frame_summary,
         "performance_suspects": performance_suspects,
         "top_live_methods": [
             {"method_id": mid, "count": vals[0], "bytes": vals[1]}
@@ -2251,6 +2411,11 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
               f"{result.get('active_as3_reference_ex_edges', 0):>6} active reference-ex")
         if result.get("as3_reference_remove_edges"):
             print(f"  AS3 ref removes : {result.get('as3_reference_remove_edges', 0):>6} reference-remove events")
+    render_summary = result.get("render_frame_summary", {})
+    if render_summary.get("frame_count"):
+        print(f"  render frames   : {render_summary.get('frame_count', 0):>6} frames / "
+              f"{render_summary.get('slow_frame_count', 0):>6} slow / "
+              f"{render_summary.get('present_bound_count', 0):>6} present-bound")
     overhead = result["overhead"]
     print(f"  event rate      : {overhead['events_per_sec']:>12.2f} events/s")
     print(f"  payload rate    : {overhead['payload_bytes_per_sec']:>12.2f} B/s")
@@ -2475,6 +2640,17 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
             reasons = ", ".join(item.get("reasons", [])[:2])
             print(f"  [{item['kind']}] {item['name']} score={item.get('score', 0)} {reasons}")
 
+    render_frames = result.get("render_frame_summary", {}).get("slow_frames", [])[:top]
+    if render_frames:
+        print("\nSlow render frames:")
+        for item in render_frames:
+            upload_bytes = int(item.get("texture_upload_bytes") or 0) + int(item.get("texture_create_bytes") or 0)
+            print(
+                f"  frame={item['frame_index']:<8} interval={item['interval_ms']:<8} "
+                f"present={item['present_ms']:<8} draws={item['draw_calls']:<8} "
+                f"uploadBytes={upload_bytes}"
+            )
+
     direct_retained = result["top_as3_direct_retained_owners"][:top]
     if direct_retained and not retained:
         print("\nTop AS3 direct retained owners:")
@@ -2680,6 +2856,9 @@ th{background:#eef3f7}.warn{color:#9a4b00}
             "AS3 Ref Suggested Typed": result.get("as3_reference_inferred_typed_edges", 0),
             "Frames": result.get("frame_summary", {}).get("frame_count", 0),
             "Slow Frames": result.get("frame_summary", {}).get("slow_frame_count", 0),
+            "Render Frames": result.get("render_frame_summary", {}).get("frame_count", 0),
+            "Render Slow": result.get("render_frame_summary", {}).get("slow_frame_count", 0),
+            "Present Bound": result.get("render_frame_summary", {}).get("present_bound_count", 0),
             "Dropped": result["footer"]["dropped_count"],
         }
         parts.append("<div class='grid'>" + "".join(
@@ -2704,6 +2883,8 @@ th{background:#eef3f7}.warn{color:#9a4b00}
                                 ["owner_type", "payload_count", "known_bytes", "owner_site"], top))
         parts.append(html_table("Performance Suspects", result.get("performance_suspects", []),
                                 ["kind", "name", "score", "reasons"], top))
+        parts.append(html_table("Slow Render Frames", result.get("render_frame_summary", {}).get("slow_frames", []),
+                                ["frame_index", "interval_ms", "present_ms", "draw_calls", "texture_upload_bytes", "texture_create_bytes"], top))
         parts.append(html_table("Top AS3 Allocation Sites", result["top_as3_allocation_sites"],
                                 ["site", "count", "bytes", "owned_dependent_refs"], top))
         parts.append(html_table("Top Method Timing", result["top_method_timing"],

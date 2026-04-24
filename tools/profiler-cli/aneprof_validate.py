@@ -44,6 +44,7 @@ EVENT_TYPES = {
     18: "frame",
     19: "gc_cycle",
     20: "as3_reference_remove",
+    21: "render_frame",
 }
 
 

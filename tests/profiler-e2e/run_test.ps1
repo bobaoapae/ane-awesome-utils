@@ -1,14 +1,15 @@
 # Automated E2E test harness for the .aneprof profiler subsystem.
 #
-#   pwsh run_test.ps1                 # normal run: scenarios A+B+C+R+E+T+M+S+L
+#   pwsh run_test.ps1                 # normal run: scenarios A+B+P+C+R+E+T+M+S+L
 #   pwsh run_test.ps1 -Rebuild        # force rebuild
 #   pwsh run_test.ps1 -SkipBuild      # launch + inspect only
 #   pwsh run_test.ps1 -WithKillTest   # additionally run scenario D with kill
 #   pwsh run_test.ps1 -KeepOutputs    # don't cleanup storage after pass
 #
-# The test app (TestProfilerApp.as) runs 9 normal scenarios, plus D with -WithKillTest:
+# The test app (TestProfilerApp.as) runs 10 normal scenarios, plus D with -WithKillTest:
 #   A: short, timing-only
 #   B: second capture in the same process (restart test)
+#   P: D3D/DXGI render performance hook smoke/stress
 #   C: longer, adds memory hook + periodic snapshots
 #   E: hidden listener leak, objects removed from display but retained by a
 #      strong listener on a long-lived dispatcher
@@ -134,8 +135,9 @@ function Invoke-TestApp([int]$timeoutSec, [bool]$killMidway = $false, [int]$kill
 
 $validatePy = Join-Path $cliDir 'aneprof_validate.py'
 $analyzePy  = Join-Path $cliDir 'aneprof_analyze.py'
-$normalScenarios = @("A", "B", "C", "R", "E", "T", "M", "S", "L")
+$normalScenarios = @("A", "B", "P", "C", "R", "E", "T", "M", "S", "L")
 $memoryScenarios = @("C", "R", "E", "T", "M", "S", "L")
+$renderScenarios = @("P")
 
 function Summarise-Capture([string]$capturePath, [bool]$expectFooter = $true) {
     $summary = [ordered]@{ path=$capturePath; present=(Test-Path $capturePath) }
@@ -201,9 +203,9 @@ function Test-AnalysisPattern($analysis, [string[]]$patterns) {
 }
 
 # --------------------------------------------------------------------------
-# Run #1 - scenarios A+B+C+R+E+T+M+S+L in one process.
+# Run #1 - scenarios A+B+P+C+R+E+T+M+S+L in one process.
 # --------------------------------------------------------------------------
-Write-Host "`n======== RUN 1: scenarios A + B + C + R + E + T + M + S + L ========`n"
+Write-Host "`n======== RUN 1: scenarios A + B + P + C + R + E + T + M + S + L ========`n"
 $exit1 = Invoke-TestApp -timeoutSec $TimeoutSec
 Write-Host "[harness] run 1 exit code = $exit1"
 
@@ -218,6 +220,9 @@ foreach ($name in $normalScenarios) {
     $capture = Join-Path $storageDir "test_capture_$name.aneprof"
     $cap[$name] = Summarise-Capture -capturePath $capture -expectFooter $true
     if ($memoryScenarios -contains $name) {
+        $cap[$name]["analysis"] = Analyze-Capture -capturePath $capture -name $name
+    }
+    if ($renderScenarios -contains $name) {
         $cap[$name]["analysis"] = Analyze-Capture -capturePath $capture -name $name
     }
 }
@@ -290,9 +295,37 @@ foreach ($name in $normalScenarios) {
                 $hasPostNativeGcAs3Snapshot -and $hasAs3SnapshotDiffs
         }
     }
+    if ($renderScenarios -contains $name) {
+        $ok = $ok -and $s.analysis -and $s.analysis.exit -eq 0
+        if ($s.analysis -and $s.analysis.result) {
+            $renderFrames = [double]$s.analysis.result.counts.render_frame
+            $renderSummaryFrames = [double]$s.analysis.result.render_frame_summary.frame_count
+            $renderSlow = [double]$s.analysis.result.render_frame_summary.slow_frame_count
+            $ok = $ok -and ($renderFrames -gt 0) -and ($renderSummaryFrames -gt 0)
+        }
+    }
     if (-not $ok) { $allPass = $false }
     Write-Host ("  Scenario {0}: present={1,-5} size={2,-7} validate={3}  {4}" -f `
         $name, $s.present, $s.size, $s.validateExit, $(if ($ok) {"OK"} else {"FAIL"}))
+}
+
+if ($result1 -and $cap["P"].analysis -and $cap["P"].analysis.result) {
+    $pScenario = @($result1.scenarios) | Where-Object { $_.scenario -eq "P" } | Select-Object -First 1
+    $pre = if ($pScenario) { $pScenario.preStop } else { $null }
+    $ready = $pre -and $pre.renderDiagnosticsReady -eq $true
+    $installed = if ($pre -and $pre.renderHookInstalled -ne $null) { [double]$pre.renderHookInstalled } else { 0 }
+    $patchedSlots = if ($pre -and $pre.renderHookPatchedSlots -ne $null) { [double]$pre.renderHookPatchedSlots } else { 0 }
+    $presentCalls = if ($pre -and $pre.renderHookPresentCalls -ne $null) { [double]$pre.renderHookPresentCalls } else { 0 }
+    $renderFrames = [double]$cap["P"].analysis.result.render_frame_summary.frame_count
+    $drawCalls = [double]$cap["P"].analysis.result.render_frame_summary.total_draw_calls
+    $renderOk = ($ready -and $installed -ge 1 -and $patchedSlots -gt 0 -and $presentCalls -gt 0 -and $renderFrames -gt 0)
+    if (-not $renderOk) { $allPass = $false }
+    Write-Host ("  Render hook P: ready={0} installed={1} slots={2} present={3} frames={4} draws={5} {6}" -f `
+        $ready, $installed, $patchedSlots, $presentCalls, $renderFrames, $drawCalls,
+        $(if ($renderOk) {"OK"} else {"FAIL"}))
+} else {
+    $allPass = $false
+    Write-Host "  Render hook P: missing result/analyzer JSON FAIL"
 }
 
 if ($result1) {
@@ -474,10 +507,10 @@ if ($result1) {
         if ($r.failed) {
             Write-Host "  [$($r.scenario)] FAILED: $($r.reason)"
         } else {
-            Write-Host ("  [{0}] frames={1}/{2} events={3} payloadBytes={4} dropped={5} memory={6} nativeGc={7}" -f `
+            Write-Host ("  [{0}] frames={1}/{2} events={3} payloadBytes={4} dropped={5} memory={6} render={7} nativeGc={8}" -f `
                 $r.scenario, $r.framesRan, $r.targetFrames,
                 $r.postStop.events, $r.postStop.payloadBytes,
-                $r.postStop.dropped, $r.preStop.memoryEnabled,
+                $r.postStop.dropped, $r.preStop.memoryEnabled, $r.preStop.renderEnabled,
                 $r.nativeGcRequested)
         }
     }

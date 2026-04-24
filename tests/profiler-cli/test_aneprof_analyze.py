@@ -36,6 +36,7 @@ AS3_ROOT = 16
 AS3_PAYLOAD = 17
 FRAME = 18
 GC_CYCLE = 19
+RENDER_FRAME = 21
 
 FLAG_INFERRED = 1
 FLAG_REQUESTED = 2
@@ -92,6 +93,47 @@ def as3_payload(owner_id: int, payload_id: int, kind: int, logical: int, native:
 def frame_payload(index: int, duration_ns: int, alloc_bytes: int, alloc_count: int, label: str = "") -> bytes:
     lb = s(label)
     return struct.pack("<QQQII", index, duration_ns, alloc_bytes, alloc_count, len(lb)) + lb
+
+
+def render_frame_payload(
+    index: int,
+    interval_ns: int,
+    cpu_between_presents_ns: int,
+    present_ns: int,
+    draw_calls: int,
+    primitive_count: int,
+    texture_upload_bytes: int = 0,
+    texture_create_bytes: int = 0,
+    texture_create_count: int = 0,
+    texture_update_count: int = 0,
+    set_texture_count: int = 0,
+    render_target_change_count: int = 0,
+    clear_count: int = 0,
+    present_result: int = 0,
+    label: str = "",
+) -> bytes:
+    lb = s(label)
+    return (
+        struct.pack(
+            "<QQQQQQQQIIIIIII",
+            index,
+            interval_ns,
+            cpu_between_presents_ns,
+            present_ns,
+            draw_calls,
+            primitive_count,
+            texture_upload_bytes,
+            texture_create_bytes,
+            texture_create_count,
+            texture_update_count,
+            set_texture_count,
+            render_target_change_count,
+            clear_count,
+            present_result,
+            len(lb),
+        )
+        + lb
+    )
 
 
 def gc_cycle(gc_id: int, before_count: int, before_bytes: int, after_count: int, after_bytes: int, label: str = "") -> bytes:
@@ -333,6 +375,39 @@ class AneprofAnalyzeTests(unittest.TestCase):
         self.assertEqual(result["lifetime_summary"]["as3_freed_objects"], 1)
         self.assertGreaterEqual(result["allocation_rate"]["by_marker"][0]["allocation_bytes"], 8192)
 
+    def test_render_frame_summary_and_performance_suspects(self) -> None:
+        events = [
+            event(START, timestamp_ns=1),
+            event(
+                RENDER_FRAME,
+                render_frame_payload(
+                    42,
+                    33_000_000,
+                    6_000_000,
+                    18_000_000,
+                    1200,
+                    2400,
+                    texture_upload_bytes=5 * 1024 * 1024,
+                    texture_update_count=72,
+                    label="d3d9.present",
+                ),
+                40_000_000,
+            ),
+            event(STOP, timestamp_ns=41_000_000),
+        ]
+        result = analyze_events(events)
+
+        summary = result["render_frame_summary"]
+        self.assertEqual(summary["frame_count"], 1)
+        self.assertEqual(summary["slow_frame_count"], 1)
+        self.assertEqual(summary["present_bound_count"], 1)
+        self.assertEqual(summary["draw_heavy_count"], 1)
+        self.assertEqual(summary["total_texture_upload_bytes"], 5 * 1024 * 1024)
+        suspect = next(item for item in result["performance_suspects"] if item["kind"] == "render_frame")
+        self.assertEqual(suspect["name"], "42")
+        self.assertIn("high Present/vsync/GPU wait time", suspect["reasons"])
+        self.assertIn("high D3D9 draw call count", suspect["reasons"])
+
     def test_old_aneprof_without_new_events_still_has_new_json_fields(self) -> None:
         events = [
             event(START, timestamp_ns=1),
@@ -347,6 +422,7 @@ class AneprofAnalyzeTests(unittest.TestCase):
         self.assertIn("dominator_summary", result)
         self.assertIn("payload_by_owner", result)
         self.assertIn("lifetime_summary", result)
+        self.assertIn("render_frame_summary", result)
         self.assertEqual(result["retainer_paths"][0]["path"][0]["root_kind"], "unknown")
         self.assertTrue(result["retainer_paths"][0]["path"][0]["inferred"])
 

@@ -70,6 +70,8 @@ add_library(AneAwesomeUtilsWindows SHARED
         src/profiler/WindowsDeepMemoryHook.cpp
         src/profiler/WindowsAs3ObjectHook.hpp
         src/profiler/WindowsAs3ObjectHook.cpp
+        src/profiler/WindowsRenderHook.hpp
+        src/profiler/WindowsRenderHook.cpp
         src/profiler/WindowsLoopbackListener.hpp
         src/profiler/WindowsLoopbackListener.cpp
         src/profiler/WindowsDiskMonitor.cpp
@@ -80,6 +82,7 @@ add_library(AneAwesomeUtilsWindows SHARED
 target_link_libraries(AneAwesomeUtilsWindows PRIVATE
         ${LIBRARY_PATH}/FlashRuntimeExtensions.lib
         version.lib
+        user32.lib
         ws2_32.lib
         ane_miniz)
 
