@@ -61,10 +61,15 @@ add_library(AneAwesomeUtilsWindows SHARED
         ${PROFILER_SHARED_DIR}/src/RawFileSink.cpp
         ${PROFILER_SHARED_DIR}/src/ZlibFileSink.cpp
         ${PROFILER_SHARED_DIR}/src/CaptureController.cpp
+        ${PROFILER_SHARED_DIR}/src/DeepProfilerController.cpp
         src/profiler/WindowsRuntimeHook.hpp
         src/profiler/WindowsRuntimeHook.cpp
         src/profiler/WindowsAirRuntime.hpp
         src/profiler/WindowsAirRuntime.cpp
+        src/profiler/WindowsDeepMemoryHook.hpp
+        src/profiler/WindowsDeepMemoryHook.cpp
+        src/profiler/WindowsAs3ObjectHook.hpp
+        src/profiler/WindowsAs3ObjectHook.cpp
         src/profiler/WindowsLoopbackListener.hpp
         src/profiler/WindowsLoopbackListener.cpp
         src/profiler/WindowsDiskMonitor.cpp

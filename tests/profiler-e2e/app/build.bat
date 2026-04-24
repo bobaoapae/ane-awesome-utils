@@ -2,9 +2,7 @@
 setlocal EnableDelayedExpansion
 
 rem Builds the TestProfilerApp SWF and packages it into a captive-runtime
-rem bundle so that:
-rem   - the bundled `Adobe AIR.dll` matches our Mode B RVAs, and
-rem   - the app is fully self-contained (no adl, no installed AIR).
+rem bundle so the app is fully self-contained (no adl, no installed AIR).
 rem
 rem Usage:
 rem   build.bat                 -- x64 build (default)
@@ -54,12 +52,9 @@ copy /Y "%ANE_FILE%" "%EXT_DIR%\" >nul
 
 rem -------- 1. Compile SWF -------------------------------------------------
 echo [build] compiling SWF
-rem -advanced-telemetry embeds the opt-in flag so Scout can show AS3
-rem function-level sampling (Top Activities / ActionScript panel).
 call "%SDK%\bin\amxmlc.bat" ^
     -library-path+=%SWC_LIB% ^
     -external-library-path+=%AIRGLOBAL_SWC% ^
-    -advanced-telemetry ^
     -output=%OUT%\TestProfilerApp.swf ^
     TestProfilerApp.as
 if errorlevel 1 exit /b 1

@@ -99,6 +99,14 @@ public:
     // something that isn't Player.
     std::uintptr_t diagPlayerVtable() const { return diag_player_vtable_.load(std::memory_order_acquire); }
 
+    // True after forceEnableTelemetry constructed the SocketTransport /
+    // Telemetry / PlayerTelemetry trio ourselves (legacy pre-patch AIR).
+    // False when we attached to a trio Adobe had already wired at startup
+    // (post-fix_telemetry_mode_b AIR). Surfaced so callers can see which
+    // teardown semantics apply — legacy can round-trip start/stop with a
+    // fresh AMF3 session per cycle; attach cannot (pump stays on).
+    bool weOwnTransport() const { return we_own_transport_.load(std::memory_order_acquire); }
+
 private:
     std::uintptr_t       air_base_        = 0;
     std::atomic<bool>    initialized_{false};

@@ -6,7 +6,6 @@ import flash.events.EventDispatcher;
 import flash.events.StatusEvent;
 import flash.external.ExtensionContext;
 import flash.net.URLVariables;
-import flash.profiler.Telemetry;
 import flash.system.Capabilities;
 import flash.utils.ByteArray;
 import flash.filesystem.File;
@@ -811,38 +810,28 @@ public class AneAwesomeUtils {
     }
 
     // ------------------------------------------------------------------
-    // Scout-compatible profiler capture — on-demand, zero-idle Mode B.
+    // Deep profiler capture — Windows-first .aneprof backend.
     //
     //   profilerStart(outputPath, options): Boolean
-    //       Opens an .flmc file and turns telemetry ON inside the AIR
-    //       runtime (on x64: no .telemetry.cfg needed — forced via
-    //       native replay of init_telemetry; on x86: falls back to the
-    //       legacy flow that requires a .telemetry.cfg pointing to
-    //       127.0.0.1 on the same port).
+    //       Opens a native .aneprof event log. This path does not force
+    //       AIR Scout telemetry or require .telemetry.cfg.
     //
-    //       options.maxBytesMb          default 900 (0 = uncapped)
-    //       options.compressionLevel    default 6   (1..9)
-    //       options.headerJson          free-form JSON stored in the header
-    //       options.host                default "127.0.0.1"
-    //       options.port                default 7934
-    //       options.features            Object with boolean flags:
-    //           samplerEnabled                 default true
-    //           cpuCapture                     default true
-    //           displayObjectCapture           default false
-    //           stage3DCapture                 default false
-    //           scriptObjectAllocationTraces   default false
-    //           allGcAllocationTraces          default false
-    //           gcAllocationTracesThreshold    default 1024 (uint)
+    //       options.timing                       default true
+    //       options.memory                       default false
+    //       options.snapshots                    default true
+    //       options.snapshotIntervalMs           default 0 (manual only)
+    //       options.maxLiveAllocationsPerSnapshot default 4096
+    //       options.headerJson                   optional full header JSON
     //
-    //   profilerStop():             Boolean   — finalizes the .flmc
-    //   profilerGetStatus():        Object    — {state, bytesIn, bytesOut,
-    //                                            records, drops, dropBytes,
-    //                                            elapsedMs, modeBAvailable,
-    //                                            modeBActive}
-    //   profilerTakeMarker(name):   Boolean   — annotation in header JSON
+    //   profilerStop():                 Boolean
+    //   profilerSnapshot(label=null):   Boolean
+    //   profilerMarker(name, value):    Boolean
+    //   profilerGetStatus():            Object
+    //       memoryLeakDiagnosticsReady is true only while memory + free/realloc
+    //       hooks are installed for a live capture.
     //
     // State enum: 0=Idle 1=Starting 2=Recording 3=Stopping 4=Error.
-    // Only Windows is supported today. Android/Mac/iOS return false.
+    // Windows x86/x64 are supported today. Android/Mac/iOS return false.
     // ------------------------------------------------------------------
 
     public static const PROFILER_STATE_IDLE:uint      = 0;
@@ -855,39 +844,44 @@ public class AneAwesomeUtils {
         if (!_successInit) return false;
         if (!IsWindows()) return false;
 
-        var maxBytesMb:uint       = options != null && options.maxBytesMb       != null ? uint(options.maxBytesMb)    : 900;
-        var compressionLevel:int  = options != null && options.compressionLevel != null ? int(options.compressionLevel) : 6;
-        var headerJson:String     = options != null && options.headerJson       != null ? String(options.headerJson)  : "";
-        var host:String           = options != null && options.host             != null ? String(options.host)        : "127.0.0.1";
-        var port:uint             = options != null && options.port             != null ? uint(options.port)          : 7934;
+        var timing:Boolean = options != null && options.timing !== undefined
+                ? Boolean(options.timing) : true;
+        var memory:Boolean = options != null && options.memory !== undefined
+                ? Boolean(options.memory) : false;
+        var snapshots:Boolean = options != null && options.snapshots !== undefined
+                ? Boolean(options.snapshots) : true;
+        var snapshotIntervalMs:uint = options != null && options.snapshotIntervalMs !== undefined
+                ? uint(options.snapshotIntervalMs) : 0;
+        var maxLive:uint = options != null && options.maxLiveAllocationsPerSnapshot !== undefined
+                ? uint(options.maxLiveAllocationsPerSnapshot) : 4096;
+        var headerJson:String = options != null && options.headerJson !== undefined
+                ? String(options.headerJson)
+                : buildProfilerHeaderJson(options, timing, memory, snapshots,
+                                          snapshotIntervalMs, maxLive);
 
-        var features:Object = options != null && options.features != null ? options.features : {};
-        // Normalize the features object so the native side always gets the
-        // full set of properties (FREFunction readers default-fill missing).
-        var nativeFeatures:Object = {
-            samplerEnabled:                 features.samplerEnabled                 !== undefined ? Boolean(features.samplerEnabled)                 : true,
-            cpuCapture:                     features.cpuCapture                     !== undefined ? Boolean(features.cpuCapture)                     : true,
-            displayObjectCapture:           features.displayObjectCapture           !== undefined ? Boolean(features.displayObjectCapture)           : false,
-            stage3DCapture:                 features.stage3DCapture                 !== undefined ? Boolean(features.stage3DCapture)                 : false,
-            scriptObjectAllocationTraces:   features.scriptObjectAllocationTraces   !== undefined ? Boolean(features.scriptObjectAllocationTraces)   : false,
-            allGcAllocationTraces:          features.allGcAllocationTraces          !== undefined ? Boolean(features.allGcAllocationTraces)          : false,
-            gcAllocationTracesThreshold:    features.gcAllocationTracesThreshold    !== undefined ? uint   (features.gcAllocationTracesThreshold)    : 1024
-        };
-
-        return _extContext.call("awesomeUtils_profilerStart",
-                                outputPath,
-                                maxBytesMb,
-                                compressionLevel,
-                                headerJson,
-                                nativeFeatures,
-                                host,
-                                port) as Boolean;
+        var ok:Boolean = _extContext.call("awesomeUtils_profilerStart",
+                                          outputPath,
+                                          headerJson,
+                                          timing,
+                                          memory,
+                                          snapshots,
+                                          maxLive,
+                                          snapshotIntervalMs) as Boolean;
+        if (!ok) return false;
+        return true;
     }
 
     public function profilerStop():Boolean {
         if (!_successInit) return false;
         if (!IsWindows()) return false;
-        return _extContext.call("awesomeUtils_profilerStop") as Boolean;
+        var ok:Boolean = _extContext.call("awesomeUtils_profilerStop") as Boolean;
+        return ok;
+    }
+
+    public function profilerSnapshot(label:String = null):Boolean {
+        if (!_successInit) return false;
+        if (!IsWindows()) return false;
+        return _extContext.call("awesomeUtils_profilerSnapshot", label == null ? "" : label) as Boolean;
     }
 
     public function profilerGetStatus():Object {
@@ -896,51 +890,73 @@ public class AneAwesomeUtils {
         return _extContext.call("awesomeUtils_profilerGetStatus") as Object;
     }
 
-    // Inline marker — appears in the Scout wire stream as a
-    // `.value:<name>` record. Works whenever the runtime telemetry is
-    // active (either Mode B force-enabled by us, or Mode A via
-    // .telemetry.cfg). Safe to call when the profiler is idle (no-op).
-    //
-    // Also registers the marker in the ANE's own pending list so it gets
-    // written into the .flmc header JSON at stop time — useful for
-    // viewing high-level battle boundaries without having to parse the
-    // AMF3 stream.
-    public function profilerMarker(name:String, value:Number = 1):Boolean {
+    public function profilerMarker(name:String, value:* = null):Boolean {
         if (!_successInit) return false;
-        // flash.profiler.Telemetry is available on all AIR platforms.
-        // When telemetry isn't connected, sendMetric is a no-op.
-        try {
-            if (Telemetry.connected) {
-                Telemetry.sendMetric(name, value);
-            }
-        } catch (e:Error) {
-            // Some builds of the runtime mark sendMetric as debug-only;
-            // swallow the failure and fall back to header-only markers.
-        }
         if (IsWindows()) {
-            return _extContext.call("awesomeUtils_profilerTakeMarker", name) as Boolean;
+            return _extContext.call("awesomeUtils_profilerMarker",
+                                    name,
+                                    profilerValueToJson(value)) as Boolean;
         }
         return true;
     }
 
-    // Backwards-compatible alias for the header-JSON-only marker.
     public function profilerTakeMarker(name:String):Boolean {
         return profilerMarker(name, 1);
     }
 
-    // EXPERIMENTAL — span metric wrapper. Captures `Telemetry.spanMarker`
-    // before the closure, runs it, then emits `sendSpanMetric`. Currently
-    // unstable when used inside tight loops (can heap-corrupt the runtime
-    // after a few hundred consecutive calls during a Mode-B-forced
-    // capture). Prefer a single `profilerMarker("turn.start", ts)` +
-    // `profilerMarker("turn.end", ts)` pair until the issue is triaged.
+    internal function profilerRecordAllocForTest(ptr:Number, size:Number):Boolean {
+        if (!_successInit) return false;
+        if (!IsWindows()) return false;
+        return _extContext.call("awesomeUtils_profilerRecordAlloc", ptr, size) as Boolean;
+    }
+
+    internal function profilerRecordFreeForTest(ptr:Number):Boolean {
+        if (!_successInit) return false;
+        if (!IsWindows()) return false;
+        return _extContext.call("awesomeUtils_profilerRecordFree", ptr) as Boolean;
+    }
+
     public function profilerSpan(name:String, fn:Function):void {
-        var startMarker:Number = Telemetry.spanMarker;
+        profilerMarker(name + ".start");
         try {
             fn();
         } finally {
-            try { Telemetry.sendSpanMetric(name, startMarker); } catch (e:Error) {}
+            profilerMarker(name + ".end");
         }
+    }
+
+    private function buildProfilerHeaderJson(options:Object,
+                                             timing:Boolean,
+                                             memory:Boolean,
+                                             snapshots:Boolean,
+                                             snapshotIntervalMs:uint,
+                                             maxLive:uint):String {
+        var header:Object = {
+            format: "aneprof",
+            formatVersion: 1,
+            backend: "deep-native",
+            platform: "windows",
+            airSdk: "51.1.3.10",
+            timing: timing,
+            memory: memory,
+            snapshots: snapshots,
+            snapshotIntervalMs: snapshotIntervalMs,
+            maxLiveAllocationsPerSnapshot: maxLive
+        };
+        if (options != null && options.metadata !== undefined) {
+            header.metadata = options.metadata;
+        }
+        return JSON.stringify(header);
+    }
+
+    private function profilerValueToJson(value:*):String {
+        if (value === undefined || value === null) return "null";
+        try {
+            return JSON.stringify(value);
+        } catch (e:Error) {
+            return JSON.stringify(String(value));
+        }
+        return "null";
     }
 }
 }

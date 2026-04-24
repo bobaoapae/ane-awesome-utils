@@ -1,65 +1,53 @@
 #include "ProfilerAneBindings.hpp"
 
-#include "CaptureController.hpp"
+#include "DeepProfilerController.hpp"
 #include "IDiskMonitor.hpp"
-#include "ProfilerFeatures.hpp"
-#include "profiler/WindowsAirRuntime.hpp"
-#include "profiler/WindowsLoopbackListener.hpp"
-#include "profiler/WindowsRuntimeHook.hpp"
+#include "profiler/WindowsAs3ObjectHook.hpp"
+#include "profiler/WindowsDeepMemoryHook.hpp"
 
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <vector>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
 
 namespace ane::profiler::bindings {
 
-// ----------- shared singleton state ---------------------------------------
 namespace {
-std::mutex                          g_mu;
-std::unique_ptr<CaptureController>       g_ctrl;
-std::unique_ptr<WindowsRuntimeHook>      g_hook;
-std::unique_ptr<WindowsAirRuntime>       g_air_runtime;
-std::unique_ptr<WindowsLoopbackListener> g_loopback;
-std::unique_ptr<IDiskMonitor>            g_disk;
-std::vector<std::string>                 g_pending_markers;
-bool                                     g_runtime_forced_on = false;
-// Post-patch Adobe wires its SocketTransport once at startup and keeps it
-// alive for the process lifetime. Tearing down the loopback listener /
-// IAT hook between profiler_start cycles would ECONNRESET that transport
-// and Adobe would stop sending. So once the pump is up we leave it up —
-// recording is toggled purely via CaptureController::start/stop.
-bool                                     g_runtime_pump_started = false;
-} // namespace
+std::mutex g_mu;
+std::unique_ptr<DeepProfilerController> g_ctrl;
+std::unique_ptr<IDiskMonitor> g_disk;
+std::unique_ptr<WindowsDeepMemoryHook> g_memory_hook;
+std::unique_ptr<WindowsAs3ObjectHook> g_as3_object_hook;
 
-// ----------- small FRE helpers --------------------------------------------
-
-static FREObject make_bool(bool v) {
+FREObject make_bool(bool v) {
     FREObject o = nullptr;
     FRENewObjectFromBool(v ? 1u : 0u, &o);
     return o;
 }
 
-static FREObject make_u32(std::uint32_t v) {
+FREObject make_u32(std::uint32_t v) {
     FREObject o = nullptr;
     FRENewObjectFromUint32(v, &o);
     return o;
 }
 
-static FREObject make_f64(double v) {
+FREObject make_f64(double v) {
     FREObject o = nullptr;
     FRENewObjectFromDouble(v, &o);
     return o;
 }
 
-static bool read_string(FREObject o, std::string& out) {
+FREObject make_string(const char* s) {
+    FREObject o = nullptr;
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(s ? s : "");
+    FRENewObjectFromUTF8(static_cast<std::uint32_t>(std::strlen(reinterpret_cast<const char*>(bytes))),
+                         bytes,
+                         &o);
+    return o;
+}
+
+bool read_string(FREObject o, std::string& out) {
     std::uint32_t len = 0;
     const std::uint8_t* data = nullptr;
     if (FREGetObjectAsUTF8(o, &len, &data) != FRE_OK || data == nullptr) return false;
@@ -67,187 +55,146 @@ static bool read_string(FREObject o, std::string& out) {
     return true;
 }
 
-static bool read_u32(FREObject o, std::uint32_t& out) {
+bool read_u32(FREObject o, std::uint32_t& out) {
     return FREGetObjectAsUint32(o, &out) == FRE_OK;
 }
 
-static bool read_i32(FREObject o, std::int32_t& out) {
-    return FREGetObjectAsInt32(o, &out) == FRE_OK;
+bool read_u64_number(FREObject o, std::uint64_t& out) {
+    std::uint32_t u32 = 0;
+    if (FREGetObjectAsUint32(o, &u32) == FRE_OK) {
+        out = u32;
+        return true;
+    }
+    double d = 0;
+    if (FREGetObjectAsDouble(o, &d) != FRE_OK || d < 0) return false;
+    out = static_cast<std::uint64_t>(d);
+    return true;
 }
 
-static bool read_bool(FREObject o, bool& out) {
+bool read_bool(FREObject o, bool& out) {
     std::uint32_t v = 0;
     if (FREGetObjectAsBool(o, &v) != FRE_OK) return false;
     out = (v != 0);
     return true;
 }
 
-static void set_prop_u32(FREObject obj, const char* name, std::uint32_t v) {
+void set_prop_u32(FREObject obj, const char* name, std::uint32_t v) {
     FREObject tmp = make_u32(v);
     FRESetObjectProperty(obj, reinterpret_cast<const std::uint8_t*>(name), tmp, nullptr);
 }
-static void set_prop_f64(FREObject obj, const char* name, double v) {
+
+void set_prop_f64(FREObject obj, const char* name, double v) {
     FREObject tmp = make_f64(v);
     FRESetObjectProperty(obj, reinterpret_cast<const std::uint8_t*>(name), tmp, nullptr);
 }
 
-// Reads a boolean property from an AS3 object, defaulting if absent.
-static bool read_bool_prop(FREObject obj, const char* name, bool dflt) {
-    FREObject prop = nullptr;
-    if (FREGetObjectProperty(obj, reinterpret_cast<const std::uint8_t*>(name),
-                              &prop, nullptr) != FRE_OK || prop == nullptr) {
-        return dflt;
-    }
-    bool v = dflt;
-    if (!read_bool(prop, v)) return dflt;
-    return v;
+void set_prop_bool(FREObject obj, const char* name, bool v) {
+    FREObject tmp = make_bool(v);
+    FRESetObjectProperty(obj, reinterpret_cast<const std::uint8_t*>(name), tmp, nullptr);
 }
 
-static std::uint32_t read_u32_prop(FREObject obj, const char* name, std::uint32_t dflt) {
-    FREObject prop = nullptr;
-    if (FREGetObjectProperty(obj, reinterpret_cast<const std::uint8_t*>(name),
-                              &prop, nullptr) != FRE_OK || prop == nullptr) {
-        return dflt;
-    }
-    std::uint32_t v = dflt;
-    if (!read_u32(prop, v)) return dflt;
-    return v;
+void set_prop_string(FREObject obj, const char* name, const char* v) {
+    FREObject tmp = make_string(v);
+    FRESetObjectProperty(obj, reinterpret_cast<const std::uint8_t*>(name), tmp, nullptr);
 }
 
-// ----------- FREFunctions -------------------------------------------------
+bool ensure_controller() {
+    if (!g_ctrl) g_ctrl = std::make_unique<DeepProfilerController>();
+    if (!g_disk) g_disk = IDiskMonitor::create();
+    if (!g_memory_hook) g_memory_hook = std::make_unique<WindowsDeepMemoryHook>();
+    if (!g_as3_object_hook) g_as3_object_hook = std::make_unique<WindowsAs3ObjectHook>();
+    return static_cast<bool>(g_ctrl);
+}
+
+} // namespace
 
 // profilerStart(outputPath:String,
-//               maxBytesMb:uint = 900,
-//               compressionLevel:int = 6,
-//               headerJson:String = "",
-//               features:Object = null,
-//               host:String = "127.0.0.1",
-//               port:uint = 7934): Boolean
-FREObject profiler_start(FREContext ctx, void*, std::uint32_t argc, FREObject* argv) {
+//               headerJson:String,
+//               timing:Boolean,
+//               memory:Boolean,
+//               snapshots:Boolean,
+//               maxLive:uint,
+//               snapshotIntervalMs:uint): Boolean
+FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv) {
     std::lock_guard<std::mutex> g(g_mu);
     if (argc < 1) return make_bool(false);
+    if (!ensure_controller()) return make_bool(false);
 
     std::string output_path;
-    if (!read_string(argv[0], output_path) || output_path.empty()) return make_bool(false);
-
-    std::uint32_t max_bytes_mb = 900;
-    std::int32_t  level = 6;
-    std::string   header_json;
-    if (argc >= 2) read_u32(argv[1], max_bytes_mb);
-    if (argc >= 3) read_i32(argv[2], level);
-    if (argc >= 4) read_string(argv[3], header_json);
-
-    ProfilerFeatures features;
-    if (argc >= 5 && argv[4] != nullptr) {
-        FREObject f = argv[4];
-        features.sampler_enabled                 = read_bool_prop(f, "samplerEnabled",       true);
-        features.cpu_capture                     = read_bool_prop(f, "cpuCapture",           true);
-        features.display_object_capture          = read_bool_prop(f, "displayObjectCapture", false);
-        features.stage3d_capture                 = read_bool_prop(f, "stage3DCapture",       false);
-        features.script_object_allocation_traces = read_bool_prop(f, "scriptObjectAllocationTraces", false);
-        features.all_gc_allocation_traces        = read_bool_prop(f, "allGcAllocationTraces",        false);
-        features.gc_allocation_traces_threshold  = read_u32_prop (f, "gcAllocationTracesThreshold", 1024);
-    }
-
-    std::string host = "127.0.0.1";
-    std::uint32_t port = 7934;
-    if (argc >= 6) read_string(argv[5], host);
-    if (argc >= 7) read_u32(argv[6], port);
-
-    if (g_ctrl && g_ctrl->state() != CaptureController::State::Idle) {
-        return make_bool(false); // already recording
-    }
-
-    if (!g_ctrl)        g_ctrl        = std::make_unique<CaptureController>();
-    if (!g_hook)        g_hook        = std::make_unique<WindowsRuntimeHook>();
-    if (!g_air_runtime) g_air_runtime = std::make_unique<WindowsAirRuntime>();
-    if (!g_loopback)    g_loopback    = std::make_unique<WindowsLoopbackListener>();
-    if (!g_disk)        g_disk        = IDiskMonitor::create();
-
-    // The profiler is strictly Mode B: we refuse to start unless we can
-    // force the runtime telemetry on ourselves. This guarantees zero idle
-    // overhead — without a successful Start, no runtime telemetry ever
-    // runs — AND it means a stale .telemetry.cfg on disk can never turn
-    // the profiler on silently. `profilerStop` is the only way back to
-    // idle; the next `profilerStart` re-allocates and re-wires from scratch.
-    if (!g_air_runtime->initialize()) {
+    if (!read_string(argv[0], output_path) || output_path.empty()) {
         return make_bool(false);
     }
-    if (g_air_runtime->tryCapturePlayer(static_cast<void*>(ctx)) == nullptr) {
+    if (g_ctrl->state() != DeepProfilerController::State::Idle) {
         return make_bool(false);
     }
 
-    // Disk-space gate.
+    std::string header_json;
+    bool timing = true;
+    bool memory = false;
+    bool snapshots = true;
+    std::uint32_t max_live = 4096;
+    std::uint32_t snapshot_interval_ms = 0;
+    if (argc >= 2) read_string(argv[1], header_json);
+    if (argc >= 3) read_bool(argv[2], timing);
+    if (argc >= 4) read_bool(argv[3], memory);
+    if (argc >= 5) read_bool(argv[4], snapshots);
+    if (argc >= 6) read_u32(argv[5], max_live);
+    if (argc >= 7) read_u32(argv[6], snapshot_interval_ms);
+
     if (g_disk) {
         constexpr std::uint64_t kMinFree = 200ull * 1024ull * 1024ull;
         const std::uint64_t free = g_disk->free_bytes(output_path);
         if (free != UINT64_MAX && free < kMinFree) return make_bool(false);
     }
 
-    // Reject non-loopback / zero-port configs — without the internal
-    // loopback listener there is no peer for the runtime to connect to,
-    // and forceEnable would time out.
-    const bool is_loopback = (host == "127.0.0.1" || host == "localhost" || host == "::1");
-    if (!is_loopback || port == 0 || port > 65535) {
-        return make_bool(false);
-    }
-
-    // File + hook + listener all come up first, then we force-enable the
-    // runtime. Symmetric teardown on stop or on any failure below.
-    CaptureController::Config cfg;
-    cfg.output_path       = std::move(output_path);
-    cfg.max_bytes_out     = (max_bytes_mb == 0) ? 0ull
-                              : static_cast<std::uint64_t>(max_bytes_mb) * 1024ull * 1024ull;
-    cfg.compression_level = (level < 1 || level > 9) ? 6 : level;
-    cfg.header_json       = header_json.empty()
-        ? std::string(R"({"platform":"windows","air_version":"51.1.3.10",)"
-                      R"("compression":"zlib","wire_protocol":"scout-amf3"})")
-        : std::move(header_json);
+    DeepProfilerController::Config cfg;
+    cfg.output_path = std::move(output_path);
+    cfg.header_json = std::move(header_json);
+    cfg.timing_enabled = timing;
+    cfg.memory_enabled = memory;
+    cfg.snapshots_enabled = snapshots;
+    cfg.max_live_allocations_per_snapshot = max_live == 0 ? 4096 : max_live;
+    cfg.snapshot_interval_ms = snapshot_interval_ms;
 
     if (!g_ctrl->start(cfg)) return make_bool(false);
-
-    if (!g_runtime_pump_started) {
-        // First start in this process: bring up the IAT hook, bind the
-        // loopback listener, and force-enable telemetry. These stay up
-        // across subsequent start/stop cycles.
-        if (!g_hook->install(g_ctrl.get())) {
+    if (memory) {
+        if (!g_memory_hook->install(g_ctrl.get())) {
             g_ctrl->stop();
             return make_bool(false);
         }
-
-        g_loopback->start(static_cast<std::uint16_t>(port));
-
-        g_runtime_forced_on = g_air_runtime->forceEnableTelemetry(host, port, features);
-        if (!g_runtime_forced_on) {
-            g_loopback->stop();
-            g_hook->uninstall();
+        if (!g_as3_object_hook->install(g_ctrl.get())) {
+            g_memory_hook->uninstall();
             g_ctrl->stop();
             return make_bool(false);
         }
-
-        g_runtime_pump_started = true;
-    } else {
-        // Pump already running from a prior cycle — just repoint the
-        // hook's controller at the new CaptureController instance so
-        // in-flight bytes land in the fresh .flmc.
-        g_hook->install(g_ctrl.get());
     }
-
-    g_pending_markers.clear();
     return make_bool(true);
 }
 
 FREObject profiler_stop(FREContext, void*, std::uint32_t, FREObject*) {
     std::lock_guard<std::mutex> g(g_mu);
+    if (!g_ctrl) return make_bool(true);
+    if (g_as3_object_hook) g_as3_object_hook->uninstall();
+    if (g_memory_hook) g_memory_hook->uninstall();
+    return make_bool(g_ctrl->stop());
+}
 
-    // Toggle recording off — the capture file is finalised, but the
-    // loopback listener, IAT hook, and Adobe's forced-on telemetry pump
-    // stay live. Any further bytes Adobe pushes while we're idle are
-    // dropped by CaptureController (state=Idle bumps a drop counter).
-    // Tearing those three down here would ECONNRESET Adobe's long-lived
-    // SocketTransport and the next profiler_start would never see a byte.
-    if (g_ctrl) g_ctrl->stop();
-    return make_bool(true);
+FREObject profiler_snapshot(FREContext, void*, std::uint32_t argc, FREObject* argv) {
+    std::lock_guard<std::mutex> g(g_mu);
+    if (!g_ctrl) return make_bool(false);
+    std::string label;
+    if (argc >= 1 && argv[0] != nullptr) read_string(argv[0], label);
+    return make_bool(g_ctrl->snapshot(label));
+}
+
+FREObject profiler_marker(FREContext, void*, std::uint32_t argc, FREObject* argv) {
+    std::lock_guard<std::mutex> g(g_mu);
+    if (!g_ctrl || argc < 1) return make_bool(false);
+    std::string name;
+    std::string value_json = "null";
+    if (!read_string(argv[0], name) || name.empty()) return make_bool(false);
+    if (argc >= 2 && argv[1] != nullptr) read_string(argv[1], value_json);
+    return make_bool(g_ctrl->marker(name, value_json));
 }
 
 FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
@@ -256,63 +203,166 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
     FRENewObject(reinterpret_cast<const std::uint8_t*>("Object"), 0, nullptr, &obj, nullptr);
     if (obj == nullptr) return nullptr;
 
-    CaptureController::Status s{};
+    DeepProfilerController::Status s{};
     if (g_ctrl) s = g_ctrl->status();
-    else        s.state = CaptureController::State::Idle;
 
-    set_prop_u32(obj, "state",     static_cast<std::uint32_t>(s.state));
-    set_prop_f64(obj, "bytesIn",   static_cast<double>(s.bytes_in));
-    set_prop_f64(obj, "bytesOut",  static_cast<double>(s.bytes_out));
-    set_prop_f64(obj, "records",   static_cast<double>(s.record_count));
-    set_prop_f64(obj, "drops",     static_cast<double>(s.drop_count));
-    set_prop_f64(obj, "dropBytes", static_cast<double>(s.drop_bytes));
-    set_prop_u32(obj, "elapsedMs", static_cast<std::uint32_t>(s.elapsed_ms > 0xFFFFFFFFu
-                                                                 ? 0xFFFFFFFFu
+    set_prop_string(obj, "backend", "aneprof");
+    set_prop_string(obj, "format", "aneprof");
+    set_prop_u32(obj, "state", static_cast<std::uint32_t>(s.state));
+    set_prop_f64(obj, "events", static_cast<double>(s.events));
+    set_prop_f64(obj, "dropped", static_cast<double>(s.dropped));
+    set_prop_f64(obj, "payloadBytes", static_cast<double>(s.payload_bytes));
+    set_prop_u32(obj, "elapsedMs", static_cast<std::uint32_t>(s.elapsed_ms > 0xffffffffu
+                                                                 ? 0xffffffffu
                                                                  : s.elapsed_ms));
-    set_prop_u32(obj, "modeBAvailable",
-                 (g_air_runtime && g_air_runtime->initialized()) ? 1u : 0u);
-    set_prop_u32(obj, "modeBActive", g_runtime_forced_on ? 1u : 0u);
-    set_prop_u32(obj, "playerCaptured",
-                 (g_air_runtime && g_air_runtime->player() != nullptr) ? 1u : 0u);
-    set_prop_u32(obj, "lastError",
-                 g_air_runtime ? static_cast<std::uint32_t>(g_air_runtime->lastError()) : 0u);
-    if (g_air_runtime) {
-        set_prop_f64(obj, "diagSlotTransport",     static_cast<double>(g_air_runtime->diagSlotTransport()));
-        set_prop_f64(obj, "diagSlotTelemetry",     static_cast<double>(g_air_runtime->diagSlotTelemetry()));
-        set_prop_f64(obj, "diagSlotPlayerTel",     static_cast<double>(g_air_runtime->diagSlotPlayerTelemetry()));
-        set_prop_f64(obj, "playerPtr",             static_cast<double>(reinterpret_cast<std::uintptr_t>(g_air_runtime->player())));
-        set_prop_f64(obj, "diagChainFrame",        static_cast<double>(g_air_runtime->diagChainFrame()));
-        set_prop_f64(obj, "diagChainStep1",        static_cast<double>(g_air_runtime->diagChainStep1()));
-        set_prop_f64(obj, "diagChainStep2",        static_cast<double>(g_air_runtime->diagChainStep2()));
-        set_prop_f64(obj, "diagChainStep3",        static_cast<double>(g_air_runtime->diagChainStep3()));
-        set_prop_f64(obj, "diagPlayerVtable",      static_cast<double>(g_air_runtime->diagPlayerVtable()));
+    set_prop_f64(obj, "liveAllocations", static_cast<double>(s.live_allocations));
+    set_prop_f64(obj, "liveBytes", static_cast<double>(s.live_bytes));
+    set_prop_f64(obj, "totalAllocations", static_cast<double>(s.total_allocations));
+    set_prop_f64(obj, "totalFrees", static_cast<double>(s.total_frees));
+    set_prop_f64(obj, "totalReallocations", static_cast<double>(s.total_reallocations));
+    set_prop_f64(obj, "unknownFrees", static_cast<double>(s.unknown_frees));
+    set_prop_bool(obj, "timingEnabled", s.timing_enabled);
+    set_prop_bool(obj, "memoryEnabled", s.memory_enabled);
+    set_prop_bool(obj, "snapshotsEnabled", s.snapshots_enabled);
+    set_prop_u32(obj, "memoryHookInstalled",
+                 (g_memory_hook && g_memory_hook->installed()) ? 1u : 0u);
+    set_prop_u32(obj, "as3ObjectHookInstalled",
+                 (g_as3_object_hook && g_as3_object_hook->installed()) ? 1u : 0u);
+    set_prop_bool(obj, "memoryFreeHooksInstalled",
+                  g_memory_hook && g_memory_hook->freeHooksInstalled());
+    set_prop_bool(obj, "memoryReallocHooksInstalled",
+                  g_memory_hook && g_memory_hook->reallocHooksInstalled());
+    set_prop_bool(obj, "memoryLeakDiagnosticsReady",
+                  s.memory_enabled &&
+                  g_memory_hook &&
+                  g_memory_hook->installed() &&
+                  g_memory_hook->freeHooksInstalled() &&
+                  g_memory_hook->reallocHooksInstalled());
+    set_prop_bool(obj, "as3LeakDiagnosticsReady",
+                  s.memory_enabled &&
+                  g_as3_object_hook &&
+                  g_as3_object_hook->installed());
+    if (g_memory_hook) {
+        set_prop_f64(obj, "memoryHookAllocCalls",
+                     static_cast<double>(g_memory_hook->allocCalls()));
+        set_prop_f64(obj, "memoryHookAllocLockedCalls",
+                     static_cast<double>(g_memory_hook->allocLockedCalls()));
+        set_prop_f64(obj, "memoryHookHeapAllocCalls",
+                     static_cast<double>(g_memory_hook->heapAllocCalls()));
+        set_prop_f64(obj, "memoryHookFreeCalls",
+                     static_cast<double>(g_memory_hook->freeCalls()));
+        set_prop_f64(obj, "memoryHookHeapFreeCalls",
+                     static_cast<double>(g_memory_hook->heapFreeCalls()));
+        set_prop_f64(obj, "memoryHookHeapReallocCalls",
+                     static_cast<double>(g_memory_hook->heapReallocCalls()));
+        set_prop_f64(obj, "memoryHookFailedInstalls",
+                     static_cast<double>(g_memory_hook->failedInstalls()));
+        set_prop_u32(obj, "memoryHookLastFailureStage",
+                     g_memory_hook->lastFailureStage());
     }
+    if (g_as3_object_hook) {
+        set_prop_f64(obj, "as3ObjectAllocCalls",
+                     static_cast<double>(g_as3_object_hook->as3AllocCalls()));
+        set_prop_f64(obj, "as3ObjectFreeCalls",
+                     static_cast<double>(g_as3_object_hook->as3FreeCalls()));
+        set_prop_f64(obj, "as3GenericAllocCalls",
+                     static_cast<double>(g_as3_object_hook->genericAllocCalls()));
+        set_prop_f64(obj, "as3ObjectHookFailedInstalls",
+                     static_cast<double>(g_as3_object_hook->failedInstalls()));
+        set_prop_u32(obj, "as3ObjectHookLastFailureStage",
+                     g_as3_object_hook->lastFailureStage());
+    }
+    set_prop_u32(obj, "modeBAvailable", 0);
+    set_prop_u32(obj, "modeBActive", 0);
+    set_prop_u32(obj, "weOwnTransport", 0);
     return obj;
 }
 
-FREObject profiler_take_marker(FREContext, void*, std::uint32_t argc, FREObject* argv) {
-    std::lock_guard<std::mutex> g(g_mu);
+FREObject profiler_probe_enter(FREContext, void*, std::uint32_t argc, FREObject* argv) {
     if (argc < 1) return make_bool(false);
-    std::string name;
-    if (!read_string(argv[0], name)) return make_bool(false);
-    g_pending_markers.emplace_back(std::move(name));
-    return make_bool(true);
+    std::uint32_t method_id = 0;
+    if (!read_u32(argv[0], method_id)) return make_bool(false);
+    std::lock_guard<std::mutex> g(g_mu);
+    return make_bool(g_ctrl != nullptr && g_ctrl->method_enter(method_id));
 }
 
-// ----------- registration -------------------------------------------------
+FREObject profiler_probe_exit(FREContext, void*, std::uint32_t argc, FREObject* argv) {
+    if (argc < 1) return make_bool(false);
+    std::uint32_t method_id = 0;
+    if (!read_u32(argv[0], method_id)) return make_bool(false);
+    std::lock_guard<std::mutex> g(g_mu);
+    return make_bool(g_ctrl != nullptr && g_ctrl->method_exit(method_id));
+}
+
+FREObject profiler_register_method_table(FREContext, void*, std::uint32_t argc, FREObject* argv) {
+    if (argc < 1 || argv[0] == nullptr) return make_bool(false);
+    FREByteArray ba{};
+    if (FREAcquireByteArray(argv[0], &ba) != FRE_OK) return make_bool(false);
+    bool ok = false;
+    {
+        std::lock_guard<std::mutex> g(g_mu);
+        ok = g_ctrl != nullptr && g_ctrl->register_method_table(ba.bytes, ba.length);
+    }
+    FREReleaseByteArray(argv[0]);
+    return make_bool(ok);
+}
+
+FREObject profiler_record_alloc(FREContext, void*, std::uint32_t argc, FREObject* argv) {
+    if (argc < 2) return make_bool(false);
+    std::uint64_t ptr = 0;
+    std::uint64_t size = 0;
+    if (!read_u64_number(argv[0], ptr) || !read_u64_number(argv[1], size)) return make_bool(false);
+    std::lock_guard<std::mutex> g(g_mu);
+    return make_bool(g_ctrl != nullptr &&
+                     g_ctrl->record_alloc(reinterpret_cast<void*>(static_cast<std::uintptr_t>(ptr)), size));
+}
+
+FREObject profiler_record_free(FREContext, void*, std::uint32_t argc, FREObject* argv) {
+    if (argc < 1) return make_bool(false);
+    std::uint64_t ptr = 0;
+    if (!read_u64_number(argv[0], ptr)) return make_bool(false);
+    std::lock_guard<std::mutex> g(g_mu);
+    return make_bool(g_ctrl != nullptr &&
+                     g_ctrl->record_free(reinterpret_cast<void*>(static_cast<std::uintptr_t>(ptr))));
+}
+
+FREObject profiler_record_realloc(FREContext, void*, std::uint32_t argc, FREObject* argv) {
+    if (argc < 3) return make_bool(false);
+    std::uint64_t old_ptr = 0;
+    std::uint64_t new_ptr = 0;
+    std::uint64_t new_size = 0;
+    if (!read_u64_number(argv[0], old_ptr) ||
+        !read_u64_number(argv[1], new_ptr) ||
+        !read_u64_number(argv[2], new_size)) {
+        return make_bool(false);
+    }
+    std::lock_guard<std::mutex> g(g_mu);
+    return make_bool(g_ctrl != nullptr &&
+                     g_ctrl->record_realloc(
+                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(old_ptr)),
+                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(new_ptr)),
+                         new_size));
+}
 
 void register_all(FRENamedFunction* out_functions, int capacity, int* cursor) {
     if (out_functions == nullptr || cursor == nullptr) return;
     struct Entry { const char* name; FREFunction fn; };
     const Entry entries[] = {
-        { "awesomeUtils_profilerStart",       &profiler_start },
-        { "awesomeUtils_profilerStop",        &profiler_stop },
-        { "awesomeUtils_profilerGetStatus",   &profiler_get_status },
-        { "awesomeUtils_profilerTakeMarker",  &profiler_take_marker },
+        { "awesomeUtils_profilerStart",               &profiler_start },
+        { "awesomeUtils_profilerStop",                &profiler_stop },
+        { "awesomeUtils_profilerGetStatus",           &profiler_get_status },
+        { "awesomeUtils_profilerSnapshot",            &profiler_snapshot },
+        { "awesomeUtils_profilerMarker",              &profiler_marker },
+        { "awesomeUtils_profilerProbeEnter",          &profiler_probe_enter },
+        { "awesomeUtils_profilerProbeExit",           &profiler_probe_exit },
+        { "awesomeUtils_profilerRegisterMethodTable", &profiler_register_method_table },
+        { "awesomeUtils_profilerRecordAlloc",         &profiler_record_alloc },
+        { "awesomeUtils_profilerRecordFree",          &profiler_record_free },
+        { "awesomeUtils_profilerRecordRealloc",       &profiler_record_realloc },
     };
     for (const auto& e : entries) {
         if (*cursor >= capacity) return;
-        out_functions[*cursor].name     = reinterpret_cast<const std::uint8_t*>(e.name);
+        out_functions[*cursor].name = reinterpret_cast<const std::uint8_t*>(e.name);
         out_functions[*cursor].function = e.fn;
         out_functions[*cursor].functionData = nullptr;
         ++(*cursor);
@@ -321,19 +371,13 @@ void register_all(FRENamedFunction* out_functions, int capacity, int* cursor) {
 
 void shutdown() {
     std::lock_guard<std::mutex> g(g_mu);
-    if (g_runtime_forced_on && g_air_runtime) {
-        g_air_runtime->forceDisableTelemetry();
-        g_runtime_forced_on = false;
-    }
-    if (g_loopback) g_loopback->stop();
-    if (g_ctrl)     g_ctrl->stop();
-    if (g_hook)     g_hook->uninstall();
+    if (g_as3_object_hook) g_as3_object_hook->uninstall();
+    if (g_memory_hook) g_memory_hook->uninstall();
+    if (g_ctrl) g_ctrl->stop();
     g_ctrl.reset();
-    g_hook.reset();
-    g_air_runtime.reset();
-    g_loopback.reset();
     g_disk.reset();
-    g_pending_markers.clear();
+    g_memory_hook.reset();
+    g_as3_object_hook.reset();
 }
 
 } // namespace ane::profiler::bindings

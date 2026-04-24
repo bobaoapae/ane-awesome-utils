@@ -13,15 +13,41 @@
 static std::unique_ptr<std::remove_pointer<HMODULE>::type, decltype(&FreeLibrary)> library(nullptr, FreeLibrary);
 static std::unordered_map<std::string, void *> functionCache;
 
+// Primary strategy: AwesomeAneUtils.dll is always packaged next to this
+// wrapper (AneAwesomeUtilsWindows.dll) inside the ANE. Resolving the sibling
+// via the wrapper's own module handle is independent of how AIR launched the
+// process -- captive runtime, adl with or without -extdir, IDE plugins that
+// extract to %TEMP%, etc. -- and is what we try first.
+static std::string GetSiblingLibraryPath() {
+    HMODULE hSelf = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(&GetSiblingLibraryPath),
+            &hSelf) || !hSelf) {
+        return "";
+    }
+    char buffer[MAX_PATH];
+    DWORD length = GetModuleFileNameA(hSelf, buffer, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return "";
+    std::string path(buffer, length);
+    auto slash = path.find_last_of("\\/");
+    if (slash == std::string::npos) return "";
+    return path.substr(0, slash) + R"(\AwesomeAneUtils.dll)";
+}
+
 std::string GetLibraryLocation(int argc, char *argv[]) {
-    std::string baseDirectory;
+    std::string sibling = GetSiblingLibraryPath();
+    if (!sibling.empty()) return sibling;
+
 #if defined(_WIN64)
     const std::string arch = "Windows-x86-64";
 #else
     const std::string arch = "Windows-x86";
 #endif
 
-    // Check for -extdir argument
+    std::string baseDirectory;
+    // Legacy fallbacks preserved in case GetModuleHandleEx ever fails.
     for (int i = 0; i < argc; ++i) {
         if (std::string(argv[i]) == "-extdir" && i + 1 < argc) {
             baseDirectory = argv[i + 1];
@@ -56,8 +82,9 @@ bool loadNativeLibrary() {
 
     HMODULE handle = LoadLibraryA(libraryPath.c_str());
     if (!handle) {
-        std::cerr << "Could not load library: " << GetLastError() << std::endl;
-        writeLog("Could not load library");
+        DWORD err = GetLastError();
+        std::cerr << "Could not load library: " << err << std::endl;
+        writeLog(("Could not load library (GetLastError=" + std::to_string(err) + ")").c_str());
         return false;
     }
 

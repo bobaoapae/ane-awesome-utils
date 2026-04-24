@@ -1,25 +1,34 @@
-// End-to-end test for the Scout-compatible profiler capture subsystem.
+// End-to-end test for the native .aneprof profiler capture subsystem.
 //
 // Covers multiple scenarios in a single run:
 //
 //   Scenario A:  Start → 120 frames (~4.8 s @ 25 fps) with sprite churn,
 //                allocations, inline markers (battle.start / battle.end),
 //                and a span metric → Stop.
-//                Output: test_capture_A.flmc
+//                Output: test_capture_A.aneprof
 //
 //   Scenario B:  Second Start→Stop in the same process lifetime, exercising
 //                the "one game can record several battles" use case.
-//                Output: test_capture_B.flmc
+//                Output: test_capture_B.aneprof
 //
-//   Scenario C:  Long-ish capture (240 frames, ~9.6 s) with
-//                displayObjectCapture enabled so we see `.rend.*` events.
-//                Output: test_capture_C.flmc
+//   Scenario C:  Long-ish capture (240 frames, ~9.6 s) with timing,
+//                memory hooks and periodic snapshots enabled.
+//                Output: test_capture_C.aneprof
+//
+//   Scenario E:  Hidden listener leak: short-lived views are removed from the
+//                display list but remain retained by a strong listener on a
+//                long-lived dispatcher.
+//                Output: test_capture_E.aneprof
+//
+//   Scenario L:  Memory capture with intentional retained ByteArrays so the
+//                analyzer can distinguish a leak-like run from Scenario C.
+//                Output: test_capture_L.aneprof
 //
 //   Scenario D:  Start + kill — on a run with ANE_TEST_KILL=1 we call Start,
 //                run a couple of frames, then let the harness kill us.
-//                The .flmc on disk should still have a valid header even if
-//                the footer didn't get written.
-//                Output: test_capture_D.flmc   (partial)
+//                The .aneprof on disk should still have a valid header even
+//                if the footer didn't get written.
+//                Output: test_capture_D.aneprof   (partial)
 //
 // At the end we write a single test_result.json summarising every scenario.
 
@@ -28,11 +37,11 @@ package {
     import flash.display.Shape;
     import flash.display.Sprite;
     import flash.events.Event;
+    import flash.events.EventDispatcher;
     import flash.filesystem.File;
     import flash.filesystem.FileMode;
     import flash.filesystem.FileStream;
     import flash.geom.Point;
-    import flash.profiler.Telemetry;
     import flash.utils.ByteArray;
     import flash.utils.Dictionary;
     import flash.utils.setTimeout;
@@ -50,6 +59,8 @@ package {
 
         // Scenario state while a capture is running.
         private var active:Object;  // {name, outPath, targetFrames, frameCount, lastMarkerSec, churnPool, allocScratch, startTs}
+        private static var retainedLeaks:Array = [];
+        private static var listenerLeakBus:EventDispatcher = new EventDispatcher();
 
         public function TestProfilerApp() {
             log("[test] boot");
@@ -65,8 +76,8 @@ package {
             storage.resolvePath("").createDirectory();
 
             // Clean prior outputs.
-            for each (var n:String in ["A", "B", "C", "D"]) {
-                removeIfPresent(storage.resolvePath("test_capture_" + n + ".flmc"));
+            for each (var n:String in ["A", "B", "C", "D", "E", "L"]) {
+                removeIfPresent(storage.resolvePath("test_capture_" + n + ".aneprof"));
             }
             removeIfPresent(storage.resolvePath("test_result.json"));
 
@@ -81,30 +92,24 @@ package {
                 // Stop. The harness terminates us while we're in the middle
                 // of Scenario D, then inspects whatever made it to disk.
                 scenarios = [
-                    { name:"D", label:"kill-mid-capture",    frames:2000, level:6,
-                      features:{samplerEnabled:true, cpuCapture:true,
-                                displayObjectCapture:false, stage3DCapture:false,
-                                scriptObjectAllocationTraces:false,
-                                allGcAllocationTraces:false},
+                    { name:"D", label:"kill-mid-capture",    frames:2000,
+                      timing:true, memory:false, snapshots:true,
                       doNotStop:true }
                 ];
             } else {
                 scenarios = [
-                    { name:"A", label:"short-sprite-churn",    frames:120, level:6,
-                      features:{samplerEnabled:true,  cpuCapture:true,
-                                displayObjectCapture:false, stage3DCapture:false,
-                                scriptObjectAllocationTraces:false,
-                                allGcAllocationTraces:false} },
-                    { name:"B", label:"second-run-after-stop", frames:80,  level:6,
-                      features:{samplerEnabled:true,  cpuCapture:true,
-                                displayObjectCapture:false, stage3DCapture:false,
-                                scriptObjectAllocationTraces:false,
-                                allGcAllocationTraces:false} },
-                    { name:"C", label:"with-display-objects",  frames:240, level:9,
-                      features:{samplerEnabled:true,  cpuCapture:true,
-                                displayObjectCapture:true,  stage3DCapture:false,
-                                scriptObjectAllocationTraces:false,
-                                allGcAllocationTraces:false} }
+                    { name:"A", label:"timing-only", frames:120,
+                      timing:true, memory:false, snapshots:true },
+                    { name:"B", label:"second-run-after-stop", frames:80,
+                      timing:true, memory:false, snapshots:true },
+                    { name:"C", label:"timing-memory-snapshots", frames:240,
+                      timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000 },
+                    { name:"E", label:"hidden-listener-leak", frames:180,
+                      timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000,
+                      listenerLeak:true },
+                    { name:"L", label:"intentional-memory-retention", frames:240,
+                      timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000,
+                      leak:true }
                 ];
             }
 
@@ -121,9 +126,13 @@ package {
             active = {
                 name:          sc.name,
                 label:         sc.label,
-                outPath:       storage.resolvePath("test_capture_" + sc.name + ".flmc").nativePath,
+                outPath:       storage.resolvePath("test_capture_" + sc.name + ".aneprof").nativePath,
                 targetFrames:  int(sc.frames),
                 doNotStop:     Boolean(sc.doNotStop),
+                leak:          Boolean(sc.leak),
+                syntheticBase:  16777216 + (scenarioIndex * 1048576),
+                listenerLeak:   Boolean(sc.listenerLeak),
+                listenerLeakCreated: 0,
                 frameCount:    0,
                 lastMarkerSec: -1,
                 churnPool:     new Vector.<Sprite>(),
@@ -132,12 +141,16 @@ package {
             log("[test] scenario " + sc.name + " (" + sc.label + "): start, frames=" + sc.frames);
 
             var options:Object = {
-                maxBytesMb:       100,
-                compressionLevel: int(sc.level),
-                headerJson:       '{"scenario":"' + sc.name + '","label":"' + sc.label + '"}',
-                features:         sc.features,
-                host:             "127.0.0.1",
-                port:             7934
+                timing:           Boolean(sc.timing),
+                memory:           Boolean(sc.memory),
+                snapshots:        Boolean(sc.snapshots),
+                snapshotIntervalMs: sc.snapshotIntervalMs !== undefined ? uint(sc.snapshotIntervalMs) : 0,
+                metadata:         {
+                    scenario: sc.name,
+                    label: sc.label,
+                    leak: Boolean(sc.leak) || Boolean(sc.listenerLeak),
+                    listenerLeak: Boolean(sc.listenerLeak)
+                }
             };
             var ok:Boolean = util.profilerStart(active.outPath, options);
             log("[test] profilerStart(" + sc.name + ") = " + ok);
@@ -149,7 +162,7 @@ package {
             }
 
             active.startTs = getTimer();
-            // Markers that bracket a "battle" — shows up inline in Scout.
+            // Markers that bracket a "battle" in the .aneprof stream.
             util.profilerMarker("battle.start", scenarioIndex + 1);
             addEventListener(Event.ENTER_FRAME, onEnterFrame);
         }
@@ -159,6 +172,8 @@ package {
 
             doSpriteChurn();
             doAllocationWork();
+            doHiddenListenerLeakWork();
+            doSyntheticProfilerRecords();
             doComputeWork();
 
             var nowSec:int = int((getTimer() - active.startTs) / 1000);
@@ -180,14 +195,26 @@ package {
 
         private function finishScenario():void {
             util.profilerMarker("battle.end", scenarioIndex + 1);
-
-            // Drain the sprite pool so the runtime sees .displayobject.remove
-            // events in the final span.
-            while (active.churnPool.length > 0) {
-                var sp:Sprite = active.churnPool.shift();
-                if (sp && sp.parent) sp.parent.removeChild(sp);
+            if (active.listenerLeak) {
+                util.profilerMarker("listener.leak.created", active.listenerLeakCreated);
             }
-            active.allocScratch.length = 0;
+            util.profilerSnapshot("pre-stop");
+
+            if (active.leak) {
+                retainedLeaks.push(active.churnPool);
+            } else {
+                // Drain the sprite pool so the runtime sees .displayobject.remove
+                // events in the final span.
+                while (active.churnPool.length > 0) {
+                    var sp:Sprite = active.churnPool.shift();
+                    if (sp && sp.parent) sp.parent.removeChild(sp);
+                }
+            }
+            if (active.leak) {
+                retainedLeaks.push(active.allocScratch);
+            } else {
+                active.allocScratch.length = 0;
+            }
 
             var pre:Object = util.profilerGetStatus();
             var stopOk:Boolean = util.profilerStop();
@@ -209,6 +236,7 @@ package {
                     preStop:         pre,
                     postStop:        post,
                     outputPath:      active.outPath,
+                    listenerLeakCreated: active.listenerLeakCreated,
                     markers:         ["battle.start", "battle.tick*", "battle.end"]
                 };
                 log("[test] scenario " + active.name + " done: " + JSON.stringify(rec.postStop));
@@ -279,6 +307,54 @@ package {
             while (active.allocScratch.length > 16) {
                 active.allocScratch.shift();
             }
+            if (active.leak) {
+                retainedLeaks.push(arr);
+                retainedLeaks.push(dict);
+                retainedLeaks.push(ba);
+                var leak:ByteArray = new ByteArray();
+                leak.length = 32768;
+                leak.position = leak.length - 1;
+                leak.writeByte(active.frameCount & 0xFF);
+                retainedLeaks.push(leak);
+            }
+        }
+
+        private function doHiddenListenerLeakWork():void {
+            if (!active.listenerLeak) return;
+            for (var i:int = 0; i < 3; i++) {
+                var view:HiddenListenerLeak = createHiddenListenerLeak(active.frameCount * 10 + i);
+                addChild(view);
+                view.renderOnce();
+                removeChild(view);
+                view.disposeVisualOnly();
+                active.listenerLeakCreated++;
+            }
+            if ((active.frameCount & 7) == 0) {
+                listenerLeakBus.dispatchEvent(new Event("modelTick"));
+            }
+        }
+
+        private function createHiddenListenerLeak(id:int):HiddenListenerLeak {
+            return new HiddenListenerLeak(listenerLeakBus, id);
+        }
+
+        private function doSyntheticProfilerRecords():void {
+            if (!active) return;
+            var i:int;
+            var ptr:Number;
+            if (active.name == "C") {
+                for (i = 0; i < 2; i++) {
+                    ptr = Number(active.syntheticBase + active.frameCount * 32 + i);
+                    util.profilerRecordAllocForTest(ptr, 2048);
+                    util.profilerRecordFreeForTest(ptr);
+                }
+            }
+            if (active.leak) {
+                for (i = 0; i < 8; i++) {
+                    ptr = Number(active.syntheticBase + active.frameCount * 32 + i);
+                    util.profilerRecordAllocForTest(ptr, 8192);
+                }
+            }
         }
 
         private function doComputeWork():void {
@@ -322,6 +398,58 @@ package {
             setTimeout(function():void {
                 NativeApplication.nativeApplication.exit(code);
             }, 100);
+        }
+    }
+
+}
+
+import flash.display.Sprite;
+import flash.events.Event;
+import flash.events.EventDispatcher;
+import flash.geom.Point;
+import flash.utils.ByteArray;
+
+internal class HiddenListenerLeak extends Sprite {
+    private var bus:EventDispatcher;
+    private var payload:ByteArray;
+    private var points:Array;
+    private var id:int;
+    private var ticks:int = 0;
+
+    public function HiddenListenerLeak(bus:EventDispatcher, id:int) {
+        this.bus = bus;
+        this.id = id;
+        payload = new ByteArray();
+        payload.length = 16384;
+        payload.position = payload.length - 1;
+        payload.writeByte(id & 0xff);
+
+        points = [];
+        for (var i:int = 0; i < 16; i++) {
+            points.push(new Point(id + i, id - i));
+        }
+
+        this.bus.addEventListener("modelTick", onModelTick);
+    }
+
+    public function renderOnce():void {
+        graphics.beginFill(0x339966, 0.35);
+        graphics.drawRect(0, 0, 8 + (id % 5), 8 + (id % 7));
+        graphics.endFill();
+    }
+
+    public function disposeVisualOnly():void {
+        graphics.clear();
+        if (parent) parent.removeChild(this);
+        // Intentional leak for the E2E: the strong listener above is not
+        // removed, so the long-lived dispatcher keeps this view and payload.
+    }
+
+    private function onModelTick(e:Event):void {
+        ticks++;
+        if (payload.length > 0) {
+            payload.position = 0;
+            payload.writeByte((id + ticks) & 0xff);
         }
     }
 }

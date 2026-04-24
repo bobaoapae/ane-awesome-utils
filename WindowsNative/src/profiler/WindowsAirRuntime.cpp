@@ -340,22 +340,21 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
     auto** playerPtelemetrySlot = reinterpret_cast<void**>(
         reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetPlayerTelemetry);
 
-    // Post-patch state: if all three slots are already populated it means
-    // the captive Adobe AIR.dll has the fix_telemetry_mode_b patch applied
-    // (see C:/AIRSDKs/.../patches/fix_telemetry_mode_b/). In that scenario
-    // Adobe's startup already wired SocketTransport + Telemetry +
-    // PlayerTelemetry and — critically — AvmCore::ctor ran WITH
-    // PlayerTelemetry populated, so the sampler + method-name map are
-    // live. We don't want to recreate any of that; just note success and
-    // let the caller install the IAT send-hook. All start/stop control
-    // flows through the hook + loopback from here.
+    // Post-patch Adobe startup pre-populates all three slots with a trio
+    // built from the patch's hardcoded default TelemetryConfig (see
+    // C:/AIRSDKs/.../patches/fix_telemetry_mode_b/README). In that state
+    // we attach — rebuilding the trio crashes the sampler (heap
+    // corruption on the next GC), because its internal pointers alias
+    // Adobe-owned sub-objects of Adobe's PlayerTelemetry that we can't
+    // safely reparent from here. ProfilerFeatures are effectively frozen
+    // to whatever the patch baked in; overriding them requires either
+    // (a) editing the patch's hardcoded defaults, or (b) mapping the
+    // PlayerTelemetry struct layout and patching feature bytes in place.
     if (*playerTransportSlot != nullptr &&
         *playerTelemetrySlot != nullptr &&
         *playerPtelemetrySlot != nullptr) {
         last_error_.store(Error::Ok);
         we_own_transport_.store(false, std::memory_order_release);
-        // `player` is already cached in player_ by tryCapturePlayer(); nothing
-        // else to persist.
         return true;
     }
 
@@ -461,11 +460,8 @@ bool WindowsAirRuntime::forceEnableTelemetry(const std::string& host,
                                 std::memory_order_release);
     diag_slot_playertel_.store(reinterpret_cast<std::uintptr_t>(*playerPtelemetrySlot),
                                 std::memory_order_release);
-    // Post-patch state: all three slots already populated means the
-    // captive Adobe AIR.dll has the fix_telemetry_mode_b patch applied.
-    // Adobe's startup wired the trio AND AvmCore::ctor saw PlayerTelemetry
-    // populated at its gate, so the sampler + method-name map are live.
-    // Skip the replay and just succeed.
+    // Post-patch Adobe startup pre-populates the slots. See x64 path for
+    // why we attach (instead of rebuilding) in that state.
     if (*playerTransportSlot != nullptr &&
         *playerTelemetrySlot != nullptr &&
         *playerPtelemetrySlot != nullptr) {

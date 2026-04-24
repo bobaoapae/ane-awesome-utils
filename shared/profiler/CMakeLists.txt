@@ -27,6 +27,7 @@ add_library(ane_profiler_core STATIC
     src/RawFileSink.cpp
     src/ZlibFileSink.cpp
     src/CaptureController.cpp
+    src/DeepProfilerController.cpp
 )
 target_include_directories(ane_profiler_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -48,6 +49,7 @@ ane_add_test(test_spsc_byte_stream   tests/test_spsc_byte_stream.cpp)
 ane_add_test(test_file_format        tests/test_file_format.cpp)
 ane_add_test(test_zlib_file_sink     tests/test_zlib_file_sink.cpp)
 ane_add_test(test_capture_controller tests/test_capture_controller.cpp)
+ane_add_test(test_aneprof_controller tests/test_aneprof_controller.cpp)
 
 # Sample .flmc generator used by Python-side validation.
 add_executable(make_sample_flmc tools/make_sample_flmc.cpp)

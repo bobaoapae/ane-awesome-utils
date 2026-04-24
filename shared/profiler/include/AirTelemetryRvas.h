@@ -84,6 +84,14 @@ inline constexpr std::uint32_t kRvaAirStringClear   = 0x0030e07c;
 
 inline constexpr std::uint32_t kRvaMMgcAllocSmall   = 0x001a0a64;
 inline constexpr std::uint32_t kRvaMMgcAllocLocked  = 0x001ab200;
+inline constexpr std::uint32_t kRvaMMgcFree         = 0x001ab370;
+// Hook body starts after the `test rdx,rdx; je ret` null guard so the
+// trampoline only copies plain register-save instructions.
+inline constexpr std::uint32_t kRvaMMgcFreeHookBody = 0x001ab379;
+
+inline constexpr std::uint32_t kRvaIatKernel32HeapReAlloc = 0x00b049c0;
+inline constexpr std::uint32_t kRvaIatKernel32HeapAlloc   = 0x00b04b70;
+inline constexpr std::uint32_t kRvaIatKernel32HeapFree    = 0x00b04b68;
 
 inline constexpr std::uint32_t kRvaGcHeapPtrSlot    = 0x01223f60;
 inline constexpr std::uint32_t kGcHeapLockOffset           = 0xb98;
@@ -113,6 +121,11 @@ inline constexpr std::uint8_t  kInitTelemetryPrologue[12] = {
 
 inline constexpr std::uint32_t kRvaTelemetrySamplerCtor         = 0x004881a4;
 inline constexpr std::uint32_t kRvaMemoryTelemetrySamplerCtor   = 0x00488060;
+inline constexpr std::uint32_t kRvaAttachSampler                = 0x000d308c;
+inline constexpr std::uint32_t kRvaGetSampler                   = 0x000d30dc;
+inline constexpr std::uint32_t kRvaMethodInfoGetMethodNameWithTraits = 0x000fc5e4;
+inline constexpr std::uint32_t kAvmCoreOffsetCurrentMethodFrame = 0x0060;
+inline constexpr std::uint32_t kAvmCoreOffsetCallStack          = 0x0128;
 
 // x64 sampler replay is not yet wired up — dynamic verification on x64 is
 // pending. x86 is the proven path (see note in the x86 namespace). These
@@ -180,6 +193,11 @@ inline constexpr std::uint32_t kRvaPlayerTelemetryCtor          = 0x0038ffc9;
 //   populateNameMaps:  __thiscall(player)  -- idempotent, creates player+DDC/DD8
 inline constexpr std::uint32_t kRvaMemoryTelemetrySamplerCtor   = 0x0038b02c;
 inline constexpr std::uint32_t kRvaTelemetrySamplerCtor         = 0x0038b1ae;
+inline constexpr std::uint32_t kRvaAttachSampler                = 0x000b836c;
+inline constexpr std::uint32_t kRvaGetSampler                   = 0x000b83a4;
+inline constexpr std::uint32_t kRvaMethodInfoGetMethodNameWithTraits = 0x000d5754;
+inline constexpr std::uint32_t kAvmCoreOffsetCurrentMethodFrame = 0x0034;
+inline constexpr std::uint32_t kAvmCoreOffsetCallStack          = 0x00c8;
 inline constexpr std::uint32_t kRvaPlayerPopulateNameMaps       = 0x002151a9;
 inline constexpr std::uint32_t kRvaAvmCoreRegisterSamplerMeta   = 0x000a8754;
 inline constexpr std::size_t   kMemoryTelemetrySamplerSize      = 0x1d810;
@@ -214,6 +232,12 @@ inline constexpr std::uint32_t kRvaAirStringClear   = 0x0024e1ee;
 // MMgc ---------------------------------------------------------------------
 inline constexpr std::uint32_t kRvaMMgcAllocSmall   = 0x0014f323;   // __cdecl(size, flags)
 inline constexpr std::uint32_t kRvaMMgcAllocLocked  = 0x001573de;   // __fastcall(ecx=heap, edx=size, [esp]=flags)
+inline constexpr std::uint32_t kRvaMMgcFree         = 0x00157526;   // __fastcall(ecx=heap, edx=ptr)
+inline constexpr std::uint32_t kRvaMMgcFreeHookBody = 0x00157526;
+
+inline constexpr std::uint32_t kRvaIatKernel32HeapReAlloc = 0x008c22f0;
+inline constexpr std::uint32_t kRvaIatKernel32HeapAlloc   = 0x008c2584;
+inline constexpr std::uint32_t kRvaIatKernel32HeapFree    = 0x008c2588;
 
 // FRE helpers ---------------------------------------------------------------
 //

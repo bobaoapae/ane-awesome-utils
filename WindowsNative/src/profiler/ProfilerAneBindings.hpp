@@ -18,16 +18,28 @@
 
 namespace ane::profiler::bindings {
 
-// Four functions exposed to AS3:
-//   profiler_start(outputPath:String, maxBytesMb:uint=900,
-//                  compressionLevel:int=6, headerJson:String=""): Boolean
+// Public functions exposed to AS3:
+//   profiler_start(outputPath:String, headerJson:String, timing:Boolean,
+//                  memory:Boolean, snapshots:Boolean, maxLive:uint,
+//                  snapshotIntervalMs:uint): Boolean
 //   profiler_stop(): Boolean
-//   profiler_get_status(): Object (state, bytesIn, bytesOut, records, drops, elapsedMs)
-//   profiler_take_marker(name:String): Boolean (stored in header JSON at stop)
+//   profiler_snapshot(label:String): Boolean
+//   profiler_marker(name:String, valueJson:String): Boolean
+//   profiler_get_status(): Object
+//
+// Additional probe functions are intentionally internal: compiler-injected
+// AS3 can call them, but the public API remains the five methods above.
 FREObject profiler_start       (FREContext, void*, std::uint32_t, FREObject*);
 FREObject profiler_stop        (FREContext, void*, std::uint32_t, FREObject*);
 FREObject profiler_get_status  (FREContext, void*, std::uint32_t, FREObject*);
-FREObject profiler_take_marker (FREContext, void*, std::uint32_t, FREObject*);
+FREObject profiler_snapshot    (FREContext, void*, std::uint32_t, FREObject*);
+FREObject profiler_marker      (FREContext, void*, std::uint32_t, FREObject*);
+FREObject profiler_probe_enter (FREContext, void*, std::uint32_t, FREObject*);
+FREObject profiler_probe_exit  (FREContext, void*, std::uint32_t, FREObject*);
+FREObject profiler_register_method_table(FREContext, void*, std::uint32_t, FREObject*);
+FREObject profiler_record_alloc(FREContext, void*, std::uint32_t, FREObject*);
+FREObject profiler_record_free (FREContext, void*, std::uint32_t, FREObject*);
+FREObject profiler_record_realloc(FREContext, void*, std::uint32_t, FREObject*);
 
 // Register the four functions starting at `out_functions[*cursor]`. Bumps
 // `*cursor` by the number of entries added.

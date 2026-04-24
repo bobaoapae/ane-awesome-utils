@@ -1,10 +1,12 @@
 #include "CaptureController.hpp"
 
 #include "FileFormat.hpp"
+#include "PrologueBuffer.hpp"
 #include "miniz.h"
 
 #include <algorithm>
 #include <ctime>
+#include <vector>
 
 namespace ane::profiler {
 
@@ -86,6 +88,27 @@ bool CaptureController::start(const Config& cfg) {
     scratch_out_.assign(kScratchOutBytes, 0);
 
     started_at_ = std::chrono::steady_clock::now();
+
+    // Replay the session prologue (cached by the IAT hook during the first
+    // bytes ever seen on the telemetry socket). This writes the `.tlm.*`
+    // meta and the trait/string table definitions into this file's deflate
+    // stream before any live bytes, so parsers that open this .flmc in
+    // isolation have the same initial table state as the original session.
+    //
+    // On the first capture of the process the buffer is usually empty or
+    // still growing — the live bytes that come through in this very
+    // session will BE the prologue. We still copy what's cached so a
+    // profilerStart racing with early telemetry bytes keeps a consistent
+    // view. Replayed bytes count as bytes_accepted/bytes_out but NOT as
+    // bytes_in (they were not sent to push_bytes).
+    {
+        std::vector<std::uint8_t> snap;
+        PrologueBuffer::instance().snapshot(snap);
+        if (!snap.empty()) {
+            deflate_chunk(snap.data(), snap.size(), MZ_NO_FLUSH);
+            bytes_accepted_.fetch_add(snap.size(), std::memory_order_relaxed);
+        }
+    }
 
     // Launch writer thread.
     writer_ = std::thread(&CaptureController::writer_main, this);

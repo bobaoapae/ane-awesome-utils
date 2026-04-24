@@ -15,6 +15,7 @@
 #ifndef ANE_PROFILER_I_RUNTIME_HOOK_HPP
 #define ANE_PROFILER_I_RUNTIME_HOOK_HPP
 
+#include <cstdint>
 #include <memory>
 
 namespace ane::profiler {
@@ -29,7 +30,15 @@ public:
     // queries on every intercepted event. Idempotent: returns true if
     // already installed. Returns false on a hard failure (e.g. AIR runtime
     // module not loaded yet, or IAT slot not found).
-    virtual bool install(CaptureController* controller) = 0;
+    //
+    // `telemetry_port` is the loopback port the runtime was force-connected
+    // to for Scout telemetry. The hook uses it to filter: only bytes sent
+    // on sockets connected to 127.0.0.1:telemetry_port are captured. Other
+    // outgoing TCP traffic in the process (e.g. an AS3 command channel on
+    // a different port) passes through untouched. Pass 0 to disable the
+    // filter and capture every send() the runtime makes.
+    virtual bool install(CaptureController* controller,
+                         std::uint16_t telemetry_port = 0) = 0;
 
     // Restore the original pointers and release resources. Safe to call
     // repeatedly; a no-op when not installed.

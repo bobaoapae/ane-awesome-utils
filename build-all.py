@@ -380,19 +380,65 @@ def step_package(env):
 
     cst_home = env["CODESIGNTOOL_PATH"]
     log("  Signing Windows DLLs...")
+    # SSL.com eSigner treats each TOTP code as single-use: once the tool
+    # consumes a code to authenticate, calling sign() again inside the
+    # same 30 s TOTP window fails with "Unexpected character (<) at
+    # position 0" — the API serves an HTML error page instead of JSON.
+    # We wait just past the 30 s period between calls so the TOTP
+    # generator has rotated to a fresh code.
+    import time as _time
+    TOTP_WINDOW_SEC = 32
+
+    def _sanitize_codesign_output(text):
+        text = text or ""
+        for secret in (cst_user, cst_pass, cst_totp):
+            if secret:
+                text = text.replace(secret, "<redacted>")
+        return text
+
+    def _sign_dll(src, out_dir):
+        cmd = (f'set "CODE_SIGN_TOOL_PATH={cst_home}" && '
+               f'"{codesigntool}" sign -input_file_path="{src}"'
+               f' -output_dir_path="{out_dir}"'
+               f' -username="{cst_user}" -password="{cst_pass}"'
+               f' -totp_secret="{cst_totp}"')
+        return subprocess.run(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
     with timed("codesigntool"):
-        for dll in dlls:
+        for idx, dll in enumerate(dlls):
+            if idx > 0:
+                log(f"  waiting {TOTP_WINDOW_SEC}s for TOTP window to rotate...")
+                _time.sleep(TOTP_WINDOW_SEC)
             src = ANE_BUILD / dll
             before = src.stat().st_mtime
-            run(f'set "CODE_SIGN_TOOL_PATH={cst_home}" && '
-                f'"{codesigntool}" sign -input_file_path="{src}"'
-                f' -output_dir_path="{sign_tmp}"'
-                f' -username="{cst_user}" -password="{cst_pass}"'
-                f' -totp_secret="{cst_totp}"',
-                shell=True, quiet=True)
-            signed = sign_tmp / src.name
-            if not signed.exists():
-                raise BuildError(f"CodeSignTool produced no output for {dll}")
+            signed = None
+            last_output = ""
+            for attempt in range(1, 4):
+                out_dir = sign_tmp / f"{idx}-{attempt}"
+                if out_dir.exists():
+                    shutil.rmtree(out_dir)
+                out_dir.mkdir(parents=True)
+                r = _sign_dll(src, out_dir)
+                last_output = _sanitize_codesign_output(r.stdout)
+                candidate = out_dir / src.name
+                if r.returncode == 0 and candidate.exists():
+                    signed = candidate
+                    break
+                if attempt < 3:
+                    log(f"  CodeSignTool produced no output for {dll}; retrying after TOTP rotation...")
+                    _time.sleep(TOTP_WINDOW_SEC)
+                else:
+                    if last_output:
+                        log(last_output)
+                    if r.returncode != 0:
+                        raise BuildError(f"CodeSignTool failed for {dll} (exit {r.returncode})")
+                    raise BuildError(f"CodeSignTool produced no output for {dll}")
             shutil.move(str(signed), str(src))
             if src.stat().st_mtime == before:
                 raise BuildError(f"Signed DLL did not replace original: {dll}")

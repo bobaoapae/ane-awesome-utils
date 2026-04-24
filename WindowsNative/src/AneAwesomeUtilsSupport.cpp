@@ -18,8 +18,8 @@
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
 
-// 32 legacy functions + 4 profiler functions (start/stop/status/marker).
-constexpr int EXPORT_FUNCTIONS_COUNT = 36;
+// 32 legacy functions + 11 profiler functions (5 public + 6 probe/runtime helpers).
+constexpr int EXPORT_FUNCTIONS_COUNT = 43;
 static bool alreadyInitialized = false;
 static auto exportedFunctions = new FRENamedFunction[EXPORT_FUNCTIONS_COUNT];
 
@@ -1249,7 +1249,7 @@ static void AneAwesomeUtilsSupportInitializer(
             nativeLogOnForeground();
             return nullptr;
         };
-        // Profiler subsystem — 4 entries starting at index 32.
+        // Profiler subsystem — entries starting at index 32.
         int cursor = 32;
         ane::profiler::bindings::register_all(exportedFunctions,
                                               EXPORT_FUNCTIONS_COUNT, &cursor);
