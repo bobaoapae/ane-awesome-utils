@@ -30,9 +30,20 @@ std::atomic<std::uint64_t> g_as3_alloc_calls{0};
 std::atomic<std::uint64_t> g_as3_free_calls{0};
 std::atomic<std::uint64_t> g_generic_alloc_calls{0};
 std::atomic<std::uint64_t> g_failed_installs{0};
+std::atomic<std::uint64_t> g_chained_installs{0};
+std::atomic<std::uint64_t> g_direct_slot_installs{0};
+std::atomic<std::uint64_t> g_direct_slot_failures{0};
+std::atomic<std::uint64_t> g_forwarded_calls{0};
+std::atomic<std::uint64_t> g_forward_failures{0};
 std::atomic<std::uint32_t> g_last_failure_stage{0};
 std::atomic<std::uintptr_t> g_last_core{0};
+std::atomic<void*> g_previous_sampler{nullptr};
+std::atomic<std::uintptr_t> g_sampler_at_install{0};
+std::atomic<std::uintptr_t> g_sampler_vtable_at_install{0};
+std::atomic<std::uintptr_t> g_previous_sampler_vtable{0};
+std::atomic<std::uintptr_t> g_sampler_slot{0};
 thread_local bool g_inside_hook = false;
+thread_local bool g_inside_forward = false;
 
 struct LiveAs3Object {
     std::string type_name;
@@ -195,6 +206,16 @@ bool read_ptr(const void* base, std::uint32_t offset, std::uintptr_t& out) {
     return safe_read(reinterpret_cast<const std::uint8_t*>(base) + offset, out);
 }
 
+bool write_ptr(std::uintptr_t address, void* value) {
+    if (address == 0) return false;
+    __try {
+        *reinterpret_cast<void**>(address) = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void append_utf8_codepoint(std::string& out, std::uint32_t cp) {
     if (cp <= 0x7f) {
         out.push_back(static_cast<char>(cp));
@@ -276,6 +297,43 @@ std::string hex_ptr(std::uintptr_t value) {
     std::snprintf(buf, sizeof(buf), "0x%08lx", static_cast<unsigned long>(value));
 #endif
     return std::string(buf);
+}
+
+std::uintptr_t vtable_from_object(std::uintptr_t object) {
+    if (object == 0) return 0;
+    std::uintptr_t vtable = 0;
+    if (!safe_read(reinterpret_cast<const void*>(object), vtable)) return 0;
+    return vtable;
+}
+
+std::string module_name_for_address(std::uintptr_t address) {
+    if (address == 0) return {};
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCSTR>(address),
+                            &module) ||
+        module == nullptr) {
+        return {};
+    }
+    char path[MAX_PATH] = {};
+    const DWORD len = GetModuleFileNameA(module, path, static_cast<DWORD>(sizeof(path)));
+    if (len == 0) return {};
+    return std::string(path, path + std::min<DWORD>(len, MAX_PATH));
+}
+
+std::string vtable_head_for_sampler(std::uintptr_t sampler, std::size_t count = 8) {
+    const std::uintptr_t vtable = vtable_from_object(sampler);
+    if (vtable == 0) return {};
+
+    std::string out;
+    for (std::size_t i = 0; i < count; ++i) {
+        std::uintptr_t entry = 0;
+        if (!safe_read(reinterpret_cast<const std::uintptr_t*>(vtable) + i, entry)) break;
+        if (!out.empty()) out.push_back(',');
+        out += hex_ptr(entry);
+    }
+    return out;
 }
 
 std::string namespace_uri(std::uintptr_t ns_ptr) {
@@ -751,39 +809,179 @@ struct IMemorySamplerCompat {
     virtual ~IMemorySamplerCompat() {}
 };
 
+IMemorySamplerCompat* previous_sampler_for(const void* self) {
+    void* previous = g_previous_sampler.load(std::memory_order_acquire);
+    if (previous == nullptr || previous == self) return nullptr;
+    return reinterpret_cast<IMemorySamplerCompat*>(previous);
+}
+
+void note_forward_result(bool ok) {
+    if (ok) {
+        g_forwarded_calls.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_forward_failures.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+bool forward_get_sampler_type(const void* self, int& out) {
+    if (g_inside_forward) return false;
+    auto* original = previous_sampler_for(self);
+    if (original == nullptr) return false;
+
+    bool ok = true;
+    g_inside_forward = true;
+    __try {
+        out = original->getSamplerType();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    g_inside_forward = false;
+    note_forward_result(ok);
+    return ok;
+}
+
+void forward_record_allocation(const void* self, const void* item, std::size_t size) {
+    if (g_inside_forward) return;
+    auto* original = previous_sampler_for(self);
+    if (original == nullptr) return;
+
+    bool ok = true;
+    g_inside_forward = true;
+    __try {
+        original->recordAllocation(item, size);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    g_inside_forward = false;
+    note_forward_result(ok);
+}
+
+void forward_record_deallocation(const void* self, const void* item, std::size_t size) {
+    if (g_inside_forward) return;
+    auto* original = previous_sampler_for(self);
+    if (original == nullptr) return;
+
+    bool ok = true;
+    g_inside_forward = true;
+    __try {
+        original->recordDeallocation(item, size);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    g_inside_forward = false;
+    note_forward_result(ok);
+}
+
+void forward_record_new_object_allocation(const void* self, void* obj, std::uintptr_t sot) {
+    if (g_inside_forward) return;
+    auto* original = previous_sampler_for(self);
+    if (original == nullptr) return;
+
+    bool ok = true;
+    g_inside_forward = true;
+    __try {
+        original->recordNewObjectAllocation(obj, sot);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    g_inside_forward = false;
+    note_forward_result(ok);
+}
+
+void forward_record_object_reallocation(const void* self, const void* obj) {
+    if (g_inside_forward) return;
+    auto* original = previous_sampler_for(self);
+    if (original == nullptr) return;
+
+    bool ok = true;
+    g_inside_forward = true;
+    __try {
+        original->recordObjectReallocation(obj);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    g_inside_forward = false;
+    note_forward_result(ok);
+}
+
+void forward_add_dependent_object(const void* self, const void* obj, const void* dep_obj) {
+    if (g_inside_forward) return;
+    auto* original = previous_sampler_for(self);
+    if (original == nullptr) return;
+
+    bool ok = true;
+    g_inside_forward = true;
+    __try {
+        original->addDependentObject(obj, dep_obj);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    g_inside_forward = false;
+    note_forward_result(ok);
+}
+
+void forward_record_new_object_allocation_generic(const void* self,
+                                                  void* obj,
+                                                  const char* object_type,
+                                                  std::size_t size) {
+    if (g_inside_forward) return;
+    auto* original = previous_sampler_for(self);
+    if (original == nullptr) return;
+
+    bool ok = true;
+    g_inside_forward = true;
+    __try {
+        original->recordNewObjectAllocation(obj, object_type, size);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    g_inside_forward = false;
+    note_forward_result(ok);
+}
+
 class NativeMemorySampler final : public IMemorySamplerCompat {
 public:
     int getSamplerType() override {
+        int sampler_type = 0;
+        if (forward_get_sampler_type(this, sampler_type)) return sampler_type;
         return 0x414e45; // "ANE"
     }
 
     void recordAllocation(const void* item, std::size_t size) override {
         if (item == nullptr || size == 0) return;
-        std::lock_guard<std::mutex> lock(g_sampler_alloc_mu);
-        g_sampler_alloc_sizes[reinterpret_cast<std::uintptr_t>(item)] =
-            static_cast<std::uint64_t>(size);
+        {
+            std::lock_guard<std::mutex> lock(g_sampler_alloc_mu);
+            g_sampler_alloc_sizes[reinterpret_cast<std::uintptr_t>(item)] =
+                static_cast<std::uint64_t>(size);
+        }
+        forward_record_allocation(this, item, size);
     }
 
     void recordDeallocation(const void* item, std::size_t size) override {
         record_as3_free(item, static_cast<std::uint64_t>(size));
         erase_sampler_allocation_size(reinterpret_cast<std::uintptr_t>(item));
+        forward_record_deallocation(this, item, size);
     }
 
     void recordNewObjectAllocation(void* obj, std::uintptr_t sot) override {
         record_as3_alloc(obj, sot, nullptr, 0);
+        forward_record_new_object_allocation(this, obj, sot);
     }
 
-    void recordObjectReallocation(const void*) override {
+    void recordObjectReallocation(const void* obj) override {
         // Back-buffer growth is already visible in the native allocation stream.
+        forward_record_object_reallocation(this, obj);
     }
 
     void addDependentObject(const void* obj, const void* dep_obj) override {
         record_as3_reference(obj, dep_obj);
+        forward_add_dependent_object(this, obj, dep_obj);
     }
 
     void recordNewObjectAllocation(void* obj, const char* object_type, std::size_t size) override {
         g_generic_alloc_calls.fetch_add(1, std::memory_order_relaxed);
         record_as3_alloc(obj, 3, object_type, static_cast<std::uint64_t>(size));
+        forward_record_new_object_allocation_generic(this, obj, object_type, size);
     }
 };
 
@@ -810,6 +1008,113 @@ void* call_get_sampler() {
     }
 }
 
+void* call_sampler_owner_resolver(std::uintptr_t fn, std::uintptr_t arg) {
+    if (fn == 0) return nullptr;
+    __try {
+#if defined(_M_X64) || defined(__x86_64__)
+        using ResolverFn = void* (*)(std::uint32_t);
+        return reinterpret_cast<ResolverFn>(fn)(static_cast<std::uint32_t>(arg));
+#else
+        using ResolverFn = void* (__stdcall*)(std::uintptr_t);
+        return reinterpret_cast<ResolverFn>(fn)(arg);
+#endif
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+bool resolve_sampler_slot(std::uintptr_t& slot) {
+    slot = 0;
+    if (g_get_sampler == nullptr) return false;
+    const auto get = reinterpret_cast<std::uintptr_t>(g_get_sampler);
+    const auto* code = reinterpret_cast<const std::uint8_t*>(get);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    if (code[0] != 0x48 || code[1] != 0x83 || code[4] != 0x48 ||
+        code[5] != 0x8b || code[6] != 0x05 || code[22] != 0xff ||
+        code[23] != 0x15) {
+        return false;
+    }
+    std::int32_t global_disp = 0;
+    std::int32_t resolver_disp = 0;
+    if (!safe_read(code + 7, global_disp) ||
+        !safe_read(code + 24, resolver_disp)) {
+        return false;
+    }
+    const std::uintptr_t global_addr = get + 11 + global_disp;
+    const std::uintptr_t resolver_iat_addr = get + 28 + resolver_disp;
+
+    std::uintptr_t global = 0;
+    std::uintptr_t resolver_fn = 0;
+    std::uint32_t resolver_arg = 0;
+    if (!safe_read(reinterpret_cast<const void*>(global_addr), global) ||
+        global == 0 ||
+        !safe_read(reinterpret_cast<const void*>(resolver_iat_addr), resolver_fn) ||
+        resolver_fn == 0 ||
+        !safe_read(reinterpret_cast<const std::uint8_t*>(global) + 0xa6d0, resolver_arg)) {
+        return false;
+    }
+
+    void* owner_base = call_sampler_owner_resolver(resolver_fn, resolver_arg);
+    if (owner_base == nullptr) return false;
+    std::uintptr_t sampler_owner = 0;
+    if (!read_ptr(owner_base, 0x110, sampler_owner) || sampler_owner == 0) return false;
+    slot = sampler_owner + 0x22f8;
+    return true;
+#else
+    if (code[0] != 0xa1 || code[5] != 0x85 || code[9] != 0xff ||
+        code[10] != 0xb0 || code[15] != 0xff || code[16] != 0x15) {
+        return false;
+    }
+    std::uintptr_t global_addr = 0;
+    std::uintptr_t resolver_iat_addr = 0;
+    if (!safe_read(code + 1, global_addr) ||
+        !safe_read(code + 17, resolver_iat_addr)) {
+        return false;
+    }
+
+    std::uintptr_t global = 0;
+    std::uintptr_t resolver_fn = 0;
+    std::uintptr_t resolver_arg = 0;
+    if (!safe_read(reinterpret_cast<const void*>(global_addr), global) ||
+        global == 0 ||
+        !safe_read(reinterpret_cast<const void*>(resolver_iat_addr), resolver_fn) ||
+        resolver_fn == 0 ||
+        !safe_read(reinterpret_cast<const std::uint8_t*>(global) + 0x5844, resolver_arg)) {
+        return false;
+    }
+
+    void* owner_base = call_sampler_owner_resolver(resolver_fn, resolver_arg);
+    if (owner_base == nullptr) return false;
+    std::uintptr_t sampler_owner = 0;
+    if (!read_ptr(owner_base, 0x48, sampler_owner) || sampler_owner == 0) return false;
+    slot = sampler_owner + 0x1354;
+    return true;
+#endif
+}
+
+bool write_sampler_slot(void* sampler) {
+    std::uintptr_t slot = g_sampler_slot.load(std::memory_order_acquire);
+    if (slot == 0 && !resolve_sampler_slot(slot)) return false;
+    if (!write_ptr(slot, sampler)) return false;
+    g_sampler_slot.store(slot, std::memory_order_release);
+    return true;
+}
+
+bool install_sampler_via_slot(void* sampler) {
+    if (sampler == nullptr) return false;
+    if (!write_sampler_slot(sampler)) {
+        g_direct_slot_failures.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    if (call_get_sampler() != sampler) {
+        g_direct_slot_failures.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    g_direct_slot_installs.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
 #endif
 } // namespace
 
@@ -826,6 +1131,11 @@ bool WindowsAs3ObjectHook::install(DeepProfilerController* controller) {
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
     g_last_failure_stage.store(0, std::memory_order_relaxed);
+    g_previous_sampler.store(nullptr, std::memory_order_release);
+    g_sampler_at_install.store(0, std::memory_order_release);
+    g_sampler_vtable_at_install.store(0, std::memory_order_release);
+    g_previous_sampler_vtable.store(0, std::memory_order_release);
+    g_sampler_slot.store(0, std::memory_order_release);
     HMODULE air = GetModuleHandleA(air_rvas::kDllName);
     if (air == nullptr) {
         g_last_failure_stage.store(1, std::memory_order_relaxed);
@@ -860,26 +1170,39 @@ bool WindowsAs3ObjectHook::install(DeepProfilerController* controller) {
         g_method_name_with_traits = nullptr;
     }
     void* current = call_get_sampler();
+    const auto current_addr = reinterpret_cast<std::uintptr_t>(current);
+    g_sampler_at_install.store(current_addr, std::memory_order_release);
+    g_sampler_vtable_at_install.store(vtable_from_object(current_addr), std::memory_order_release);
     if (current != nullptr && current != &g_sampler) {
-        g_last_failure_stage.store(4, std::memory_order_relaxed);
-        g_failed_installs.fetch_add(1, std::memory_order_relaxed);
-        g_attach_sampler = nullptr;
-        g_get_sampler = nullptr;
-        g_method_name_with_traits = nullptr;
-        return false;
+        g_previous_sampler.store(current, std::memory_order_release);
+        g_previous_sampler_vtable.store(vtable_from_object(current_addr), std::memory_order_release);
+        g_chained_installs.fetch_add(1, std::memory_order_relaxed);
     }
 
     g_controller.store(controller, std::memory_order_release);
     if (current != &g_sampler) {
-        if (!call_attach_sampler(&g_sampler) || call_get_sampler() != &g_sampler) {
+        const bool attached = call_attach_sampler(&g_sampler) && call_get_sampler() == &g_sampler;
+        if (!attached && !install_sampler_via_slot(&g_sampler)) {
+            void* previous = g_previous_sampler.load(std::memory_order_acquire);
+            if (previous != nullptr) {
+                write_sampler_slot(previous);
+                call_attach_sampler(previous);
+            }
             g_controller.store(nullptr, std::memory_order_release);
             g_last_failure_stage.store(5, std::memory_order_relaxed);
             g_failed_installs.fetch_add(1, std::memory_order_relaxed);
+            g_previous_sampler.store(nullptr, std::memory_order_release);
+            g_previous_sampler_vtable.store(0, std::memory_order_release);
+            g_sampler_slot.store(0, std::memory_order_release);
             g_attach_sampler = nullptr;
             g_get_sampler = nullptr;
             g_method_name_with_traits = nullptr;
             return false;
         }
+    }
+    std::uintptr_t sampler_slot = 0;
+    if (resolve_sampler_slot(sampler_slot)) {
+        g_sampler_slot.store(sampler_slot, std::memory_order_release);
     }
 
     {
@@ -910,9 +1233,16 @@ void WindowsAs3ObjectHook::uninstall() {
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
     if (installed_ && g_get_sampler != nullptr && g_attach_sampler != nullptr) {
         if (call_get_sampler() == &g_sampler) {
-            call_attach_sampler(nullptr);
+            void* previous = g_previous_sampler.load(std::memory_order_acquire);
+            const bool restored = write_sampler_slot(previous) || call_attach_sampler(previous);
+            if (!restored || call_get_sampler() != previous) {
+                g_forward_failures.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
+    g_previous_sampler.store(nullptr, std::memory_order_release);
+    g_previous_sampler_vtable.store(0, std::memory_order_release);
+    g_sampler_slot.store(0, std::memory_order_release);
     g_attach_sampler = nullptr;
     g_get_sampler = nullptr;
     g_method_name_with_traits = nullptr;
@@ -951,8 +1281,123 @@ std::uint64_t WindowsAs3ObjectHook::failedInstalls() const {
     return g_failed_installs.load(std::memory_order_relaxed);
 }
 
+std::uint64_t WindowsAs3ObjectHook::chainedInstalls() const {
+    return g_chained_installs.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::directSlotInstalls() const {
+    return g_direct_slot_installs.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::directSlotFailures() const {
+    return g_direct_slot_failures.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::forwardedCalls() const {
+    return g_forwarded_calls.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::forwardFailures() const {
+    return g_forward_failures.load(std::memory_order_relaxed);
+}
+
 std::uint32_t WindowsAs3ObjectHook::lastFailureStage() const {
     return g_last_failure_stage.load(std::memory_order_relaxed);
+}
+
+bool WindowsAs3ObjectHook::chainedSampler() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    return g_previous_sampler.load(std::memory_order_acquire) != nullptr;
+#else
+    return false;
+#endif
+}
+
+std::uintptr_t WindowsAs3ObjectHook::currentSamplerPtr() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    if (g_get_sampler != nullptr) {
+        return reinterpret_cast<std::uintptr_t>(call_get_sampler());
+    }
+    return g_sampler_at_install.load(std::memory_order_acquire);
+#else
+    return 0;
+#endif
+}
+
+std::uintptr_t WindowsAs3ObjectHook::currentSamplerVtable() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    const auto current = currentSamplerPtr();
+    if (current != 0) return vtable_from_object(current);
+    return g_sampler_vtable_at_install.load(std::memory_order_acquire);
+#else
+    return 0;
+#endif
+}
+
+std::uintptr_t WindowsAs3ObjectHook::samplerSlotPtr() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    return g_sampler_slot.load(std::memory_order_acquire);
+#else
+    return 0;
+#endif
+}
+
+std::uintptr_t WindowsAs3ObjectHook::previousSamplerPtr() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    return reinterpret_cast<std::uintptr_t>(g_previous_sampler.load(std::memory_order_acquire));
+#else
+    return 0;
+#endif
+}
+
+std::uintptr_t WindowsAs3ObjectHook::previousSamplerVtable() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    const auto previous = previousSamplerPtr();
+    if (previous != 0) return vtable_from_object(previous);
+    return g_previous_sampler_vtable.load(std::memory_order_acquire);
+#else
+    return 0;
+#endif
+}
+
+std::string WindowsAs3ObjectHook::currentSamplerModule() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    return module_name_for_address(currentSamplerPtr());
+#else
+    return {};
+#endif
+}
+
+std::string WindowsAs3ObjectHook::currentSamplerVtableModule() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    return module_name_for_address(currentSamplerVtable());
+#else
+    return {};
+#endif
+}
+
+std::string WindowsAs3ObjectHook::previousSamplerModule() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    return module_name_for_address(previousSamplerPtr());
+#else
+    return {};
+#endif
+}
+
+std::string WindowsAs3ObjectHook::previousSamplerVtableModule() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    return module_name_for_address(previousSamplerVtable());
+#else
+    return {};
+#endif
+}
+
+std::string WindowsAs3ObjectHook::previousSamplerVtableHead() const {
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    return vtable_head_for_sampler(previousSamplerPtr());
+#else
+    return {};
+#endif
 }
 
 } // namespace ane::profiler

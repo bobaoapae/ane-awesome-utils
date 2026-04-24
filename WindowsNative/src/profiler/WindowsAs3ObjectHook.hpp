@@ -8,6 +8,7 @@
 #define ANE_PROFILER_WINDOWS_AS3_OBJECT_HOOK_HPP
 
 #include <cstdint>
+#include <string>
 
 namespace ane::profiler {
 
@@ -26,7 +27,23 @@ public:
     std::uint64_t as3FreeCalls() const;
     std::uint64_t genericAllocCalls() const;
     std::uint64_t failedInstalls() const;
+    std::uint64_t chainedInstalls() const;
+    std::uint64_t directSlotInstalls() const;
+    std::uint64_t directSlotFailures() const;
+    std::uint64_t forwardedCalls() const;
+    std::uint64_t forwardFailures() const;
     std::uint32_t lastFailureStage() const;
+    bool chainedSampler() const;
+    std::uintptr_t currentSamplerPtr() const;
+    std::uintptr_t currentSamplerVtable() const;
+    std::uintptr_t samplerSlotPtr() const;
+    std::uintptr_t previousSamplerPtr() const;
+    std::uintptr_t previousSamplerVtable() const;
+    std::string currentSamplerModule() const;
+    std::string currentSamplerVtableModule() const;
+    std::string previousSamplerModule() const;
+    std::string previousSamplerVtableModule() const;
+    std::string previousSamplerVtableHead() const;
 
 private:
     bool installed_ = false;

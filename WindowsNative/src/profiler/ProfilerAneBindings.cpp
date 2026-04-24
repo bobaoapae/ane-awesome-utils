@@ -7,6 +7,7 @@
 #include "profiler/WindowsDeepMemoryHook.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -47,6 +48,16 @@ FREObject make_string(const char* s) {
                          bytes,
                          &o);
     return o;
+}
+
+std::string hex_ptr(std::uintptr_t value) {
+    char buf[2 + sizeof(std::uintptr_t) * 2 + 1] = {};
+#if defined(_M_X64) || defined(__x86_64__)
+    std::snprintf(buf, sizeof(buf), "0x%016llx", static_cast<unsigned long long>(value));
+#else
+    std::snprintf(buf, sizeof(buf), "0x%08lx", static_cast<unsigned long>(value));
+#endif
+    return std::string(buf);
 }
 
 bool read_string(FREObject o, std::string& out) {
@@ -301,8 +312,52 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
                      static_cast<double>(g_as3_object_hook->genericAllocCalls()));
         set_prop_f64(obj, "as3ObjectHookFailedInstalls",
                      static_cast<double>(g_as3_object_hook->failedInstalls()));
+        set_prop_f64(obj, "as3ObjectHookChainedInstalls",
+                     static_cast<double>(g_as3_object_hook->chainedInstalls()));
+        set_prop_f64(obj, "as3ObjectHookDirectSlotInstalls",
+                     static_cast<double>(g_as3_object_hook->directSlotInstalls()));
+        set_prop_f64(obj, "as3ObjectHookDirectSlotFailures",
+                     static_cast<double>(g_as3_object_hook->directSlotFailures()));
+        set_prop_bool(obj, "as3ObjectHookChainedSampler",
+                      g_as3_object_hook->chainedSampler());
+        set_prop_f64(obj, "as3ObjectHookForwardedCalls",
+                     static_cast<double>(g_as3_object_hook->forwardedCalls()));
+        set_prop_f64(obj, "as3ObjectHookForwardFailures",
+                     static_cast<double>(g_as3_object_hook->forwardFailures()));
         set_prop_u32(obj, "as3ObjectHookLastFailureStage",
                      g_as3_object_hook->lastFailureStage());
+
+        const auto current_sampler = g_as3_object_hook->currentSamplerPtr();
+        const auto current_vtable = g_as3_object_hook->currentSamplerVtable();
+        const auto sampler_slot = g_as3_object_hook->samplerSlotPtr();
+        const auto previous_sampler = g_as3_object_hook->previousSamplerPtr();
+        const auto previous_vtable = g_as3_object_hook->previousSamplerVtable();
+        const std::string current_sampler_hex = hex_ptr(current_sampler);
+        const std::string current_vtable_hex = hex_ptr(current_vtable);
+        const std::string sampler_slot_hex = hex_ptr(sampler_slot);
+        const std::string previous_sampler_hex = hex_ptr(previous_sampler);
+        const std::string previous_vtable_hex = hex_ptr(previous_vtable);
+        const std::string current_module = g_as3_object_hook->currentSamplerModule();
+        const std::string current_vtable_module = g_as3_object_hook->currentSamplerVtableModule();
+        const std::string previous_module = g_as3_object_hook->previousSamplerModule();
+        const std::string previous_vtable_module = g_as3_object_hook->previousSamplerVtableModule();
+        const std::string previous_vtable_head = g_as3_object_hook->previousSamplerVtableHead();
+
+        set_prop_f64(obj, "as3SamplerCurrentPtr", static_cast<double>(current_sampler));
+        set_prop_string(obj, "as3SamplerCurrentPtrHex", current_sampler_hex.c_str());
+        set_prop_f64(obj, "as3SamplerCurrentVtable", static_cast<double>(current_vtable));
+        set_prop_string(obj, "as3SamplerCurrentVtableHex", current_vtable_hex.c_str());
+        set_prop_f64(obj, "as3SamplerSlotPtr", static_cast<double>(sampler_slot));
+        set_prop_string(obj, "as3SamplerSlotPtrHex", sampler_slot_hex.c_str());
+        set_prop_string(obj, "as3SamplerCurrentModule", current_module.c_str());
+        set_prop_string(obj, "as3SamplerCurrentVtableModule", current_vtable_module.c_str());
+        set_prop_f64(obj, "as3SamplerPreviousPtr", static_cast<double>(previous_sampler));
+        set_prop_string(obj, "as3SamplerPreviousPtrHex", previous_sampler_hex.c_str());
+        set_prop_f64(obj, "as3SamplerPreviousVtable", static_cast<double>(previous_vtable));
+        set_prop_string(obj, "as3SamplerPreviousVtableHex", previous_vtable_hex.c_str());
+        set_prop_string(obj, "as3SamplerPreviousModule", previous_module.c_str());
+        set_prop_string(obj, "as3SamplerPreviousVtableModule", previous_vtable_module.c_str());
+        set_prop_string(obj, "as3SamplerPreviousVtableHead", previous_vtable_head.c_str());
     }
     WindowsAirRuntime* runtime = ensure_air_runtime();
     const bool native_gc_available = runtime != nullptr && runtime->initialized();

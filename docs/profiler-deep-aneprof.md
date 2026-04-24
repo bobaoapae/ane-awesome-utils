@@ -136,17 +136,31 @@ both:
 - live AS3-to-AS3 reference edges when both sides are sampled AS3 objects;
 - live-owner dependent refs grouped by AS3 type and allocation site.
 
-The AS3 object hook needs exclusive access to AIR's single `IMemorySampler`
-slot. If the SWF/runtime already owns that slot, for example through
-`flash.sampler.startSampling()`, `setSamplerCallback()`, or Scout/advanced
-telemetry creating Adobe's `MemoryTelemetrySampler`, the `.aneprof` capture now
-continues in native-only memory mode instead of aborting. In that fallback,
-markers, snapshots and native alloc/free/realloc events are still recorded, but
-AS3 type/stack/reference fields are absent. Check `profilerGetStatus()`:
-`memoryLeakDiagnosticsReady=true` with `as3LeakDiagnosticsReady=false` means
-native memory capture is active but AS3 sampling was skipped. For full AS3
-type/stack leak diagnostics, run the test SWF without a competing sampler and,
-when possible, without `-advanced-telemetry=true`.
+AIR exposes a single active `IMemorySampler` slot. If the SWF/runtime already
+owns that slot, for example through `flash.sampler.startSampling()`,
+`setSamplerCallback()`, or Scout/advanced telemetry creating Adobe's
+`MemoryTelemetrySampler`, the ANE now installs a chained sampler instead of
+aborting AS3 diagnostics. The normal AIR `attachSampler` helper only fills an
+empty slot, so when a sampler is already present the ANE resolves the slot used
+by `getSampler()` and writes its proxy there directly. The chained sampler
+records `.aneprof` AS3 alloc/free/reference events and forwards each callback
+to the sampler that was already installed; `profilerStop()` restores the
+previous sampler pointer.
+
+Check `profilerGetStatus()` during a capture:
+
+- `as3LeakDiagnosticsReady=true` means the AS3 object sampler is active.
+- `as3ObjectHookChainedSampler=true` means the ANE is proxying another
+  sampler, so `as3ObjectHookForwardedCalls` should grow as callbacks arrive.
+- `as3ObjectHookDirectSlotInstalls>0` means `attachSampler` would not replace
+  the occupied AIR slot and the direct slot fallback was used.
+- `as3SamplerSlotPtrHex` is the resolved AIR sampler slot while the hook is
+  installed.
+- `as3SamplerPreviousVtableModule` and `as3SamplerPreviousVtableHead` identify
+  the sampler that occupied the AIR slot before the ANE installed its proxy.
+- `memoryLeakDiagnosticsReady=true` with `as3LeakDiagnosticsReady=false` now
+  indicates a lower-level attach/prologue failure rather than normal sampler
+  contention.
 
 ## Validation
 
