@@ -118,10 +118,13 @@ from raw events. The JSON output includes:
   the analyzer canonicalizes small x86/x64 object/header pointer offsets so
   `addDependentObject` callbacks can become AS3-AS3 edges when both objects are
   still live
-- `as3_reference_inferred_typed_edges` and `top_as3_reference_kinds` for
-  conservative typed-edge inference (`timer_callback`, `event_listener`,
-  `array`, `dictionary`, `display_child`) when the runtime only emitted a base
-  `as3_reference`
+- `as3_reference_real_typed_edges` and `top_as3_reference_kinds` for typed
+  edges that came from factual `as3_reference_ex` events
+- `as3_reference_inferred_typed_edges` and
+  `top_as3_reference_inferred_kinds` for conservative typed-edge suggestions
+  (`timer_callback`, `event_listener`, `array`, `dictionary`,
+  `display_child`) when the runtime only emitted a base `as3_reference`;
+  these suggestions are not used as factual retainer path edge kinds
 - `payload_by_owner` for BitmapData/ByteArray/native payload bytes attached to
   AS3 owners, plus inferred unowned pseudo-payloads such as `.mem.bitmap.data`
 - `lifetime_summary`, `allocation_rate`, `frame_summary`, `gc_summary` and
@@ -151,14 +154,20 @@ offsets before storing or consuming reference edges. This keeps old captures
 readable while improving retainer paths for new and re-analyzed `.aneprof`
 files.
 
-When both referenced AS3 objects are live, the native hook also emits
-`as3_reference_ex` for safely inferred edge kinds. The inference is deliberately
-type-based rather than RVA-based: timers plus closures become `timer_callback`,
-method closures become `event_listener`, `Array`/`Dictionary` owners become
-collection edges, and display-like owner/dependent pairs become
-`display_child`. These events carry the `inferred` flag. The analyzer applies
-the same inference to older captures so historical dumps get the same JSON
-fields even if the file itself has no `as3_reference_ex` events.
+The runtime `IMemorySampler.addDependentObject` callback proves that an owner
+depends on another object, but it does not identify the source of that edge.
+For that reason the native hook does not write inferred `as3_reference_ex`
+events from this callback. The analyzer may still report type-based suggestions
+for triage, but retainer paths keep `edge_kind=unknown` unless a real
+`as3_reference_ex` event exists.
+
+Real typed edges must come from a hook at the operation that creates the
+relationship, for example `DisplayObjectContainer.addChild/removeChild` for
+`display_child`, `EventDispatcher.addEventListener/removeEventListener` for
+`event_listener`, timer APIs for `timer_callback`, or verified collection/slot
+write paths. Until those hooks are implemented and validated for both x64 and
+x86, `.aneprof` keeps the exact object-to-object reference and labels the type
+only as a suggestion.
 
 Frame summaries can be supplied explicitly through `profilerRecordFrame()`.
 The AS3 test bridge uses this to write one `frame` event per `ENTER_FRAME` when

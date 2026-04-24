@@ -202,35 +202,90 @@ def infer_reference_kind_from_types(owner_type: str, dependent_type: str) -> tup
 def infer_reference_info_kinds(
     reference_infos: list[dict[str, Any]],
     as3_live: dict[int, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    stats: Counter[str] = Counter()
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int], int]:
+    real_stats: Counter[str] = Counter()
+    suggestion_stats: Counter[str] = Counter()
+    suggestion_count = 0
+    suggested_seen: set[tuple[int, int, str]] = set()
     out: list[dict[str, Any]] = []
     for ref in reference_infos:
-        if ref.get("kind", "unknown") != "unknown":
-            stats[str(ref.get("kind"))] += 1
-            out.append(ref)
+        updated = dict(ref)
+        owner_id = int(updated.get("owner_id") or 0)
+        dependent_id = int(updated.get("dependent_id") or 0)
+        kind = str(updated.get("kind") or "unknown")
+        kind_is_inferred = bool(updated.get("inferred") or updated.get("kind_inferred"))
+        if kind != "unknown" and kind_is_inferred:
+            updated["kind"] = "unknown"
+            updated["label"] = ""
+            updated["inferred"] = False
+            updated["kind_inferred"] = True
+            updated["suggested_kind"] = kind
+            updated["suggested_label"] = ref.get("label", "")
+            suggestion_key = (owner_id, dependent_id, kind)
+            if suggestion_key not in suggested_seen:
+                suggested_seen.add(suggestion_key)
+                suggestion_stats[kind] += 1
+                suggestion_count += 1
+            out.append(updated)
             continue
-        owner = as3_live.get(int(ref.get("owner_id") or 0))
-        dependent = as3_live.get(int(ref.get("dependent_id") or 0))
+        if kind != "unknown":
+            real_stats[kind] += 1
+            out.append(updated)
+            continue
+        owner = as3_live.get(owner_id)
+        dependent = as3_live.get(dependent_id)
         if not owner or not dependent:
-            out.append(ref)
+            out.append(updated)
             continue
         inferred = infer_reference_kind_from_types(
             str(owner.get("type_name") or ""),
             str(dependent.get("type_name") or ""),
         )
         if not inferred:
-            out.append(ref)
+            out.append(updated)
             continue
         kind, label = inferred
-        updated = dict(ref)
-        updated["kind"] = kind
-        updated["label"] = label
-        updated["inferred"] = True
         updated["kind_inferred"] = True
-        stats[kind] += 1
+        updated["suggested_kind"] = kind
+        updated["suggested_label"] = label
+        suggestion_key = (owner_id, dependent_id, kind)
+        if suggestion_key not in suggested_seen:
+            suggested_seen.add(suggestion_key)
+            suggestion_stats[kind] += 1
+            suggestion_count += 1
         out.append(updated)
-    return out, dict(stats)
+    return out, dict(real_stats), dict(suggestion_stats), suggestion_count
+
+
+def merge_reference_infos(reference_infos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[int, int], dict[str, Any]] = {}
+    for ref in reference_infos:
+        owner_id = int(ref.get("owner_id") or 0)
+        dependent_id = int(ref.get("dependent_id") or 0)
+        key = (owner_id, dependent_id)
+        current = merged.get(key)
+        if current is None:
+            merged[key] = dict(ref)
+            continue
+
+        ref_kind = str(ref.get("kind") or "unknown")
+        current_kind = str(current.get("kind") or "unknown")
+        ref_is_real = ref_kind != "unknown" and not ref.get("kind_inferred") and not ref.get("inferred")
+        current_is_real = (
+            current_kind != "unknown"
+            and not current.get("kind_inferred")
+            and not current.get("inferred")
+        )
+        if ref_is_real and not current_is_real:
+            current["kind"] = ref_kind
+            current["kind_id"] = ref.get("kind_id")
+            current["label"] = ref.get("label", "")
+            current["inferred"] = False
+            current.pop("kind_inferred", None)
+        if ref.get("suggested_kind") and not current.get("suggested_kind"):
+            current["suggested_kind"] = ref.get("suggested_kind")
+            current["suggested_label"] = ref.get("suggested_label", "")
+    return list(merged.values())
 
 
 def parse_header(raw: bytes) -> tuple[int, dict[str, Any]]:
@@ -809,6 +864,8 @@ def build_retention_analysis(
                 "kind": ref.get("kind", "unknown"),
                 "label": ref.get("label", ""),
                 "inferred": bool(ref.get("inferred")),
+                "suggested_kind": ref.get("suggested_kind"),
+                "suggested_label": ref.get("suggested_label", ""),
             }
         elif edge_details[key]["kind"] == "unknown" and ref.get("kind") != "unknown":
             edge_details[key].update(
@@ -818,6 +875,9 @@ def build_retention_analysis(
                     "inferred": bool(ref.get("inferred")),
                 }
             )
+        elif ref.get("suggested_kind") and not edge_details[key].get("suggested_kind"):
+            edge_details[key]["suggested_kind"] = ref.get("suggested_kind")
+            edge_details[key]["suggested_label"] = ref.get("suggested_label", "")
 
     roots: list[dict[str, Any]] = []
     seen_root_keys: set[tuple[int, str, str]] = set()
@@ -928,6 +988,9 @@ def build_retention_analysis(
             item["edge_kind"] = "root" if idx == 0 else edge.get("kind", "unknown")
             item["edge_label"] = "" if idx == 0 else edge.get("label", "")
             item["edge_inferred"] = bool(edge.get("inferred", False))
+            if idx != 0 and edge.get("suggested_kind"):
+                item["edge_suggested_kind"] = edge.get("suggested_kind")
+                item["edge_suggested_label"] = edge.get("suggested_label", "")
             out.append(item)
         return out
 
@@ -1703,10 +1766,32 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     ]
     reference_infos.extend(as3_reference_ex)
     reference_infos, reference_id_aliases = canonicalize_reference_infos(reference_infos, as3_live)
-    reference_infos, reference_kind_counts = infer_reference_info_kinds(reference_infos, as3_live)
+    (
+        reference_infos,
+        reference_kind_counts,
+        inferred_reference_kind_counts,
+        as3_reference_inferred_typed_edges,
+    ) = infer_reference_info_kinds(reference_infos, as3_live)
+    reference_infos = merge_reference_infos(reference_infos)
+    reference_kind_counts = Counter(
+        str(ref.get("kind"))
+        for ref in reference_infos
+        if str(ref.get("kind") or "unknown") != "unknown"
+        and not ref.get("kind_inferred")
+        and not ref.get("inferred")
+    )
+    inferred_reference_kind_counts = Counter(
+        str(ref.get("suggested_kind"))
+        for ref in reference_infos
+        if ref.get("suggested_kind")
+    )
+    as3_reference_real_typed_edges = sum(
+        1 for ref in reference_infos
+        if not ref.get("kind_inferred") and ref.get("kind", "unknown") != "unknown"
+    )
     as3_reference_inferred_typed_edges = sum(
         1 for ref in reference_infos
-        if ref.get("kind_inferred") and ref.get("kind", "unknown") != "unknown"
+        if ref.get("suggested_kind")
     )
 
     live_reference_edges: list[tuple[int, int]] = []
@@ -1997,10 +2082,15 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         "as3_reference_edges_with_live_dependent": as3_reference_edges_with_live_dependent,
         "as3_reference_edges_with_live_owner_and_dependent": as3_reference_edges_with_live_owner_and_dependent,
         "as3_reference_id_aliases": reference_id_aliases,
+        "as3_reference_real_typed_edges": as3_reference_real_typed_edges,
         "as3_reference_inferred_typed_edges": as3_reference_inferred_typed_edges,
         "top_as3_reference_kinds": [
             {"kind": key, "count": count}
             for key, count in sorted(reference_kind_counts.items(), key=lambda kv: kv[1], reverse=True)
+        ],
+        "top_as3_reference_inferred_kinds": [
+            {"kind": key, "count": count}
+            for key, count in sorted(inferred_reference_kind_counts.items(), key=lambda kv: kv[1], reverse=True)
         ],
         "live_as3_reference_edges": len(live_reference_edges),
         "as3_roots": retention["roots"],
@@ -2099,12 +2189,13 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
         print(f"  AS3 ref aliases : {aliases.get('either', 0):>6} total / "
               f"{aliases.get('owner', 0):>6} owner / "
               f"{aliases.get('dependent', 0):>6} dependent")
-    if result.get("as3_reference_inferred_typed_edges"):
-        print(f"  AS3 ref inferred: {result.get('as3_reference_inferred_typed_edges', 0):>6} typed edges")
+    if result.get("as3_reference_real_typed_edges") or result.get("as3_reference_inferred_typed_edges"):
+        print(f"  AS3 ref typed   : {result.get('as3_reference_real_typed_edges', 0):>6} real / "
+              f"{result.get('as3_reference_inferred_typed_edges', 0):>6} suggested")
     if result.get("as3_reference_ex_edges") or result.get("as3_roots") or result.get("payload_by_owner"):
         print(f"  AS3 roots/payload: {len(result.get('as3_roots', [])):>6} roots / "
               f"{len(result.get('payload_by_owner', [])):>6} payload owner(s) / "
-              f"{result.get('as3_reference_ex_edges', 0):>6} typed edges")
+              f"{result.get('as3_reference_ex_edges', 0):>6} reference-ex events")
     overhead = result["overhead"]
     print(f"  event rate      : {overhead['events_per_sec']:>12.2f} events/s")
     print(f"  payload rate    : {overhead['payload_bytes_per_sec']:>12.2f} B/s")
@@ -2281,9 +2372,15 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
 
     as3_ref_kinds = result.get("top_as3_reference_kinds", [])[:top]
     if as3_ref_kinds:
-        print("\nTop AS3 reference kinds:")
+        print("\nTop AS3 real reference kinds:")
         for item in as3_ref_kinds:
             print(f"  kind={item['kind']:<24} count={item['count']}")
+
+    as3_ref_inferred_kinds = result.get("top_as3_reference_inferred_kinds", [])[:top]
+    if as3_ref_inferred_kinds:
+        print("\nTop AS3 suggested reference kinds:")
+        for item in as3_ref_inferred_kinds:
+            print(f"  suggested={item['kind']:<19} count={item['count']}")
 
     as3_ref_owners = result["top_as3_reference_owners"][:top]
     if as3_ref_owners:
@@ -2524,7 +2621,8 @@ th{background:#eef3f7}.warn{color:#9a4b00}
             "AS3 Ref Live Edges": result["live_as3_reference_edges"],
             "AS3 Ref Live Owner": result["as3_reference_edges_with_live_owner"],
             "AS3 Ref Aliased": (result.get("as3_reference_id_aliases") or {}).get("either", 0),
-            "AS3 Ref Inferred Typed": result.get("as3_reference_inferred_typed_edges", 0),
+            "AS3 Ref Real Typed": result.get("as3_reference_real_typed_edges", 0),
+            "AS3 Ref Suggested Typed": result.get("as3_reference_inferred_typed_edges", 0),
             "Frames": result.get("frame_summary", {}).get("frame_count", 0),
             "Slow Frames": result.get("frame_summary", {}).get("slow_frame_count", 0),
             "Dropped": result["footer"]["dropped_count"],

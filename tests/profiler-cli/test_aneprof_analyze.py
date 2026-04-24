@@ -215,9 +215,28 @@ class AneprofAnalyzeTests(unittest.TestCase):
         result = analyze_events(events)
 
         self.assertEqual(result["as3_reference_inferred_typed_edges"], 1)
-        self.assertEqual(result["top_as3_reference_kinds"][0]["kind"], "timer_callback")
+        self.assertEqual(result["as3_reference_real_typed_edges"], 0)
+        self.assertEqual(result["top_as3_reference_inferred_kinds"][0]["kind"], "timer_callback")
         child_path = next(item for item in result["retainer_paths"] if item["object_id"] == 2)
-        self.assertEqual(child_path["path"][-1]["edge_kind"], "timer_callback")
+        self.assertEqual(child_path["path"][-1]["edge_kind"], "unknown")
+        self.assertEqual(child_path["path"][-1]["edge_suggested_kind"], "timer_callback")
+
+    def test_real_reference_ex_kind_is_used_for_retainer_paths(self) -> None:
+        events = [
+            event(START, timestamp_ns=1),
+            event(AS3_ALLOC, as3_object(1, 10, "flash.display::Sprite", "View/root"), 2),
+            event(AS3_ALLOC, as3_object(2, 20, "flash.display::Bitmap", "View/child"), 3),
+            event(AS3_ROOT, as3_root(1, 1, "stage"), 4),
+            event(AS3_REFERENCE_EX, as3_ref_ex(1, 2, 4, "display-list:addChild"), 5),
+            event(STOP, timestamp_ns=6),
+        ]
+        result = analyze_events(events)
+
+        self.assertEqual(result["as3_reference_real_typed_edges"], 1)
+        self.assertEqual(result["as3_reference_inferred_typed_edges"], 0)
+        self.assertEqual(result["top_as3_reference_kinds"][0]["kind"], "display_child")
+        child_path = next(item for item in result["retainer_paths"] if item["object_id"] == 2)
+        self.assertEqual(child_path["path"][-1]["edge_kind"], "display_child")
 
     def test_frame_events_are_filled_with_allocations_from_the_frame_interval(self) -> None:
         events = [
