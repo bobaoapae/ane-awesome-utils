@@ -724,6 +724,84 @@ std::uint64_t tracked_as3_object_size(DeepProfilerController* ctrl, std::uintptr
     return 0;
 }
 
+std::uintptr_t canonical_live_as3_key_locked(std::uintptr_t key) {
+    if (key == 0) return 0;
+    if (g_live_as3.find(key) != g_live_as3.end()) return key;
+#if defined(_M_X64) || defined(__x86_64__)
+    constexpr std::uintptr_t kDeltas[] = {16, 8, 24, 32, 4, 12, 20, 28, 40, 48};
+#else
+    constexpr std::uintptr_t kDeltas[] = {8, 4, 12, 16, 20, 24, 28, 32};
+#endif
+    for (const auto delta : kDeltas) {
+        if (key >= delta && g_live_as3.find(key - delta) != g_live_as3.end()) {
+            return key - delta;
+        }
+        if (UINTPTR_MAX - key >= delta && g_live_as3.find(key + delta) != g_live_as3.end()) {
+            return key + delta;
+        }
+    }
+    return key;
+}
+
+bool type_contains(const std::string& type_name, const char* token) {
+    return type_name.find(token) != std::string::npos;
+}
+
+bool is_method_closure_type(const std::string& type_name) {
+    return type_contains(type_name, "MethodClosure") ||
+           type_name == "Function" ||
+           type_name == "builtin.as$0::Function";
+}
+
+bool is_timer_type(const std::string& type_name) {
+    return type_contains(type_name, "Timer") ||
+           type_contains(type_name, "SetIntervalTimer");
+}
+
+bool is_dictionary_type(const std::string& type_name) {
+    return type_contains(type_name, "Dictionary");
+}
+
+bool is_array_type(const std::string& type_name) {
+    return type_name == "Array" ||
+           (type_name.size() >= 7 && type_name.compare(type_name.size() - 7, 7, "::Array") == 0);
+}
+
+bool is_display_type(const std::string& type_name) {
+    return type_contains(type_name, "flash.display::") ||
+           type_contains(type_name, "::MovieClip") ||
+           type_contains(type_name, "::Sprite") ||
+           type_contains(type_name, "::Bitmap") ||
+           type_contains(type_name, "::Shape") ||
+           type_contains(type_name, "::SimpleButton") ||
+           type_contains(type_name, "DisplayObject") ||
+           type_contains(type_name, "DisplayObjectContainer") ||
+           type_contains(type_name, "com.pickgliss.ui.");
+}
+
+std::pair<aneprof::As3ReferenceKind, const char*>
+infer_as3_reference_kind(const std::string& owner_type, const std::string& dependent_type) {
+    if (is_timer_type(owner_type) && (is_method_closure_type(dependent_type) || is_array_type(dependent_type))) {
+        return {aneprof::As3ReferenceKind::TimerCallback, "inferred:timer-callback"};
+    }
+    if (is_timer_type(dependent_type) && is_method_closure_type(owner_type)) {
+        return {aneprof::As3ReferenceKind::TimerCallback, "inferred:timer-callback"};
+    }
+    if (is_dictionary_type(owner_type) || is_dictionary_type(dependent_type)) {
+        return {aneprof::As3ReferenceKind::Dictionary, "inferred:dictionary"};
+    }
+    if (is_array_type(owner_type) || is_array_type(dependent_type)) {
+        return {aneprof::As3ReferenceKind::Array, "inferred:array"};
+    }
+    if (is_method_closure_type(owner_type) || is_method_closure_type(dependent_type)) {
+        return {aneprof::As3ReferenceKind::EventListener, "inferred:method-closure"};
+    }
+    if (is_display_type(owner_type) && is_display_type(dependent_type)) {
+        return {aneprof::As3ReferenceKind::DisplayChild, "inferred:display-list"};
+    }
+    return {aneprof::As3ReferenceKind::Unknown, ""};
+}
+
 void record_as3_alloc(void* obj,
                       std::uintptr_t sot,
                       const char* generic_type,
@@ -783,8 +861,21 @@ void record_as3_reference(const void* obj, const void* dep_obj) {
     auto* ctrl = g_controller.load(std::memory_order_acquire);
     if (ctrl == nullptr) return;
 
-    const auto owner = reinterpret_cast<std::uintptr_t>(obj);
-    const auto dependent = reinterpret_cast<std::uintptr_t>(dep_obj);
+    auto owner = reinterpret_cast<std::uintptr_t>(obj);
+    auto dependent = reinterpret_cast<std::uintptr_t>(dep_obj);
+    std::string owner_type;
+    std::string dependent_type;
+    {
+        std::lock_guard<std::mutex> live_lock(g_live_mu);
+        owner = canonical_live_as3_key_locked(owner);
+        dependent = canonical_live_as3_key_locked(dependent);
+        auto owner_it = g_live_as3.find(owner);
+        if (owner_it != g_live_as3.end()) owner_type = owner_it->second.type_name;
+        auto dependent_it = g_live_as3.find(dependent);
+        if (dependent_it != g_live_as3.end()) dependent_type = dependent_it->second.type_name;
+    }
+    if (owner == 0 || dependent == 0 || owner == dependent) return;
+    const auto inferred = infer_as3_reference_kind(owner_type, dependent_type);
     {
         std::lock_guard<std::mutex> lock(g_as3_ref_mu);
         const auto inserted = g_as3_refs.insert(As3ReferenceKey{owner, dependent}).second;
@@ -795,6 +886,9 @@ void record_as3_reference(const void* obj, const void* dep_obj) {
 
     g_inside_hook = true;
     ctrl->record_as3_reference(owner, dependent);
+    if (inferred.first != aneprof::As3ReferenceKind::Unknown) {
+        ctrl->record_as3_reference_ex(owner, dependent, inferred.first, inferred.second, true);
+    }
     g_inside_hook = false;
 }
 

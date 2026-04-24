@@ -25,6 +25,8 @@ START = 1
 STOP = 2
 MARKER = 3
 SNAPSHOT = 4
+ALLOC = 7
+FREE = 8
 AS3_ALLOC = 12
 AS3_FREE = 13
 AS3_REFERENCE = 14
@@ -55,6 +57,10 @@ def marker(name: str, value: str = "null") -> bytes:
 def snapshot(label: str, live_allocs: int = 0, live_bytes: int = 0) -> bytes:
     lb = s(label)
     return struct.pack("<QQQQQQII", live_allocs, live_bytes, 0, 0, 0, 0, len(lb), 0) + lb
+
+
+def alloc(ptr: int, size: int, method_id: int = 0, stack_id: int = 0) -> bytes:
+    return struct.pack("<QQQQII", ptr, size, 0, 0, method_id, stack_id)
 
 
 def as3_object(sample_id: int, size: int, type_name: str, stack: str = "") -> bytes:
@@ -179,6 +185,55 @@ class AneprofAnalyzeTests(unittest.TestCase):
         self.assertEqual(retained[2]["retained_bytes"], 20)
         self.assertEqual(retained[3]["retained_bytes"], 30)
         self.assertEqual(retained[4]["retained_bytes"], 40)
+
+    def test_reference_ids_are_canonicalized_from_nearby_object_pointers(self) -> None:
+        events = [
+            event(START, timestamp_ns=1),
+            event(AS3_ALLOC, as3_object(0x1000, 10, "Root", "Game/root"), 2),
+            event(AS3_ALLOC, as3_object(0x2000, 20, "Child", "Game/child"), 3),
+            event(AS3_ROOT, as3_root(0x1000, 1, "stage"), 4),
+            event(AS3_REFERENCE, as3_ref(0x1000, 0x2010), 5),
+            event(STOP, timestamp_ns=6),
+        ]
+        result = analyze_events(events)
+
+        self.assertEqual(result["as3_reference_edges"], 1)
+        self.assertEqual(result["as3_reference_id_aliases"]["dependent"], 1)
+        self.assertEqual(result["live_as3_reference_edges"], 1)
+        child_path = next(item for item in result["retainer_paths"] if item["object_id"] == 0x2000)
+        self.assertEqual([node.get("type_name") for node in child_path["path"][1:]], ["Root", "Child"])
+
+    def test_reference_kinds_are_inferred_for_known_runtime_edges(self) -> None:
+        events = [
+            event(START, timestamp_ns=1),
+            event(AS3_ALLOC, as3_object(1, 10, "flash.utils::SetIntervalTimer", "Timer/start"), 2),
+            event(AS3_ALLOC, as3_object(2, 20, "builtin.as$0::MethodClosure", "Timer/callback"), 3),
+            event(AS3_ROOT, as3_root(1, 4, "timer"), 4),
+            event(AS3_REFERENCE, as3_ref(1, 2), 5),
+            event(STOP, timestamp_ns=6),
+        ]
+        result = analyze_events(events)
+
+        self.assertEqual(result["as3_reference_inferred_typed_edges"], 1)
+        self.assertEqual(result["top_as3_reference_kinds"][0]["kind"], "timer_callback")
+        child_path = next(item for item in result["retainer_paths"] if item["object_id"] == 2)
+        self.assertEqual(child_path["path"][-1]["edge_kind"], "timer_callback")
+
+    def test_frame_events_are_filled_with_allocations_from_the_frame_interval(self) -> None:
+        events = [
+            event(START, timestamp_ns=1),
+            event(FRAME, frame_payload(1, 10_000_000, 0, 0, "enterFrame"), 20_000_000),
+            event(ALLOC, alloc(0x1234, 4096), 15_000_000),
+            event(FREE, alloc(0x1234, 0), 20_500_000),
+            event(STOP, timestamp_ns=21_000_000),
+        ]
+        result = analyze_events(events)
+
+        self.assertEqual(result["frame_summary"]["frame_count"], 1)
+        frame = result["allocation_rate"]["by_frame"][0]
+        self.assertEqual(frame["event_allocation_count"], 1)
+        self.assertEqual(frame["event_allocation_bytes"], 4096)
+        self.assertEqual(frame["allocation_bytes"], 4096)
 
     def test_payload_lifetime_frame_and_gc_summaries(self) -> None:
         events = [

@@ -819,6 +819,8 @@ public class AneAwesomeUtils {
     //       options.timing                       default true
     //       options.memory                       default false
     //       options.snapshots                    default true
+    //       options.frameEvents                  AS3 test bridge option;
+    //                                            ignored by native start
     //       options.snapshotIntervalMs           default 0 (manual only)
     //       options.maxLiveAllocationsPerSnapshot default 4096
     //       options.headerJson                   optional full header JSON
@@ -826,6 +828,8 @@ public class AneAwesomeUtils {
     //   profilerStop():                 Boolean
     //   profilerSnapshot(label=null):   Boolean
     //   profilerMarker(name, value):    Boolean
+    //   profilerRecordFrame(index, durationMs, allocationCount=0,
+    //                       allocationBytes=0, label=null): Boolean
     //   profilerRequestGc():            Boolean
     //   profilerGetStatus():            Object
     //       memoryLeakDiagnosticsReady is true only while memory + free/realloc
@@ -909,6 +913,22 @@ public class AneAwesomeUtils {
         if (!_successInit) return false;
         if (!IsWindows()) return false;
         return _extContext.call("awesomeUtils_profilerRequestGc") as Boolean;
+    }
+
+    public function profilerRecordFrame(frameIndex:Number,
+                                        durationMs:Number,
+                                        allocationCount:uint = 0,
+                                        allocationBytes:Number = 0,
+                                        label:String = null):Boolean {
+        if (!_successInit) return false;
+        if (!IsWindows()) return false;
+        var durationNs:Number = Math.max(0, durationMs) * 1000000;
+        return _extContext.call("awesomeUtils_profilerRecordFrame",
+                                frameIndex,
+                                durationNs,
+                                allocationCount,
+                                allocationBytes,
+                                label == null ? "" : label) as Boolean;
     }
 
     public function profilerTakeMarker(name:String):Boolean {

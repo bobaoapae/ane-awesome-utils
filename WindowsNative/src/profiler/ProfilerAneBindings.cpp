@@ -446,6 +446,28 @@ FREObject profiler_record_realloc(FREContext, void*, std::uint32_t argc, FREObje
                          new_size));
 }
 
+FREObject profiler_record_frame(FREContext, void*, std::uint32_t argc, FREObject* argv) {
+    if (argc < 2) return make_bool(false);
+    std::uint64_t frame_index = 0;
+    std::uint64_t duration_ns = 0;
+    std::uint32_t allocation_count = 0;
+    std::uint64_t allocation_bytes = 0;
+    std::string label;
+    if (!read_u64_number(argv[0], frame_index) || !read_u64_number(argv[1], duration_ns)) {
+        return make_bool(false);
+    }
+    if (argc >= 3 && argv[2] != nullptr) read_u32(argv[2], allocation_count);
+    if (argc >= 4 && argv[3] != nullptr) read_u64_number(argv[3], allocation_bytes);
+    if (argc >= 5 && argv[4] != nullptr) read_string(argv[4], label);
+    std::lock_guard<std::mutex> g(g_mu);
+    return make_bool(g_ctrl != nullptr &&
+                     g_ctrl->record_frame(frame_index,
+                                          duration_ns,
+                                          allocation_count,
+                                          allocation_bytes,
+                                          label));
+}
+
 void register_all(FRENamedFunction* out_functions, int capacity, int* cursor) {
     if (out_functions == nullptr || cursor == nullptr) return;
     struct Entry { const char* name; FREFunction fn; };
@@ -462,6 +484,7 @@ void register_all(FRENamedFunction* out_functions, int capacity, int* cursor) {
         { "awesomeUtils_profilerRecordAlloc",         &profiler_record_alloc },
         { "awesomeUtils_profilerRecordFree",          &profiler_record_free },
         { "awesomeUtils_profilerRecordRealloc",       &profiler_record_realloc },
+        { "awesomeUtils_profilerRecordFrame",         &profiler_record_frame },
     };
     for (const auto& e : entries) {
         if (*cursor >= capacity) return;

@@ -102,6 +102,136 @@ POST_NATIVE_GC_SNAPSHOT_LABELS = ("post-native-gc-pre-stop", "run_post_gc")
 DOMINATOR_EXACT_NODE_LIMIT = 800
 DOMINATOR_EXACT_EDGE_LIMIT = 12000
 
+# AIR's IMemorySampler callbacks are not fully consistent about whether a
+# dependent object is reported as the object pointer or a nearby allocation/body
+# pointer. Keep this list intentionally small so we recover common x86/x64
+# header offsets without turning arbitrary native pointers into AS3 edges.
+AS3_REFERENCE_ID_ALIAS_DELTAS = (16, 8, 24, 32, 4, 12, 20, 28, 40, 48)
+
+
+def canonical_as3_id(raw_id: int, live_ids: set[int]) -> tuple[int, bool]:
+    if raw_id in live_ids:
+        return raw_id, False
+    for delta in AS3_REFERENCE_ID_ALIAS_DELTAS:
+        if raw_id >= delta and raw_id - delta in live_ids:
+            return raw_id - delta, True
+        if raw_id + delta in live_ids:
+            return raw_id + delta, True
+    return raw_id, False
+
+
+def canonicalize_reference_infos(
+    reference_infos: list[dict[str, Any]],
+    as3_live: dict[int, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    live_ids = set(as3_live)
+    stats = {
+        "owner": 0,
+        "dependent": 0,
+        "either": 0,
+    }
+    out: list[dict[str, Any]] = []
+    for ref in reference_infos:
+        owner_raw = int(ref.get("owner_id") or 0)
+        dependent_raw = int(ref.get("dependent_id") or 0)
+        owner_id, owner_changed = canonical_as3_id(owner_raw, live_ids)
+        dependent_id, dependent_changed = canonical_as3_id(dependent_raw, live_ids)
+        if owner_changed or dependent_changed:
+            ref = dict(ref)
+            ref["raw_owner_id"] = owner_raw
+            ref["raw_dependent_id"] = dependent_raw
+            ref["owner_id"] = owner_id
+            ref["dependent_id"] = dependent_id
+            ref["id_canonicalized"] = True
+            stats["either"] += 1
+            if owner_changed:
+                stats["owner"] += 1
+            if dependent_changed:
+                stats["dependent"] += 1
+        out.append(ref)
+    return out, stats
+
+
+def is_method_closure_type(type_name: str) -> bool:
+    return "MethodClosure" in type_name or type_name in ("Function", "builtin.as$0::Function")
+
+
+def is_timer_type(type_name: str) -> bool:
+    return "Timer" in type_name or "SetIntervalTimer" in type_name
+
+
+def is_dictionary_type(type_name: str) -> bool:
+    return "Dictionary" in type_name
+
+
+def is_array_type(type_name: str) -> bool:
+    return type_name == "Array" or type_name.endswith("::Array")
+
+
+def is_display_type(type_name: str) -> bool:
+    display_tokens = (
+        "flash.display::",
+        "::MovieClip",
+        "::Sprite",
+        "::Bitmap",
+        "::Shape",
+        "::SimpleButton",
+        "DisplayObject",
+        "DisplayObjectContainer",
+        "com.pickgliss.ui.",
+    )
+    return any(token in type_name for token in display_tokens)
+
+
+def infer_reference_kind_from_types(owner_type: str, dependent_type: str) -> tuple[str, str] | None:
+    if is_timer_type(owner_type) and (is_method_closure_type(dependent_type) or is_array_type(dependent_type)):
+        return "timer_callback", "inferred:timer-callback"
+    if is_timer_type(dependent_type) and is_method_closure_type(owner_type):
+        return "timer_callback", "inferred:timer-callback"
+    if is_dictionary_type(owner_type) or is_dictionary_type(dependent_type):
+        return "dictionary", "inferred:dictionary"
+    if is_array_type(owner_type) or is_array_type(dependent_type):
+        return "array", "inferred:array"
+    if is_method_closure_type(owner_type) or is_method_closure_type(dependent_type):
+        return "event_listener", "inferred:method-closure"
+    if is_display_type(owner_type) and is_display_type(dependent_type):
+        return "display_child", "inferred:display-list"
+    return None
+
+
+def infer_reference_info_kinds(
+    reference_infos: list[dict[str, Any]],
+    as3_live: dict[int, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    stats: Counter[str] = Counter()
+    out: list[dict[str, Any]] = []
+    for ref in reference_infos:
+        if ref.get("kind", "unknown") != "unknown":
+            stats[str(ref.get("kind"))] += 1
+            out.append(ref)
+            continue
+        owner = as3_live.get(int(ref.get("owner_id") or 0))
+        dependent = as3_live.get(int(ref.get("dependent_id") or 0))
+        if not owner or not dependent:
+            out.append(ref)
+            continue
+        inferred = infer_reference_kind_from_types(
+            str(owner.get("type_name") or ""),
+            str(dependent.get("type_name") or ""),
+        )
+        if not inferred:
+            out.append(ref)
+            continue
+        kind, label = inferred
+        updated = dict(ref)
+        updated["kind"] = kind
+        updated["label"] = label
+        updated["inferred"] = True
+        updated["kind_inferred"] = True
+        stats[kind] += 1
+        out.append(updated)
+    return out, dict(stats)
+
 
 def parse_header(raw: bytes) -> tuple[int, dict[str, Any]]:
     if len(raw) < HEADER_SIZE:
@@ -1039,17 +1169,68 @@ def build_allocation_rate(
             for sec, vals in sorted(bucket_by_second.items())
         ],
         "by_marker": build_marker_allocations(marker_spans, allocation_events),
-        "by_frame": [
+        "by_frame": build_frame_allocations(frames, allocation_events),
+    }
+
+
+def build_frame_allocations(
+    frames: list[dict[str, Any]],
+    allocation_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not frames:
+        return []
+
+    events = sorted(allocation_events, key=lambda item: int(item.get("timestamp_ns") or 0))
+    ranked: list[dict[str, Any]] = []
+    cursor = 0
+    for frame in sorted(frames, key=lambda item: int(item.get("end_ns") or 0)):
+        start_ns = int(frame.get("start_ns") or 0)
+        end_ns = int(frame.get("end_ns") or 0)
+        while cursor < len(events) and int(events[cursor].get("timestamp_ns") or 0) < start_ns:
+            cursor += 1
+
+        idx = cursor
+        event_count = 0
+        event_bytes = 0
+        by_kind: Counter[str] = Counter()
+        while idx < len(events):
+            event_ns = int(events[idx].get("timestamp_ns") or 0)
+            if event_ns > end_ns:
+                break
+            count = int(events[idx].get("count") or 1)
+            byte_count = int(events[idx].get("bytes") or 0)
+            event_count += count
+            event_bytes += byte_count
+            by_kind[str(events[idx].get("kind") or "unknown")] += count
+            idx += 1
+
+        payload_count = int(frame.get("allocation_count") or 0)
+        payload_bytes = int(frame.get("allocation_bytes") or 0)
+        frame["event_allocation_count"] = event_count
+        frame["event_allocation_bytes"] = event_bytes
+        frame["event_allocations_by_kind"] = dict(by_kind)
+        frame["allocation_count"] = payload_count or event_count
+        frame["allocation_bytes"] = payload_bytes or event_bytes
+        ranked.append(
             {
                 "frame_index": frame.get("frame_index"),
                 "label": frame.get("label", ""),
+                "start_ns": start_ns,
+                "end_ns": end_ns,
                 "duration_ms": frame.get("duration_ms", 0),
-                "allocation_count": frame.get("allocation_count", 0),
-                "allocation_bytes": frame.get("allocation_bytes", 0),
+                "allocation_count": frame["allocation_count"],
+                "allocation_bytes": frame["allocation_bytes"],
+                "event_allocation_count": event_count,
+                "event_allocation_bytes": event_bytes,
+                "allocations_by_kind": dict(by_kind),
             }
-            for frame in sorted(frames, key=lambda item: (item.get("allocation_bytes", 0), item.get("duration_ms", 0)), reverse=True)
-        ],
-    }
+        )
+
+    return sorted(
+        ranked,
+        key=lambda item: (item.get("allocation_bytes", 0), item.get("duration_ms", 0)),
+        reverse=True,
+    )[:200]
 
 
 def build_frame_summary(frames: list[dict[str, Any]], allocation_rate: dict[str, Any]) -> dict[str, Any]:
@@ -1460,6 +1641,8 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         elif name == "frame":
             parsed = parse_frame_payload(payload)
             parsed["timestamp_ns"] = timestamp_ns
+            parsed["end_ns"] = timestamp_ns
+            parsed["start_ns"] = max(0, timestamp_ns - int(parsed.get("duration_ns") or 0))
             parsed["thread_id"] = thread_id
             frames.append(parsed)
         elif name == "gc_cycle":
@@ -1519,6 +1702,12 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         for owner_id, dependent_id in as3_references
     ]
     reference_infos.extend(as3_reference_ex)
+    reference_infos, reference_id_aliases = canonicalize_reference_infos(reference_infos, as3_live)
+    reference_infos, reference_kind_counts = infer_reference_info_kinds(reference_infos, as3_live)
+    as3_reference_inferred_typed_edges = sum(
+        1 for ref in reference_infos
+        if ref.get("kind_inferred") and ref.get("kind", "unknown") != "unknown"
+    )
 
     live_reference_edges: list[tuple[int, int]] = []
     live_edges_by_owner: dict[int, list[int]] = defaultdict(list)
@@ -1528,12 +1717,16 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     reference_owner_edges: dict[tuple[str, str], int] = defaultdict(int)
     direct_retained_by_owner: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     as3_reference_edges_with_live_owner = 0
+    as3_reference_edges_with_live_dependent = 0
+    as3_reference_edges_with_live_owner_and_dependent = 0
     seen_live_edges: set[tuple[int, int]] = set()
     for ref in reference_infos:
         owner_id = int(ref.get("owner_id") or 0)
         dependent_id = int(ref.get("dependent_id") or 0)
         owner = as3_live.get(owner_id)
         dependent = as3_live.get(dependent_id)
+        if dependent:
+            as3_reference_edges_with_live_dependent += 1
         if owner:
             owner_site = sample_site.get(owner_id, "<no stack>")
             owner_type = owner["type_name"]
@@ -1551,6 +1744,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
 
         if not owner or not dependent:
             continue
+        as3_reference_edges_with_live_owner_and_dependent += 1
         if (owner_id, dependent_id) in seen_live_edges:
             continue
         seen_live_edges.add((owner_id, dependent_id))
@@ -1800,6 +1994,14 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         "as3_reference_edges": len(as3_references),
         "as3_reference_ex_edges": len(as3_reference_ex),
         "as3_reference_edges_with_live_owner": as3_reference_edges_with_live_owner,
+        "as3_reference_edges_with_live_dependent": as3_reference_edges_with_live_dependent,
+        "as3_reference_edges_with_live_owner_and_dependent": as3_reference_edges_with_live_owner_and_dependent,
+        "as3_reference_id_aliases": reference_id_aliases,
+        "as3_reference_inferred_typed_edges": as3_reference_inferred_typed_edges,
+        "top_as3_reference_kinds": [
+            {"kind": key, "count": count}
+            for key, count in sorted(reference_kind_counts.items(), key=lambda kv: kv[1], reverse=True)
+        ],
         "live_as3_reference_edges": len(live_reference_edges),
         "as3_roots": retention["roots"],
         "retainer_paths": retention["retainer_paths"],
@@ -1892,6 +2094,13 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
     print(f"  AS3 ref edges   : {result['live_as3_reference_edges']:>6} live AS3-AS3 / "
           f"{result['as3_reference_edges_with_live_owner']:>6} live-owner / "
           f"{result['as3_reference_edges']:>6} total")
+    aliases = result.get("as3_reference_id_aliases") or {}
+    if aliases.get("either"):
+        print(f"  AS3 ref aliases : {aliases.get('either', 0):>6} total / "
+              f"{aliases.get('owner', 0):>6} owner / "
+              f"{aliases.get('dependent', 0):>6} dependent")
+    if result.get("as3_reference_inferred_typed_edges"):
+        print(f"  AS3 ref inferred: {result.get('as3_reference_inferred_typed_edges', 0):>6} typed edges")
     if result.get("as3_reference_ex_edges") or result.get("as3_roots") or result.get("payload_by_owner"):
         print(f"  AS3 roots/payload: {len(result.get('as3_roots', [])):>6} roots / "
               f"{len(result.get('payload_by_owner', [])):>6} payload owner(s) / "
@@ -2069,6 +2278,12 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
             print(
                 f"  {item['owner_type']} -> {item['dependent_type']} count={item['count']}"
             )
+
+    as3_ref_kinds = result.get("top_as3_reference_kinds", [])[:top]
+    if as3_ref_kinds:
+        print("\nTop AS3 reference kinds:")
+        for item in as3_ref_kinds:
+            print(f"  kind={item['kind']:<24} count={item['count']}")
 
     as3_ref_owners = result["top_as3_reference_owners"][:top]
     if as3_ref_owners:
@@ -2306,7 +2521,12 @@ th{background:#eef3f7}.warn{color:#9a4b00}
             "Native Live Bytes": result["live_bytes"],
             "AS3 Live Bytes": result["as3_live_bytes"],
             "AS3 Live Objects": result["as3_live_allocations"],
+            "AS3 Ref Live Edges": result["live_as3_reference_edges"],
             "AS3 Ref Live Owner": result["as3_reference_edges_with_live_owner"],
+            "AS3 Ref Aliased": (result.get("as3_reference_id_aliases") or {}).get("either", 0),
+            "AS3 Ref Inferred Typed": result.get("as3_reference_inferred_typed_edges", 0),
+            "Frames": result.get("frame_summary", {}).get("frame_count", 0),
+            "Slow Frames": result.get("frame_summary", {}).get("slow_frame_count", 0),
             "Dropped": result["footer"]["dropped_count"],
         }
         parts.append("<div class='grid'>" + "".join(

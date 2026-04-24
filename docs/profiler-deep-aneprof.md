@@ -114,6 +114,14 @@ from raw events. The JSON output includes:
 - `retainer_paths` with the shortest known path from a root to live AS3 objects
 - `dominator_summary`, exact for small graphs and marked partial for large
   fan-in approximations
+- `as3_reference_id_aliases` plus live-owner/live-dependent reference counters;
+  the analyzer canonicalizes small x86/x64 object/header pointer offsets so
+  `addDependentObject` callbacks can become AS3-AS3 edges when both objects are
+  still live
+- `as3_reference_inferred_typed_edges` and `top_as3_reference_kinds` for
+  conservative typed-edge inference (`timer_callback`, `event_listener`,
+  `array`, `dictionary`, `display_child`) when the runtime only emitted a base
+  `as3_reference`
 - `payload_by_owner` for BitmapData/ByteArray/native payload bytes attached to
   AS3 owners, plus inferred unowned pseudo-payloads such as `.mem.bitmap.data`
 - `lifetime_summary`, `allocation_rate`, `frame_summary`, `gc_summary` and
@@ -135,6 +143,28 @@ both:
 
 - live AS3-to-AS3 reference edges when both sides are sampled AS3 objects;
 - live-owner dependent refs grouped by AS3 type and allocation site.
+
+The runtime may report dependent pointers using a nearby object body/allocation
+address instead of the exact `recordNewObjectAllocation` object pointer. The
+native hook and analyzer both canonicalize a small fixed set of verified x86/x64
+offsets before storing or consuming reference edges. This keeps old captures
+readable while improving retainer paths for new and re-analyzed `.aneprof`
+files.
+
+When both referenced AS3 objects are live, the native hook also emits
+`as3_reference_ex` for safely inferred edge kinds. The inference is deliberately
+type-based rather than RVA-based: timers plus closures become `timer_callback`,
+method closures become `event_listener`, `Array`/`Dictionary` owners become
+collection edges, and display-like owner/dependent pairs become
+`display_child`. These events carry the `inferred` flag. The analyzer applies
+the same inference to older captures so historical dumps get the same JSON
+fields even if the file itself has no `as3_reference_ex` events.
+
+Frame summaries can be supplied explicitly through `profilerRecordFrame()`.
+The AS3 test bridge uses this to write one `frame` event per `ENTER_FRAME` when
+`frameEvents: true` is passed to `profilerStart` options. The frame payload
+contains the measured frame duration; the analyzer fills `allocation_rate.by_frame`
+by scanning allocation events whose timestamps fall inside that frame interval.
 
 AIR exposes a single active `IMemorySampler` slot. If the SWF/runtime already
 owns that slot, for example through `flash.sampler.startSampling()`,
