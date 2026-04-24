@@ -264,6 +264,10 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
     set_prop_f64(obj, "totalFrees", static_cast<double>(s.total_frees));
     set_prop_f64(obj, "totalReallocations", static_cast<double>(s.total_reallocations));
     set_prop_f64(obj, "unknownFrees", static_cast<double>(s.unknown_frees));
+    set_prop_f64(obj, "writerQueueDepth", static_cast<double>(s.writer_queue_depth));
+    set_prop_f64(obj, "writerQueueCapacity", static_cast<double>(s.writer_queue_capacity));
+    set_prop_f64(obj, "writerEventsWritten", static_cast<double>(s.writer_events_written));
+    set_prop_f64(obj, "writerBytesWritten", static_cast<double>(s.writer_bytes_written));
     set_prop_bool(obj, "timingEnabled", s.timing_enabled);
     set_prop_bool(obj, "memoryEnabled", s.memory_enabled);
     set_prop_bool(obj, "snapshotsEnabled", s.snapshots_enabled);

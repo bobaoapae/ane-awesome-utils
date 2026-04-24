@@ -192,6 +192,7 @@ class AneprofAnalyzeTests(unittest.TestCase):
             event(FRAME, frame_payload(1, 20_000_000, 9216, 2, "enterFrame"), 7_000),
             event(GC_CYCLE, gc_cycle(1, 2, 10000, 1, 8000, "native"), 8_000, FLAG_REQUESTED),
             event(AS3_FREE, as3_object(30, 32, "Temp"), 9_000),
+            event(SNAPSHOT, snapshot("run_post_gc"), 9_500),
             event(MARKER, marker("work.end"), 10_000),
             event(STOP, timestamp_ns=11_000),
         ]
@@ -203,6 +204,8 @@ class AneprofAnalyzeTests(unittest.TestCase):
         self.assertTrue(any(item["owner_type"] == "<unowned>" for item in result["payload_by_owner"]))
         self.assertEqual(result["frame_summary"]["slow_frame_count"], 1)
         self.assertEqual(result["gc_summary"]["requested_count"], 1)
+        self.assertEqual(result["post_native_gc_as3"]["label"], "run_post_gc")
+        self.assertEqual(result["gc_summary"]["survivor_as3_live_bytes"], 1040)
         self.assertEqual(result["lifetime_summary"]["as3_freed_objects"], 1)
         self.assertGreaterEqual(result["allocation_rate"]["by_marker"][0]["allocation_bytes"], 8192)
 

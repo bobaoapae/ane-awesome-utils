@@ -97,6 +97,8 @@ PSEUDO_PAYLOAD_TYPES = {
     "flash.utils::ByteArray": "byte_array",
 }
 
+POST_NATIVE_GC_SNAPSHOT_LABELS = ("post-native-gc-pre-stop", "run_post_gc")
+
 DOMINATOR_EXACT_NODE_LIMIT = 800
 DOMINATOR_EXACT_EDGE_LIMIT = 12000
 
@@ -488,10 +490,12 @@ def as3_snapshot_diffs(summaries: list[dict[str, Any]], limit: int = 10) -> list
     return diffs
 
 
-def snapshot_by_label(summaries: list[dict[str, Any]], label: str) -> dict[str, Any] | None:
-    for item in summaries:
-        if item.get("label") == label:
-            return item
+def snapshot_by_label(summaries: list[dict[str, Any]], label: str | tuple[str, ...]) -> dict[str, Any] | None:
+    labels = (label,) if isinstance(label, str) else label
+    for wanted in labels:
+        for item in summaries:
+            if item.get("label") == wanted:
+                return item
     return None
 
 
@@ -1068,8 +1072,8 @@ def build_gc_summary(
     snapshots: list[dict[str, Any]],
     as3_snapshot_summaries: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    post_gc = snapshot_by_label(as3_snapshot_summaries, "post-native-gc-pre-stop")
-    native_post = snapshot_by_label(snapshots, "post-native-gc-pre-stop")
+    post_gc = snapshot_by_label(as3_snapshot_summaries, POST_NATIVE_GC_SNAPSHOT_LABELS)
+    native_post = snapshot_by_label(snapshots, POST_NATIVE_GC_SNAPSHOT_LABELS)
     return {
         "gc_cycles": gc_cycles,
         "requested_count": sum(1 for item in gc_cycles if item.get("requested")),
@@ -1734,7 +1738,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         ]
 
     as3_snap_diffs = as3_snapshot_diffs(as3_snapshot_summaries)
-    post_native_gc_as3 = snapshot_by_label(as3_snapshot_summaries, "post-native-gc-pre-stop")
+    post_native_gc_as3 = snapshot_by_label(as3_snapshot_summaries, POST_NATIVE_GC_SNAPSHOT_LABELS)
     payload_by_owner = build_payload_by_owner(as3_objects, as3_payloads)
     allocation_rate = build_allocation_rate(
         allocation_events,

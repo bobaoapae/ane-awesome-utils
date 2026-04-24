@@ -6,6 +6,7 @@
 #include <cstring>
 #include <functional>
 #include <thread>
+#include <utility>
 
 namespace ane::profiler {
 
@@ -46,8 +47,43 @@ std::uint64_t DeepProfilerController::now_ns() {
 }
 
 std::uint32_t DeepProfilerController::thread_id() {
-    const auto h = std::hash<std::thread::id>{}(std::this_thread::get_id());
-    return static_cast<std::uint32_t>(h & 0xffffffffu);
+    thread_local const std::uint32_t cached_thread_id = [] {
+        const auto h = std::hash<std::thread::id>{}(std::this_thread::get_id());
+        return static_cast<std::uint32_t>(h & 0xffffffffu);
+    }();
+    return cached_thread_id;
+}
+
+std::size_t DeepProfilerController::allocation_shard_index(std::uintptr_t ptr) {
+    return (ptr >> 4) & (kAllocationShardCount - 1);
+}
+
+void DeepProfilerController::clear_allocation_shards() {
+    for (auto& shard : allocation_shards_) {
+        std::lock_guard<std::mutex> alloc_lock(shard.mu);
+        shard.entries.clear();
+    }
+}
+
+void DeepProfilerController::reserve_allocation_shards() {
+    for (auto& shard : allocation_shards_) {
+        std::lock_guard<std::mutex> alloc_lock(shard.mu);
+        shard.entries.max_load_factor(0.7f);
+        shard.entries.reserve(kAllocationReservePerShard);
+    }
+}
+
+std::pair<std::uint64_t, std::uint64_t> DeepProfilerController::live_allocation_totals() const {
+    std::uint64_t live_count = 0;
+    std::uint64_t live_bytes = 0;
+    for (const auto& shard : allocation_shards_) {
+        std::lock_guard<std::mutex> alloc_lock(shard.mu);
+        live_count += shard.entries.size();
+        for (const auto& kv : shard.entries) {
+            live_bytes += kv.second.size;
+        }
+    }
+    return {live_count, live_bytes};
 }
 
 bool DeepProfilerController::start(const Config& cfg) {
@@ -67,15 +103,29 @@ bool DeepProfilerController::start(const Config& cfg) {
     total_frees_.store(0, std::memory_order_relaxed);
     total_reallocations_.store(0, std::memory_order_relaxed);
     unknown_frees_.store(0, std::memory_order_relaxed);
-    {
-        std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-        allocations_.clear();
+    writer_events_written_.store(0, std::memory_order_relaxed);
+    writer_bytes_written_.store(0, std::memory_order_relaxed);
+    clear_allocation_shards();
+    if (cfg_.memory_enabled) {
+        reserve_allocation_shards();
     }
+    writer_queue_ = std::make_unique<WriterQueueSlot[]>(kWriterQueueCapacity);
+    for (std::size_t i = 0; i < kWriterQueueCapacity; ++i) {
+        writer_queue_[i].sequence.store(i, std::memory_order_relaxed);
+        writer_queue_[i].event = PendingEvent{};
+    }
+    writer_enqueue_pos_.store(0, std::memory_order_relaxed);
+    writer_dequeue_pos_.store(0, std::memory_order_relaxed);
+    writer_count_.store(0, std::memory_order_relaxed);
+    writer_stop_.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> snapshot_lock(snapshot_thread_mu_);
         snapshot_thread_stop_ = false;
     }
 
+    file_buffer_.assign(kFileBufferBytes, 0);
+    file_.rdbuf()->pubsetbuf(file_buffer_.data(),
+                             static_cast<std::streamsize>(file_buffer_.size()));
     file_.open(cfg_.output_path, std::ios::binary | std::ios::trunc);
     if (!file_.is_open()) {
         state_.store(State::Error, std::memory_order_release);
@@ -96,6 +146,7 @@ bool DeepProfilerController::start(const Config& cfg) {
 
     started_ns_ = now_ns();
     state_.store(State::Recording, std::memory_order_release);
+    writer_thread_ = std::thread(&DeepProfilerController::writer_thread_main, this);
 
     write_event(aneprof::EventType::Start, nullptr, 0);
     if (cfg_.snapshots_enabled) {
@@ -127,14 +178,13 @@ bool DeepProfilerController::stop() {
         write_snapshot_events("final", true);
     }
     write_event(aneprof::EventType::Stop, nullptr, 0);
-
-    std::uint64_t live_count = 0;
-    std::uint64_t live_bytes = 0;
-    {
-        std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-        live_count = allocations_.size();
-        for (const auto& kv : allocations_) live_bytes += kv.second.size;
+    writer_stop_.store(true, std::memory_order_release);
+    writer_cv_.notify_all();
+    if (writer_thread_.joinable()) {
+        writer_thread_.join();
     }
+
+    const auto [live_count, live_bytes] = live_allocation_totals();
 
     if (file_.is_open()) {
         const auto footer = aneprof::make_footer_bytes(
@@ -149,6 +199,11 @@ bool DeepProfilerController::stop() {
         file_.flush();
         file_.close();
     }
+    writer_queue_.reset();
+    writer_enqueue_pos_.store(0, std::memory_order_relaxed);
+    writer_dequeue_pos_.store(0, std::memory_order_relaxed);
+    writer_count_.store(0, std::memory_order_relaxed);
+    file_buffer_.clear();
 
     state_.store(State::Idle, std::memory_order_release);
     return true;
@@ -214,19 +269,16 @@ bool DeepProfilerController::record_alloc(void* ptr, std::uint64_t size) {
     const auto ts = now_ns();
     const auto tid = thread_id();
     const auto method = current_method_id();
-    {
-        std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-        allocations_[reinterpret_cast<std::uintptr_t>(ptr)] = AllocationMeta{
-            size, ts, tid, method
-        };
-    }
-    total_allocations_.fetch_add(1, std::memory_order_relaxed);
 
     aneprof::AllocationEvent payload{};
     payload.ptr = reinterpret_cast<std::uintptr_t>(ptr);
     payload.size = size;
     payload.method_id = method;
-    return write_event_locked(aneprof::EventType::Alloc, &payload, sizeof(payload), ts, tid);
+    return enqueue_allocation_event(aneprof::EventType::Alloc,
+                                    payload,
+                                    ts,
+                                    tid,
+                                    PendingWritePolicy::AllocTrack);
 }
 
 bool DeepProfilerController::record_alloc_if_untracked(void* ptr, std::uint64_t size) {
@@ -237,22 +289,16 @@ bool DeepProfilerController::record_alloc_if_untracked(void* ptr, std::uint64_t 
     const auto ts = now_ns();
     const auto tid = thread_id();
     const auto method = current_method_id();
-    {
-        std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-        if (allocations_.find(reinterpret_cast<std::uintptr_t>(ptr)) != allocations_.end()) {
-            return true;
-        }
-        allocations_[reinterpret_cast<std::uintptr_t>(ptr)] = AllocationMeta{
-            size, ts, tid, method
-        };
-    }
-    total_allocations_.fetch_add(1, std::memory_order_relaxed);
 
     aneprof::AllocationEvent payload{};
     payload.ptr = reinterpret_cast<std::uintptr_t>(ptr);
     payload.size = size;
     payload.method_id = method;
-    return write_event_locked(aneprof::EventType::Alloc, &payload, sizeof(payload), ts, tid);
+    return enqueue_allocation_event(aneprof::EventType::Alloc,
+                                    payload,
+                                    ts,
+                                    tid,
+                                    PendingWritePolicy::AllocIfUntracked);
 }
 
 bool DeepProfilerController::record_free(void* ptr) {
@@ -260,24 +306,14 @@ bool DeepProfilerController::record_free(void* ptr) {
     if (ptr == nullptr) return false;
     if (state_.load(std::memory_order_acquire) != State::Recording) return false;
 
-    std::uint64_t old_size = 0;
-    {
-        std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-        auto it = allocations_.find(reinterpret_cast<std::uintptr_t>(ptr));
-        if (it != allocations_.end()) {
-            old_size = it->second.size;
-            allocations_.erase(it);
-        } else {
-            unknown_frees_.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-    total_frees_.fetch_add(1, std::memory_order_relaxed);
-
     aneprof::AllocationEvent payload{};
     payload.ptr = reinterpret_cast<std::uintptr_t>(ptr);
-    payload.old_size = old_size;
     payload.method_id = current_method_id();
-    return write_event(aneprof::EventType::Free, &payload, sizeof(payload));
+    return enqueue_allocation_event(aneprof::EventType::Free,
+                                    payload,
+                                    now_ns(),
+                                    thread_id(),
+                                    PendingWritePolicy::FreeTrack);
 }
 
 bool DeepProfilerController::record_free_if_tracked(void* ptr) {
@@ -285,21 +321,14 @@ bool DeepProfilerController::record_free_if_tracked(void* ptr) {
     if (ptr == nullptr) return false;
     if (state_.load(std::memory_order_acquire) != State::Recording) return false;
 
-    std::uint64_t old_size = 0;
-    {
-        std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-        auto it = allocations_.find(reinterpret_cast<std::uintptr_t>(ptr));
-        if (it == allocations_.end()) return true;
-        old_size = it->second.size;
-        allocations_.erase(it);
-    }
-    total_frees_.fetch_add(1, std::memory_order_relaxed);
-
     aneprof::AllocationEvent payload{};
     payload.ptr = reinterpret_cast<std::uintptr_t>(ptr);
-    payload.old_size = old_size;
     payload.method_id = current_method_id();
-    return write_event(aneprof::EventType::Free, &payload, sizeof(payload));
+    return enqueue_allocation_event(aneprof::EventType::Free,
+                                    payload,
+                                    now_ns(),
+                                    thread_id(),
+                                    PendingWritePolicy::FreeIfTracked);
 }
 
 bool DeepProfilerController::record_realloc(void* old_ptr, void* new_ptr, std::uint64_t new_size) {
@@ -309,32 +338,20 @@ bool DeepProfilerController::record_realloc(void* old_ptr, void* new_ptr, std::u
     if (old_ptr == nullptr) return record_alloc(new_ptr, new_size);
     if (new_ptr == nullptr) return record_free(old_ptr);
 
-    std::uint64_t old_size = 0;
     const auto ts = now_ns();
     const auto tid = thread_id();
     const auto method = current_method_id();
-    {
-        std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-        auto old_it = allocations_.find(reinterpret_cast<std::uintptr_t>(old_ptr));
-        if (old_it != allocations_.end()) {
-            old_size = old_it->second.size;
-            allocations_.erase(old_it);
-        } else {
-            unknown_frees_.fetch_add(1, std::memory_order_relaxed);
-        }
-        allocations_[reinterpret_cast<std::uintptr_t>(new_ptr)] = AllocationMeta{
-            new_size, ts, tid, method
-        };
-    }
-    total_reallocations_.fetch_add(1, std::memory_order_relaxed);
 
     aneprof::AllocationEvent payload{};
     payload.ptr = reinterpret_cast<std::uintptr_t>(new_ptr);
     payload.size = new_size;
     payload.old_ptr = reinterpret_cast<std::uintptr_t>(old_ptr);
-    payload.old_size = old_size;
     payload.method_id = method;
-    return write_event_locked(aneprof::EventType::Realloc, &payload, sizeof(payload), ts, tid);
+    return enqueue_allocation_event(aneprof::EventType::Realloc,
+                                    payload,
+                                    ts,
+                                    tid,
+                                    PendingWritePolicy::ReallocTrack);
 }
 
 bool DeepProfilerController::record_realloc_if_tracked(void* old_ptr,
@@ -346,36 +363,29 @@ bool DeepProfilerController::record_realloc_if_tracked(void* old_ptr,
     if (old_ptr == nullptr) return false;
     if (new_ptr == nullptr) return record_free_if_tracked(old_ptr);
 
-    std::uint64_t old_size = 0;
     const auto ts = now_ns();
     const auto tid = thread_id();
     const auto method = current_method_id();
-    {
-        std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-        auto old_it = allocations_.find(reinterpret_cast<std::uintptr_t>(old_ptr));
-        if (old_it == allocations_.end()) return true;
-        old_size = old_it->second.size;
-        allocations_.erase(old_it);
-        allocations_[reinterpret_cast<std::uintptr_t>(new_ptr)] = AllocationMeta{
-            new_size, ts, tid, method
-        };
-    }
-    total_reallocations_.fetch_add(1, std::memory_order_relaxed);
 
     aneprof::AllocationEvent payload{};
     payload.ptr = reinterpret_cast<std::uintptr_t>(new_ptr);
     payload.size = new_size;
     payload.old_ptr = reinterpret_cast<std::uintptr_t>(old_ptr);
-    payload.old_size = old_size;
     payload.method_id = method;
-    return write_event_locked(aneprof::EventType::Realloc, &payload, sizeof(payload), ts, tid);
+    return enqueue_allocation_event(aneprof::EventType::Realloc,
+                                    payload,
+                                    ts,
+                                    tid,
+                                    PendingWritePolicy::ReallocIfTracked);
 }
 
 std::uint64_t DeepProfilerController::tracked_allocation_size(void* ptr) const {
     if (ptr == nullptr) return 0;
-    std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-    auto it = allocations_.find(reinterpret_cast<std::uintptr_t>(ptr));
-    return it == allocations_.end() ? 0 : it->second.size;
+    const auto key = reinterpret_cast<std::uintptr_t>(ptr);
+    const auto& shard = allocation_shards_[allocation_shard_index(key)];
+    std::lock_guard<std::mutex> alloc_lock(shard.mu);
+    auto it = shard.entries.find(key);
+    return it == shard.entries.end() ? 0 : it->second.size;
 }
 
 bool DeepProfilerController::record_as3_alloc(std::uint64_t sample_id,
@@ -562,17 +572,19 @@ DeepProfilerController::Status DeepProfilerController::status() const {
     s.total_frees = total_frees_.load(std::memory_order_relaxed);
     s.total_reallocations = total_reallocations_.load(std::memory_order_relaxed);
     s.unknown_frees = unknown_frees_.load(std::memory_order_relaxed);
+    s.writer_queue_capacity = kWriterQueueCapacity;
+    s.writer_queue_depth = writer_count_.load(std::memory_order_relaxed);
+    s.writer_events_written = writer_events_written_.load(std::memory_order_relaxed);
+    s.writer_bytes_written = writer_bytes_written_.load(std::memory_order_relaxed);
     s.timing_enabled = cfg_.timing_enabled;
     s.memory_enabled = cfg_.memory_enabled;
     s.snapshots_enabled = cfg_.snapshots_enabled;
     if (s.state == State::Recording || s.state == State::Stopping) {
         s.elapsed_ms = (now_ns() - started_ns_) / 1000000ull;
     }
-    {
-        std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-        s.live_allocations = allocations_.size();
-        for (const auto& kv : allocations_) s.live_bytes += kv.second.size;
-    }
+    const auto [live_allocations, live_bytes] = live_allocation_totals();
+    s.live_allocations = live_allocations;
+    s.live_bytes = live_bytes;
     return s;
 }
 
@@ -592,7 +604,8 @@ bool DeepProfilerController::write_event_locked(aneprof::EventType type,
                                                 std::uint32_t size,
                                                 std::uint64_t timestamp_ns,
                                                 std::uint32_t tid,
-                                                std::uint16_t flags) {
+                                                std::uint16_t flags,
+                                                PendingWritePolicy write_policy) {
     if (state_.load(std::memory_order_acquire) == State::Idle) {
         dropped_.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -601,39 +614,267 @@ bool DeepProfilerController::write_event_locked(aneprof::EventType type,
         dropped_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    std::lock_guard<std::mutex> file_lock(file_mu_);
-    if (!file_.is_open()) {
-        dropped_.fetch_add(1, std::memory_order_relaxed);
-        return false;
+
+    const std::uint32_t record_size =
+        static_cast<std::uint32_t>(sizeof(aneprof::EventHeader) + size);
+    PendingEvent event{};
+    event.record_size = record_size;
+    event.payload_size = size;
+    event.heap_backed = record_size > kInlineRecordBytes;
+    event.event_type = type;
+    event.write_policy = write_policy;
+
+    std::uint8_t* dst = nullptr;
+    if (event.heap_backed) {
+        event.heap_record.resize(record_size);
+        dst = event.heap_record.data();
+    } else {
+        dst = event.inline_record.data();
     }
 
     const auto header = aneprof::make_event_header_bytes(type, size, timestamp_ns, tid, flags);
-    file_.write(reinterpret_cast<const char*>(header.data()),
-                static_cast<std::streamsize>(header.size()));
+    std::memcpy(dst, header.data(), header.size());
     if (size != 0) {
-        file_.write(reinterpret_cast<const char*>(payload), static_cast<std::streamsize>(size));
+        std::memcpy(dst + sizeof(aneprof::EventHeader), payload, size);
     }
-    if (!file_) {
-        state_.store(State::Error, std::memory_order_release);
+
+    if (!enqueue_event(std::move(event))) {
         dropped_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    events_.fetch_add(1, std::memory_order_relaxed);
-    payload_bytes_.fetch_add(size, std::memory_order_relaxed);
     return true;
+}
+
+bool DeepProfilerController::enqueue_allocation_event(aneprof::EventType type,
+                                                      const aneprof::AllocationEvent& payload,
+                                                      std::uint64_t timestamp_ns,
+                                                      std::uint32_t tid,
+                                                      PendingWritePolicy write_policy) {
+    return write_event_locked(type,
+                              &payload,
+                              static_cast<std::uint32_t>(sizeof(payload)),
+                              timestamp_ns,
+                              tid,
+                              0,
+                              write_policy);
+}
+
+bool DeepProfilerController::enqueue_event(PendingEvent&& event) {
+    if (writer_queue_ == nullptr) {
+        return false;
+    }
+
+    WriterQueueSlot* slot = nullptr;
+    std::size_t pos = writer_enqueue_pos_.load(std::memory_order_relaxed);
+    for (;;) {
+        slot = &writer_queue_[pos % kWriterQueueCapacity];
+        const std::size_t seq = slot->sequence.load(std::memory_order_acquire);
+        const auto diff = static_cast<std::intptr_t>(seq) - static_cast<std::intptr_t>(pos);
+        if (diff == 0) {
+            if (writer_enqueue_pos_.compare_exchange_weak(pos,
+                                                          pos + 1,
+                                                          std::memory_order_relaxed,
+                                                          std::memory_order_relaxed)) {
+                break;
+            }
+            continue;
+        }
+        if (diff < 0) {
+            std::this_thread::yield();
+            pos = writer_enqueue_pos_.load(std::memory_order_relaxed);
+            continue;
+        }
+        pos = writer_enqueue_pos_.load(std::memory_order_relaxed);
+    }
+
+    slot->event = std::move(event);
+    slot->sequence.store(pos + 1, std::memory_order_release);
+    const auto previous_count = writer_count_.fetch_add(1, std::memory_order_relaxed);
+    if (previous_count == 0) {
+        writer_cv_.notify_one();
+    }
+    return true;
+}
+
+bool DeepProfilerController::dequeue_event(PendingEvent& event) {
+    if (writer_queue_ == nullptr) return false;
+
+    WriterQueueSlot* slot = nullptr;
+    std::size_t pos = writer_dequeue_pos_.load(std::memory_order_relaxed);
+    for (;;) {
+        slot = &writer_queue_[pos % kWriterQueueCapacity];
+        const std::size_t seq = slot->sequence.load(std::memory_order_acquire);
+        const auto diff =
+            static_cast<std::intptr_t>(seq) - static_cast<std::intptr_t>(pos + 1);
+        if (diff == 0) {
+            if (writer_dequeue_pos_.compare_exchange_weak(pos,
+                                                          pos + 1,
+                                                          std::memory_order_relaxed,
+                                                          std::memory_order_relaxed)) {
+                break;
+            }
+            continue;
+        }
+        if (diff < 0) return false;
+        pos = writer_dequeue_pos_.load(std::memory_order_relaxed);
+    }
+
+    event = std::move(slot->event);
+    slot->event = PendingEvent{};
+    slot->sequence.store(pos + kWriterQueueCapacity, std::memory_order_release);
+    writer_count_.fetch_sub(1, std::memory_order_relaxed);
+    return true;
+}
+
+bool DeepProfilerController::prepare_event_for_write(PendingEvent& event) {
+    if (event.write_policy == PendingWritePolicy::Always) return true;
+    if ((event.event_type != aneprof::EventType::Alloc &&
+         event.event_type != aneprof::EventType::Free &&
+         event.event_type != aneprof::EventType::Realloc) ||
+        event.payload_size != sizeof(aneprof::AllocationEvent) ||
+        event.record_size < sizeof(aneprof::EventHeader) + sizeof(aneprof::AllocationEvent)) {
+        return true;
+    }
+
+    auto* payload = reinterpret_cast<aneprof::AllocationEvent*>(
+        event.mutable_data() + sizeof(aneprof::EventHeader));
+    const auto* header = reinterpret_cast<const aneprof::EventHeader*>(event.data());
+    return update_allocation_tracking(event.event_type,
+                                      event.write_policy,
+                                      *payload,
+                                      header->timestamp_ns,
+                                      header->thread_id);
+}
+
+bool DeepProfilerController::update_allocation_tracking(aneprof::EventType type,
+                                                        PendingWritePolicy policy,
+                                                        aneprof::AllocationEvent& payload,
+                                                        std::uint64_t timestamp_ns,
+                                                        std::uint32_t tid) {
+    if (type == aneprof::EventType::Alloc) {
+        const auto key = static_cast<std::uintptr_t>(payload.ptr);
+        auto& shard = allocation_shards_[allocation_shard_index(key)];
+        std::lock_guard<std::mutex> alloc_lock(shard.mu);
+        if (policy == PendingWritePolicy::AllocIfUntracked &&
+            shard.entries.find(key) != shard.entries.end()) {
+            return false;
+        }
+        shard.entries[key] = AllocationMeta{
+            payload.size, timestamp_ns, tid, payload.method_id
+        };
+        total_allocations_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    if (type == aneprof::EventType::Free) {
+        const auto key = static_cast<std::uintptr_t>(payload.ptr);
+        auto& shard = allocation_shards_[allocation_shard_index(key)];
+        std::lock_guard<std::mutex> alloc_lock(shard.mu);
+        auto it = shard.entries.find(key);
+        if (it == shard.entries.end()) {
+            if (policy == PendingWritePolicy::FreeIfTracked) return false;
+            unknown_frees_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            payload.old_size = it->second.size;
+            shard.entries.erase(it);
+        }
+        total_frees_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    if (type == aneprof::EventType::Realloc) {
+        const auto old_key = static_cast<std::uintptr_t>(payload.old_ptr);
+        const auto new_key = static_cast<std::uintptr_t>(payload.ptr);
+        auto& old_shard = allocation_shards_[allocation_shard_index(old_key)];
+        auto& new_shard = allocation_shards_[allocation_shard_index(new_key)];
+
+        auto update_locked = [&]() -> bool {
+            auto old_it = old_shard.entries.find(old_key);
+            if (old_it == old_shard.entries.end()) {
+                if (policy == PendingWritePolicy::ReallocIfTracked) return false;
+                unknown_frees_.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                payload.old_size = old_it->second.size;
+                old_shard.entries.erase(old_it);
+            }
+            new_shard.entries[new_key] = AllocationMeta{
+                payload.size, timestamp_ns, tid, payload.method_id
+            };
+            total_reallocations_.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        };
+
+        if (&old_shard == &new_shard) {
+            std::lock_guard<std::mutex> alloc_lock(old_shard.mu);
+            return update_locked();
+        }
+
+        AllocationShard* first = &old_shard < &new_shard ? &old_shard : &new_shard;
+        AllocationShard* second = &old_shard < &new_shard ? &new_shard : &old_shard;
+        std::scoped_lock lock(first->mu, second->mu);
+        return update_locked();
+    }
+
+    return true;
+}
+
+void DeepProfilerController::wait_for_writer_idle() const {
+    while (writer_count_.load(std::memory_order_acquire) != 0 ||
+           writer_dequeue_pos_.load(std::memory_order_acquire) <
+               writer_enqueue_pos_.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+}
+
+void DeepProfilerController::writer_thread_main() {
+    for (;;) {
+        PendingEvent event{};
+        if (!dequeue_event(event)) {
+            const auto enqueue_pos = writer_enqueue_pos_.load(std::memory_order_acquire);
+            const auto dequeue_pos = writer_dequeue_pos_.load(std::memory_order_acquire);
+            if (writer_stop_.load(std::memory_order_acquire) &&
+                writer_count_.load(std::memory_order_acquire) == 0 &&
+                dequeue_pos >= enqueue_pos) {
+                break;
+            }
+            std::unique_lock<std::mutex> writer_wait(writer_wait_mu_);
+            writer_cv_.wait_for(writer_wait, std::chrono::milliseconds(1), [&] {
+                return writer_stop_.load(std::memory_order_acquire) ||
+                       writer_count_.load(std::memory_order_acquire) != 0;
+            });
+            continue;
+        }
+
+        if (event.record_size == 0) continue;
+        if (!prepare_event_for_write(event)) continue;
+        file_.write(reinterpret_cast<const char*>(event.data()),
+                    static_cast<std::streamsize>(event.record_size));
+        if (!file_) {
+            state_.store(State::Error, std::memory_order_release);
+            dropped_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        events_.fetch_add(1, std::memory_order_relaxed);
+        payload_bytes_.fetch_add(event.payload_size, std::memory_order_relaxed);
+        writer_events_written_.fetch_add(1, std::memory_order_relaxed);
+        writer_bytes_written_.fetch_add(event.record_size, std::memory_order_relaxed);
+    }
 }
 
 bool DeepProfilerController::write_snapshot_events(const std::string& label,
                                                    bool include_live_entries) {
+    if (cfg_.memory_enabled) {
+        wait_for_writer_idle();
+    }
+
     std::vector<std::pair<std::uintptr_t, AllocationMeta>> live;
     std::uint64_t live_count = 0;
     std::uint64_t live_bytes = 0;
-    {
-        std::lock_guard<std::mutex> alloc_lock(alloc_mu_);
-        live_count = allocations_.size();
-        live.reserve(std::min<std::size_t>(allocations_.size(),
-                                           cfg_.max_live_allocations_per_snapshot));
-        for (const auto& kv : allocations_) {
+    live.reserve(cfg_.max_live_allocations_per_snapshot);
+    for (const auto& shard : allocation_shards_) {
+        std::lock_guard<std::mutex> alloc_lock(shard.mu);
+        live_count += shard.entries.size();
+        for (const auto& kv : shard.entries) {
             live_bytes += kv.second.size;
             if (include_live_entries &&
                 live.size() < cfg_.max_live_allocations_per_snapshot) {
