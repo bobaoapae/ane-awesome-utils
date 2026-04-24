@@ -36,6 +36,11 @@
 //                analyzer can distinguish a leak-like run from Scenario C.
 //                Output: test_capture_L.aneprof
 //
+//   Scenario R:  Real AS3 edge hook smoke/stress: display-list add/remove and
+//                EventDispatcher listener add/remove with some edges kept live
+//                until stop.
+//                Output: test_capture_R.aneprof
+//
 //   Scenario D:  Start + kill — on a run with ANE_TEST_KILL=1 we call Start,
 //                run a couple of frames, then let the harness kill us.
 //                The .aneprof on disk should still have a valid header even
@@ -93,7 +98,7 @@ package {
             storage.resolvePath("").createDirectory();
 
             // Clean prior outputs.
-            for each (var n:String in ["A", "B", "C", "D", "E", "T", "M", "S", "L"]) {
+            for each (var n:String in ["A", "B", "C", "D", "E", "T", "M", "S", "L", "R"]) {
                 removeIfPresent(storage.resolvePath("test_capture_" + n + ".aneprof"));
             }
             removeIfPresent(storage.resolvePath("test_result.json"));
@@ -121,6 +126,9 @@ package {
                       timing:true, memory:false, snapshots:true },
                     { name:"C", label:"timing-memory-snapshots", frames:240,
                       timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000 },
+                    { name:"R", label:"real-edge-hooks", frames:80,
+                      timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000,
+                      realEdgeHooks:true },
                     { name:"E", label:"hidden-listener-leak", frames:180,
                       timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000,
                       listenerLeak:true },
@@ -161,10 +169,16 @@ package {
                 timerLeak:      Boolean(sc.timerLeak),
                 closureLeak:    Boolean(sc.closureLeak),
                 staticCacheLeak:Boolean(sc.staticCacheLeak),
+                realEdgeHooks:  Boolean(sc.realEdgeHooks),
                 listenerLeakCreated: 0,
                 timerLeakCreated: 0,
                 closureLeakCreated: 0,
                 staticCacheCreated: 0,
+                realEdgeCreated: 0,
+                realEdgeRemoved: 0,
+                realEdgeRoot:   null,
+                realEdgeBus:    null,
+                realEdgeLive:   [],
                 nativeGcRequested: false,
                 frameCount:    0,
                 lastMarkerSec: -1,
@@ -187,7 +201,8 @@ package {
                     listenerLeak: Boolean(sc.listenerLeak),
                     timerLeak: Boolean(sc.timerLeak),
                     closureLeak: Boolean(sc.closureLeak),
-                    staticCacheLeak: Boolean(sc.staticCacheLeak)
+                    staticCacheLeak: Boolean(sc.staticCacheLeak),
+                    realEdgeHooks: Boolean(sc.realEdgeHooks)
                 }
             };
             var ok:Boolean = util.profilerStart(active.outPath, options);
@@ -214,6 +229,7 @@ package {
             doTimerClosureLeakWork();
             doClosureCaptureLeakWork();
             doStaticDisplayCacheLeakWork();
+            doRealEdgeHookWork();
             doSyntheticProfilerRecords();
             doComputeWork();
 
@@ -247,6 +263,10 @@ package {
             }
             if (active.staticCacheLeak) {
                 util.profilerMarker("static.cache.leak.created", active.staticCacheCreated);
+            }
+            if (active.realEdgeHooks) {
+                util.profilerMarker("real.edge.created", active.realEdgeCreated);
+                util.profilerMarker("real.edge.removed", active.realEdgeRemoved);
             }
             util.profilerSnapshot("pre-release");
 
@@ -302,11 +322,14 @@ package {
                     timerLeakCreated: active.timerLeakCreated,
                     closureLeakCreated: active.closureLeakCreated,
                     staticCacheCreated: active.staticCacheCreated,
+                    realEdgeCreated: active.realEdgeCreated,
+                    realEdgeRemoved: active.realEdgeRemoved,
                     markers:         ["battle.start", "battle.tick*", "battle.end"]
                 };
                 log("[test] scenario " + active.name + " done: " + JSON.stringify(rec.postStop));
                 results.push(rec);
 
+                cleanupRealEdgeHookWork();
                 scenarioIndex++;
                 setTimeout(runNext, 500);
             }, 500);
@@ -443,6 +466,62 @@ package {
                 staticDisplayCache["view-" + active.frameCount + "-" + i] = view;
                 active.staticCacheCreated++;
             }
+        }
+
+        private function doRealEdgeHookWork():void {
+            if (!active.realEdgeHooks) return;
+            if (active.realEdgeRoot == null) {
+                active.realEdgeRoot = new Sprite();
+                active.realEdgeRoot.name = "realEdgeRoot";
+                addChild(active.realEdgeRoot);
+                active.realEdgeBus = new EventDispatcher();
+            }
+
+            for (var i:int = 0; i < 4; i++) {
+                var view:RealEdgeProbeView = new RealEdgeProbeView(active.frameCount * 10 + i);
+                view.renderOnce();
+                active.realEdgeRoot.addChild(view);
+                active.realEdgeCreated++;
+
+                active.realEdgeBus.addEventListener("edgeTick", view.onEdgeTick);
+                active.realEdgeCreated++;
+
+                if ((i & 1) == 0) {
+                    active.realEdgeBus.removeEventListener("edgeTick", view.onEdgeTick);
+                    active.realEdgeRemoved++;
+                    if (view.parent) view.parent.removeChild(view);
+                    active.realEdgeRemoved++;
+                    view.disposeVisualOnly();
+                } else {
+                    active.realEdgeLive.push(view);
+                }
+            }
+
+            active.realEdgeBus.dispatchEvent(new Event("edgeTick"));
+            while (active.realEdgeLive.length > 120) {
+                var old:RealEdgeProbeView = active.realEdgeLive.shift();
+                active.realEdgeBus.removeEventListener("edgeTick", old.onEdgeTick);
+                active.realEdgeRemoved++;
+                if (old.parent) old.parent.removeChild(old);
+                active.realEdgeRemoved++;
+                old.disposeVisualOnly();
+            }
+        }
+
+        private function cleanupRealEdgeHookWork():void {
+            if (!active || !active.realEdgeHooks) return;
+            if (active.realEdgeBus && active.realEdgeLive) {
+                for each (var view:RealEdgeProbeView in active.realEdgeLive) {
+                    active.realEdgeBus.removeEventListener("edgeTick", view.onEdgeTick);
+                    view.disposeVisualOnly();
+                }
+                active.realEdgeLive.length = 0;
+            }
+            if (active.realEdgeRoot && active.realEdgeRoot.parent) {
+                active.realEdgeRoot.parent.removeChild(active.realEdgeRoot);
+            }
+            active.realEdgeRoot = null;
+            active.realEdgeBus = null;
         }
 
         private function doSyntheticProfilerRecords():void {
@@ -657,5 +736,38 @@ internal class StaticDisplayCacheLeak extends Sprite {
         graphics.beginBitmapFill(bitmap);
         graphics.drawRect(0, 0, 24, 24);
         graphics.endFill();
+    }
+}
+
+internal class RealEdgeProbeView extends Sprite {
+    private var payload:ByteArray;
+    private var id:int;
+    private var ticks:int = 0;
+
+    public function RealEdgeProbeView(id:int) {
+        this.id = id;
+        payload = new ByteArray();
+        payload.length = 4096;
+        payload.position = payload.length - 1;
+        payload.writeByte(id & 0xff);
+    }
+
+    public function renderOnce():void {
+        graphics.beginFill(0x22aacc, 0.35);
+        graphics.drawRect(0, 0, 10 + (id % 4), 10 + (id % 6));
+        graphics.endFill();
+    }
+
+    public function onEdgeTick(e:Event):void {
+        ticks++;
+        if (payload.length > 0) {
+            payload.position = 0;
+            payload.writeByte((id + ticks) & 0xff);
+        }
+    }
+
+    public function disposeVisualOnly():void {
+        graphics.clear();
+        if (parent) parent.removeChild(this);
     }
 }

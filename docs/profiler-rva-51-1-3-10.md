@@ -133,7 +133,7 @@ without relying on `IMemorySampler.addDependentObject` inference.
 | --- | --- | ---: | ---: | --- |
 | `DisplayObjectContainer.addChild` | `display_child` | `0x0050724c` | `0x003eccb2` | `as3_reference_ex` |
 | `DisplayObjectContainer.addChildAt` | `display_child` | `0x005073e0` | `0x003ecdf0` | `as3_reference_ex` |
-| `DisplayObjectContainer.removeChild` | `display_child` | `0x00507cac` | `0x003ed487` | `as3_reference_remove` |
+| `DisplayObjectContainer.removeChild` | `display_child` | `0x00507cac` | `0x003ed486` | `as3_reference_remove` |
 | `DisplayObjectContainer.removeChildAt` | `display_child` | `0x00507d5c` | `0x003ed501` | `as3_reference_remove` |
 | `EventDispatcher.addEventListener` | `event_listener` / `timer_callback` | `0x001fc6fc` | `0x0019d862` | `as3_reference_ex` |
 | `EventDispatcher.removeEventListener` | `event_listener` / `timer_callback` | `0x001ff3e4` | `0x0019fe4e` | `as3_reference_remove` |

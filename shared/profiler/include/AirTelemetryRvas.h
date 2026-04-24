@@ -257,7 +257,7 @@ inline constexpr std::uint32_t kRvaMMgcFreeHookBody = 0x00157526;
 // Real typed AS3 edge hooks, statically pinned in AIR 51.1.3.10 x86.
 inline constexpr std::uint32_t kRvaDisplayObjectContainerAddChild    = 0x003eccb2;
 inline constexpr std::uint32_t kRvaDisplayObjectContainerAddChildAt  = 0x003ecdf0;
-inline constexpr std::uint32_t kRvaDisplayObjectContainerRemoveChild = 0x003ed487;
+inline constexpr std::uint32_t kRvaDisplayObjectContainerRemoveChild = 0x003ed486;
 inline constexpr std::uint32_t kRvaDisplayObjectContainerRemoveChildAt = 0x003ed501;
 inline constexpr std::uint32_t kRvaEventDispatcherAddEventListener   = 0x0019d862;
 inline constexpr std::uint32_t kRvaEventDispatcherRemoveEventListener = 0x0019fe4e;

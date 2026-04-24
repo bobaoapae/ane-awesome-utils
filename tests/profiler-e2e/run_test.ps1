@@ -1,12 +1,12 @@
 # Automated E2E test harness for the .aneprof profiler subsystem.
 #
-#   pwsh run_test.ps1                 # normal run: scenarios A+B+C+E+T+M+S+L
+#   pwsh run_test.ps1                 # normal run: scenarios A+B+C+R+E+T+M+S+L
 #   pwsh run_test.ps1 -Rebuild        # force rebuild
 #   pwsh run_test.ps1 -SkipBuild      # launch + inspect only
 #   pwsh run_test.ps1 -WithKillTest   # additionally run scenario D with kill
 #   pwsh run_test.ps1 -KeepOutputs    # don't cleanup storage after pass
 #
-# The test app (TestProfilerApp.as) runs 8 normal scenarios, plus D with -WithKillTest:
+# The test app (TestProfilerApp.as) runs 9 normal scenarios, plus D with -WithKillTest:
 #   A: short, timing-only
 #   B: second capture in the same process (restart test)
 #   C: longer, adds memory hook + periodic snapshots
@@ -16,6 +16,7 @@
 #   M: closure capture leak, static callback queue captures removed views
 #   S: static display cache leak, removed views with BitmapData remain cached
 #   L: memory hook + intentional retention, compared against C by analyzer
+#   R: real AS3 edge hook smoke/stress for display children and listeners
 #   D: (only with -WithKillTest) captures 500 frames but never calls Stop
 #      - harness force-terminates the process mid-capture to verify the
 #      .aneprof has at least a valid header.
@@ -133,8 +134,8 @@ function Invoke-TestApp([int]$timeoutSec, [bool]$killMidway = $false, [int]$kill
 
 $validatePy = Join-Path $cliDir 'aneprof_validate.py'
 $analyzePy  = Join-Path $cliDir 'aneprof_analyze.py'
-$normalScenarios = @("A", "B", "C", "E", "T", "M", "S", "L")
-$memoryScenarios = @("C", "E", "T", "M", "S", "L")
+$normalScenarios = @("A", "B", "C", "R", "E", "T", "M", "S", "L")
+$memoryScenarios = @("C", "R", "E", "T", "M", "S", "L")
 
 function Summarise-Capture([string]$capturePath, [bool]$expectFooter = $true) {
     $summary = [ordered]@{ path=$capturePath; present=(Test-Path $capturePath) }
@@ -200,9 +201,9 @@ function Test-AnalysisPattern($analysis, [string[]]$patterns) {
 }
 
 # --------------------------------------------------------------------------
-# Run #1 - scenarios A+B+C+E+T+M+S+L in one process.
+# Run #1 - scenarios A+B+C+R+E+T+M+S+L in one process.
 # --------------------------------------------------------------------------
-Write-Host "`n======== RUN 1: scenarios A + B + C + E + T + M + S + L ========`n"
+Write-Host "`n======== RUN 1: scenarios A + B + C + R + E + T + M + S + L ========`n"
 $exit1 = Invoke-TestApp -timeoutSec $TimeoutSec
 Write-Host "[harness] run 1 exit code = $exit1"
 
@@ -314,6 +315,45 @@ if ($result1) {
 } else {
     $allPass = $false
     Write-Host "  Native GC: missing test_result.json FAIL"
+}
+
+if ($result1 -and $cap["R"].analysis -and $cap["R"].analysis.result) {
+    $r = @($result1.scenarios) | Where-Object { $_.scenario -eq "R" } | Select-Object -First 1
+    $pre = if ($r) { $r.preStop } else { $null }
+    $installs = if ($pre -and $pre.as3RealEdgeHookInstalls -ne $null) { [double]$pre.as3RealEdgeHookInstalls } else { 0 }
+    $failures = if ($pre -and $pre.as3RealEdgeHookFailures -ne $null) { [double]$pre.as3RealEdgeHookFailures } else { -1 }
+    $displayAdds = if ($pre -and $pre.as3RealDisplayChildEdges -ne $null) { [double]$pre.as3RealDisplayChildEdges } else { 0 }
+    $displayRemoves = if ($pre -and $pre.as3RealDisplayChildRemoves -ne $null) { [double]$pre.as3RealDisplayChildRemoves } else { 0 }
+    $listenerAdds = if ($pre -and $pre.as3RealEventListenerEdges -ne $null) { [double]$pre.as3RealEventListenerEdges } else { 0 }
+    $listenerRemoves = if ($pre -and $pre.as3RealEventListenerRemoves -ne $null) { [double]$pre.as3RealEventListenerRemoves } else { 0 }
+    $analysisR = $cap["R"].analysis.result
+    $refEx = [double]$analysisR.as3_reference_ex_edges
+    $refRemove = [double]$analysisR.as3_reference_remove_edges
+    $activeRefEx = [double]$analysisR.active_as3_reference_ex_edges
+    $hasDisplayKind = $false
+    $hasListenerKind = $false
+    foreach ($kindItem in @($analysisR.top_as3_reference_kinds)) {
+        if ($kindItem.kind -eq "display_child") { $hasDisplayKind = $true }
+        if ($kindItem.kind -eq "event_listener" -or $kindItem.kind -eq "timer_callback") {
+            $hasListenerKind = $true
+        }
+    }
+    $realEdgeOk = (
+        $installs -ge 6 -and $failures -eq 0 -and
+        $displayAdds -gt 0 -and $displayRemoves -gt 0 -and
+        $listenerAdds -gt 0 -and $listenerRemoves -gt 0 -and
+        $refEx -gt 0 -and $refRemove -gt 0 -and $activeRefEx -gt 0 -and
+        $hasDisplayKind -and $hasListenerKind
+    )
+    if (-not $realEdgeOk) { $allPass = $false }
+    Write-Host ("  Real edge hooks R: installs={0} failures={1} display+/-={2}/{3} listener+/-={4}/{5} refEx={6} refRemove={7} active={8} kinds display={9} listener={10} {11}" -f `
+        $installs, $failures, $displayAdds, $displayRemoves,
+        $listenerAdds, $listenerRemoves, $refEx, $refRemove, $activeRefEx,
+        $hasDisplayKind, $hasListenerKind,
+        $(if ($realEdgeOk) {"OK"} else {"FAIL"}))
+} else {
+    $allPass = $false
+    Write-Host "  Real edge hooks R: missing result/analyzer JSON FAIL"
 }
 
 if ($cap["C"].analysis -and $cap["E"].analysis -and

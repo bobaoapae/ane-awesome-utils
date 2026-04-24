@@ -281,7 +281,7 @@ constexpr std::uint8_t kDisplayAddChildAtPrologue[] = {
     0x83, 0xec, 0x10, 0x53, 0x8b, 0x5c, 0x24, 0x18
 };
 constexpr std::uint8_t kDisplayRemoveChildPrologue[] = {
-    0x56, 0x8b, 0x74, 0x24, 0x0c, 0x33, 0xdb
+    0x53, 0x56, 0x8b, 0x74, 0x24, 0x0c, 0x33, 0xdb
 };
 constexpr std::uint8_t kDisplayRemoveChildAtPrologue[] = {
     0x83, 0xec, 0x0c, 0x53, 0x8b, 0xd9
@@ -1860,7 +1860,7 @@ void install_real_edge_hooks(HMODULE air) {
                                  air_rvas::kRvaDisplayObjectContainerRemoveChild,
                                  reinterpret_cast<void*>(&hook_display_remove_child),
                                  kDisplayRemoveChildPrologue,
-                                 kRealEdgeMask7,
+                                 kRealEdgeMask8Exact,
                                  sizeof(kDisplayRemoveChildPrologue),
                                  sizeof(kDisplayRemoveChildPrologue),
                                  23)) {

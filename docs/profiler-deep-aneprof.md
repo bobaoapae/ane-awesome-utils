@@ -239,10 +239,13 @@ powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x
 powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x86
 ```
 
-Current standard coverage is A/B/C/E/T/M/S/L. Scenario D is an optional
+Current standard coverage is A/B/C/R/E/T/M/S/L. Scenario D is an optional
 kill-test and only runs with `-WithKillTest`.
 
 Scenario C validates timing + memory with real runtime allocation/free pairing.
+Scenario R validates the real AS3 typed edge hooks by requiring display-list and
+event-listener add/remove counters plus active `as3_reference_ex` /
+`as3_reference_remove` analyzer output.
 Scenario E simulates a hidden listener leak and validates AS3 type, stack,
 suspect and runtime dependent-ref reporting. Scenario T covers timer/closure
 retention, M covers explicit closure capture, S covers static display cache
