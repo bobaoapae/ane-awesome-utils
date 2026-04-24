@@ -195,6 +195,59 @@ static bool looks_like_player(void* p, std::uintptr_t air_base) {
     return true;
 }
 
+static bool range_has_protection(DWORD protect, bool writable) {
+    if ((protect & PAGE_GUARD) != 0 || (protect & PAGE_NOACCESS) != 0) return false;
+    if (writable) {
+        return (protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE |
+                           PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) != 0;
+    }
+    return (protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ |
+                       PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY |
+                       PAGE_EXECUTE_WRITECOPY)) != 0;
+}
+
+static bool memory_range_ok(const void* p, std::size_t bytes, bool writable) {
+    if (p == nullptr || bytes == 0) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    if (!range_has_protection(mbi.Protect, writable)) return false;
+    const auto start = reinterpret_cast<std::uintptr_t>(p);
+    const auto end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+    return start <= end && bytes <= (end - start);
+}
+
+static bool address_in_air_image(std::uintptr_t value) {
+    HMODULE air = GetModuleHandleA(air_rvas::kDllName);
+    if (air == nullptr) return false;
+    MODULEINFO mi{};
+    if (!GetModuleInformation(GetCurrentProcess(), air, &mi, sizeof(mi))) return false;
+    const auto air_start = reinterpret_cast<std::uintptr_t>(mi.lpBaseOfDll);
+    const auto air_end   = air_start + mi.SizeOfImage;
+    return value >= air_start && value < air_end;
+}
+
+static bool looks_like_gc(void* gc) {
+    if (!memory_range_ok(gc, air_rvas::kGcOffsetNeedsCollection + 1, true)) return false;
+
+    std::uintptr_t vt = 0;
+    std::uint8_t nogc = 0xff;
+    std::uint8_t incremental = 0xff;
+    __try {
+        vt = *reinterpret_cast<std::uintptr_t*>(gc);
+        nogc = *reinterpret_cast<std::uint8_t*>(
+            reinterpret_cast<char*>(gc) + air_rvas::kGcOffsetNoGc);
+        incremental = *reinterpret_cast<std::uint8_t*>(
+            reinterpret_cast<char*>(gc) + air_rvas::kGcOffsetIncremental);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
+    if (!address_in_air_image(vt)) return false;
+    if (nogc > 1 || incremental > 1) return false;
+    return true;
+}
+
 void* WindowsAirRuntime::tryCapturePlayer(void* /*fre_context*/) {
     if (auto p = player_.load(std::memory_order_acquire); p != nullptr) return p;
     if (!initialized_.load(std::memory_order_acquire)) {
@@ -305,6 +358,113 @@ void* WindowsAirRuntime::tryCapturePlayer(void* /*fre_context*/) {
     player_.store(player, std::memory_order_release);
     return player;
 #endif
+}
+
+bool WindowsAirRuntime::requestNativeGc(void* fre_context) {
+    native_gc_error_.store(NativeGcError::Ok, std::memory_order_release);
+    if (!initialized_.load(std::memory_order_acquire)) {
+        if (!initialize()) {
+            native_gc_error_.store(NativeGcError::NotInitialized, std::memory_order_release);
+            return false;
+        }
+    }
+
+    void* player = tryCapturePlayer(fre_context);
+    if (player == nullptr) {
+        native_gc_error_.store(NativeGcError::PlayerNull, std::memory_order_release);
+        return false;
+    }
+
+    void* gc = nullptr;
+#if defined(_M_IX86) || defined(__i386__)
+    void* avmcore = reinterpret_cast<void*>(
+        diag_chain_step3_.load(std::memory_order_acquire));
+    if (avmcore != nullptr &&
+        memory_range_ok(reinterpret_cast<char*>(avmcore) + air_rvas::kAvmCoreOffsetGc,
+                        sizeof(void*),
+                        false)) {
+        __try {
+            gc = *reinterpret_cast<void**>(
+                reinterpret_cast<char*>(avmcore) + air_rvas::kAvmCoreOffsetGc);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            gc = nullptr;
+        }
+    }
+    if (gc == nullptr) {
+        native_gc_error_.store(NativeGcError::AvmCoreNull, std::memory_order_release);
+        // Fallback for builds where Player still exposes the GC pointer at the
+        // pointer-size-scaled x64 slot. Kept guarded; wrong candidates fail
+        // looks_like_gc() below before any write.
+        if (memory_range_ok(reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetGc,
+                            sizeof(void*),
+                            false)) {
+            __try {
+                gc = *reinterpret_cast<void**>(
+                    reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetGc);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                gc = nullptr;
+            }
+        }
+    }
+#else
+    if (memory_range_ok(reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetGc,
+                        sizeof(void*),
+                        false)) {
+        __try {
+            gc = *reinterpret_cast<void**>(
+                reinterpret_cast<char*>(player) + air_rvas::kPlayerOffsetGc);
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            gc = nullptr;
+        }
+    }
+#endif
+
+    if (gc == nullptr) {
+        native_gc_error_.store(NativeGcError::GcNull, std::memory_order_release);
+        diag_gc_ptr_.store(0, std::memory_order_release);
+        return false;
+    }
+    if (!looks_like_gc(gc)) {
+        native_gc_error_.store(NativeGcError::BadGcMemory, std::memory_order_release);
+        diag_gc_ptr_.store(reinterpret_cast<std::uintptr_t>(gc), std::memory_order_release);
+        return false;
+    }
+
+    auto* flag = reinterpret_cast<std::uint8_t*>(
+        reinterpret_cast<char*>(gc) + air_rvas::kGcOffsetNeedsCollection);
+    if (!memory_range_ok(flag, 1, true)) {
+        native_gc_error_.store(NativeGcError::BadNeedsCollectionSlot, std::memory_order_release);
+        diag_gc_ptr_.store(reinterpret_cast<std::uintptr_t>(gc), std::memory_order_release);
+        return false;
+    }
+
+    __try {
+        if (*flag == 0) {
+            *flag = 1;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        native_gc_error_.store(NativeGcError::WriteFailed, std::memory_order_release);
+        diag_gc_ptr_.store(reinterpret_cast<std::uintptr_t>(gc), std::memory_order_release);
+        return false;
+    }
+
+    diag_gc_ptr_.store(reinterpret_cast<std::uintptr_t>(gc), std::memory_order_release);
+    native_gc_request_count_.fetch_add(1, std::memory_order_acq_rel);
+    native_gc_error_.store(NativeGcError::Ok, std::memory_order_release);
+    return true;
+}
+
+bool WindowsAirRuntime::nativeGcPending() const {
+    void* gc = reinterpret_cast<void*>(diag_gc_ptr_.load(std::memory_order_acquire));
+    if (gc == nullptr) return false;
+    auto* flag = reinterpret_cast<std::uint8_t*>(
+        reinterpret_cast<char*>(gc) + air_rvas::kGcOffsetNeedsCollection);
+    if (!memory_range_ok(flag, 1, false)) return false;
+    __try {
+        return *flag != 0;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 // -------------------------------------------------------------------------

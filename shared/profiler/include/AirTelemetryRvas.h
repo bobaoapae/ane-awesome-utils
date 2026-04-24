@@ -111,7 +111,17 @@ inline constexpr std::uint32_t kAirStringSize            = 0x10;
 inline constexpr std::uint32_t kPlayerOffsetSocketTransport  = 0x1650;
 inline constexpr std::uint32_t kPlayerOffsetTelemetry        = 0x1658;
 inline constexpr std::uint32_t kPlayerOffsetPlayerTelemetry  = 0x1660;
+inline constexpr std::uint32_t kPlayerOffsetGc               = 0x0048;
 inline constexpr std::uint32_t kSocketTransportOffsetPtel    = 0x38;
+
+// Native GC request path. The internal `.player.gc` telemetry command sets
+// `*(Player+0x48)->needsCollection = 1`; the normal AIR tick then runs MMgc's
+// own collection path. We mirror that one-byte request instead of calling
+// GC::Collect directly.
+inline constexpr std::uint32_t kAvmCoreOffsetGc              = 0x0008;
+inline constexpr std::uint32_t kGcOffsetNoGc                 = 0x0009;
+inline constexpr std::uint32_t kGcOffsetIncremental          = 0x000a;
+inline constexpr std::uint32_t kGcOffsetNeedsCollection      = 0x0168;
 
 // Init-telemetry prologue signature (first 12 bytes) — used to guard against
 // accidentally binding to a differently-built runtime.
@@ -288,7 +298,18 @@ inline constexpr std::uint32_t kAirStringSize            = 0x0c;
 inline constexpr std::uint32_t kPlayerOffsetSocketTransport  = 0xdb8;
 inline constexpr std::uint32_t kPlayerOffsetTelemetry        = 0xdbc;
 inline constexpr std::uint32_t kPlayerOffsetPlayerTelemetry  = 0xdc0;
+inline constexpr std::uint32_t kPlayerOffsetGc               = 0x024;
 inline constexpr std::uint32_t kSocketTransportOffsetPtel    = 0x1c;
+
+// Native GC request path. x86 does not have a decompiled `.player.gc` body in
+// this repo, but the MMgc field was recovered by binary pattern analysis:
+// GC+0x150 is checked by the periodic collection path, set by policy manager,
+// and cleared by GC::Collect. Prefer AvmCore+0x04 -> GC for x86 because the
+// FRE frame chain already captures AvmCore during profiler dispatch.
+inline constexpr std::uint32_t kAvmCoreOffsetGc              = 0x004;
+inline constexpr std::uint32_t kGcOffsetNoGc                 = 0x005;
+inline constexpr std::uint32_t kGcOffsetIncremental          = 0x006;
+inline constexpr std::uint32_t kGcOffsetNeedsCollection      = 0x150;
 
 // GCHeap -------------------------------------------------------------------
 // In x86 the singleton pointer is in .data at VA 0x10e08570 (RVA 0xe08570).

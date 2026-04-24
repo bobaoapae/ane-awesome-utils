@@ -14,11 +14,16 @@ profilerStart(path:String, options:Object = null):Boolean
 profilerStop():Boolean
 profilerSnapshot(label:String = null):Boolean
 profilerMarker(name:String, value:* = null):Boolean
+profilerRequestGc():Boolean
 profilerGetStatus():Object
 ```
 
 `profilerStart` writes a native binary event stream to `path`. Recommended
 extension is `.aneprof`.
+
+`profilerRequestGc` is Windows-only and requests MMgc collection through AIR's
+native `needsCollection` flag. It replaces the old E2E reliance on `System.gc()`;
+see `docs/profiler-native-gc.md`.
 
 Supported options:
 
@@ -77,6 +82,18 @@ It also patches the `Adobe AIR.dll` IAT entries for:
 | `Kernel32!HeapAlloc` | `0x00b04b70` | `0x008c2584` |
 | `Kernel32!HeapFree` | `0x00b04b68` | `0x008c2588` |
 | `Kernel32!HeapReAlloc` | `0x00b049c0` | `0x008c22f0` |
+
+## CLI Diagnostics
+
+`tools/profiler-cli/aneprof_analyze.py` reconstructs native and AS3 live state
+from raw events. The JSON output includes:
+
+- `snapshots` and `snapshot_diffs` for native allocation counters
+- `as3_snapshot_summaries` and `as3_snapshot_diffs` for AS3 type/site/stack
+  growth at each snapshot point
+- `post_native_gc_as3` for objects still live after `profilerRequestGc()`
+- `top_as3_memory_by_type`, `top_as3_allocation_sites`,
+  `top_as3_live_stacks`, reference-owner tables and leak suspects
 
 The inline detours are guarded by byte signatures from `Adobe AIR.dll`
 `51.1.3.10`, and the IAT patches verify the expected slot RVAs. Broad IAT

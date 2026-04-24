@@ -1,17 +1,20 @@
 # Automated E2E test harness for the .aneprof profiler subsystem.
 #
-#   pwsh run_test.ps1                 # normal run: scenarios A + B + C + E + L
+#   pwsh run_test.ps1                 # normal run: scenarios A+B+C+E+T+M+S+L
 #   pwsh run_test.ps1 -Rebuild        # force rebuild
 #   pwsh run_test.ps1 -SkipBuild      # launch + inspect only
 #   pwsh run_test.ps1 -WithKillTest   # additionally run scenario D with kill
 #   pwsh run_test.ps1 -KeepOutputs    # don't cleanup storage after pass
 #
-# The test app (TestProfilerApp.as) runs 5 normal scenarios, plus D with -WithKillTest:
+# The test app (TestProfilerApp.as) runs 8 normal scenarios, plus D with -WithKillTest:
 #   A: short, timing-only
 #   B: second capture in the same process (restart test)
 #   C: longer, adds memory hook + periodic snapshots
 #   E: hidden listener leak, objects removed from display but retained by a
 #      strong listener on a long-lived dispatcher
+#   T: timer leak, removed views retained by running timers/listener closures
+#   M: closure capture leak, static callback queue captures removed views
+#   S: static display cache leak, removed views with BitmapData remain cached
 #   L: memory hook + intentional retention, compared against C by analyzer
 #   D: (only with -WithKillTest) captures 500 frames but never calls Stop
 #      - harness force-terminates the process mid-capture to verify the
@@ -19,7 +22,7 @@
 
 [CmdletBinding()]
 param(
-    [int]    $TimeoutSec = 60,
+    [int]    $TimeoutSec = 120,
     [ValidateSet('x64', 'x86')][string] $Arch = 'x64',
     [switch] $Rebuild,
     [switch] $SkipBuild,
@@ -130,6 +133,8 @@ function Invoke-TestApp([int]$timeoutSec, [bool]$killMidway = $false, [int]$kill
 
 $validatePy = Join-Path $cliDir 'aneprof_validate.py'
 $analyzePy  = Join-Path $cliDir 'aneprof_analyze.py'
+$normalScenarios = @("A", "B", "C", "E", "T", "M", "S", "L")
+$memoryScenarios = @("C", "E", "T", "M", "S", "L")
 
 function Summarise-Capture([string]$capturePath, [bool]$expectFooter = $true) {
     $summary = [ordered]@{ path=$capturePath; present=(Test-Path $capturePath) }
@@ -175,10 +180,29 @@ function Analyze-Capture([string]$capturePath, [string]$name) {
     }
 }
 
+function Test-AnalysisPattern($analysis, [string[]]$patterns) {
+    if (-not $analysis -or -not $analysis.result) { return $false }
+    foreach ($pattern in $patterns) {
+        foreach ($typeItem in @($analysis.result.top_as3_live_types)) {
+            if ($typeItem.type_name -like $pattern) { return $true }
+        }
+        foreach ($stackItem in @($analysis.result.top_as3_live_stacks)) {
+            if ($stackItem.stack -like $pattern -or $stackItem.type_name -like $pattern) { return $true }
+        }
+        foreach ($site in @($analysis.result.top_as3_allocation_sites)) {
+            if ($site.site -like $pattern -or $site.sample_stack -like $pattern) { return $true }
+        }
+        foreach ($suspect in @($analysis.result.leak_suspects)) {
+            if ($suspect.site -like $pattern -or $suspect.sample_stack -like $pattern) { return $true }
+        }
+    }
+    return $false
+}
+
 # --------------------------------------------------------------------------
-# Run #1 - scenarios A + B + C + E + L in one process.
+# Run #1 - scenarios A+B+C+E+T+M+S+L in one process.
 # --------------------------------------------------------------------------
-Write-Host "`n======== RUN 1: scenarios A + B + C + E + L ========`n"
+Write-Host "`n======== RUN 1: scenarios A + B + C + E + T + M + S + L ========`n"
 $exit1 = Invoke-TestApp -timeoutSec $TimeoutSec
 Write-Host "[harness] run 1 exit code = $exit1"
 
@@ -189,10 +213,10 @@ if (Test-Path $resultPath) {
 }
 
 $cap = @{}
-foreach ($name in @("A", "B", "C", "E", "L")) {
+foreach ($name in $normalScenarios) {
     $capture = Join-Path $storageDir "test_capture_$name.aneprof"
     $cap[$name] = Summarise-Capture -capturePath $capture -expectFooter $true
-    if ($name -eq "C" -or $name -eq "E" -or $name -eq "L") {
+    if ($memoryScenarios -contains $name) {
         $cap[$name]["analysis"] = Analyze-Capture -capturePath $capture -name $name
     }
 }
@@ -225,10 +249,10 @@ $allPass = $true
 $run1Ok = ($exit1 -eq 0) -or ($null -eq $exit1 -and $result1 -and $result1.allOk)
 if (-not $run1Ok) { $allPass = $false }
 
-foreach ($name in @("A", "B", "C", "E", "L")) {
+foreach ($name in $normalScenarios) {
     $s = $cap[$name]
     $ok = $s.present -and $s.validateExit -eq 0 -and $s.size -gt 128
-    if ($name -eq "C" -or $name -eq "E" -or $name -eq "L") {
+    if ($memoryScenarios -contains $name) {
         $ok = $ok -and $s.analysis -and $s.analysis.exit -eq 0
         if ($s.analysis -and $s.analysis.result) {
             $as3Allocs = [double]$s.analysis.result.counts.as3_alloc
@@ -243,13 +267,53 @@ foreach ($name in @("A", "B", "C", "E", "L")) {
                     break
                 }
             }
+            $hasPostNativeGcSnapshot = $false
+            foreach ($snapshot in @($s.analysis.result.snapshots)) {
+                if ($snapshot.label -eq "post-native-gc-pre-stop") {
+                    $hasPostNativeGcSnapshot = $true
+                    break
+                }
+            }
+            $hasPostNativeGcAs3Snapshot = $false
+            foreach ($snapshot in @($s.analysis.result.as3_snapshot_summaries)) {
+                if ($snapshot.label -eq "post-native-gc-pre-stop" -and
+                    [double]$snapshot.as3_live_allocations -ge 0) {
+                    $hasPostNativeGcAs3Snapshot = $true
+                    break
+                }
+            }
+            $hasAs3SnapshotDiffs = @($s.analysis.result.as3_snapshot_diffs).Count -gt 0
             $ok = $ok -and ($as3Allocs -gt 0) -and ($as3ReferenceEvents -gt 0) -and
-                ($as3LiveOwnerRefs -gt 0) -and ($as3Types.Count -gt 0) -and $hasAs3Stack
+                ($as3LiveOwnerRefs -gt 0) -and ($as3Types.Count -gt 0) -and
+                $hasAs3Stack -and $hasPostNativeGcSnapshot -and
+                $hasPostNativeGcAs3Snapshot -and $hasAs3SnapshotDiffs
         }
     }
     if (-not $ok) { $allPass = $false }
     Write-Host ("  Scenario {0}: present={1,-5} size={2,-7} validate={3}  {4}" -f `
         $name, $s.present, $s.size, $s.validateExit, $(if ($ok) {"OK"} else {"FAIL"}))
+}
+
+if ($result1) {
+    foreach ($name in $memoryScenarios) {
+        $r = @($result1.scenarios) | Where-Object { $_.scenario -eq $name } | Select-Object -First 1
+        $requestCount = 0
+        $lastFailure = -1
+        if ($r -and $r.preStop) {
+            $requestCount = [double]$r.preStop.nativeGcRequestCount
+            $lastFailure = [int]$r.preStop.nativeGcLastFailure
+        }
+        $nativeGcOk = ($r -and $r.nativeGcRequested -eq $true -and
+                       $requestCount -ge 1 -and $lastFailure -eq 0)
+        if (-not $nativeGcOk) { $allPass = $false }
+        Write-Host ("  Native GC {0}: requested={1} count={2} lastFailure={3} {4}" -f `
+            $name, $(if ($r) {$r.nativeGcRequested} else {$false}),
+            $requestCount, $lastFailure,
+            $(if ($nativeGcOk) {"OK"} else {"FAIL"}))
+    }
+} else {
+    $allPass = $false
+    Write-Host "  Native GC: missing test_result.json FAIL"
 }
 
 if ($cap["C"].analysis -and $cap["E"].analysis -and
@@ -305,6 +369,21 @@ if ($cap["C"].analysis -and $cap["E"].analysis -and
     Write-Host "  Listener leak C->E: missing analyzer JSON FAIL"
 }
 
+$leakTypeExpectations = @{
+    "T" = @("*TimerClosureLeak*", "*onTimerTick*")
+    "M" = @("*ClosureCaptureLeak*", "*makeClosureLeakCallback*")
+    "S" = @("*StaticDisplayCacheLeak*")
+}
+foreach ($scenarioName in @("T", "M", "S")) {
+    $analysis = $cap[$scenarioName].analysis
+    $detected = Test-AnalysisPattern -analysis $analysis -patterns $leakTypeExpectations[$scenarioName]
+    if (-not $detected) { $allPass = $false }
+    Write-Host ("  Leak type {0}: patterns={1} {2}" -f `
+        $scenarioName,
+        ($leakTypeExpectations[$scenarioName] -join ","),
+        $(if ($detected) {"OK"} else {"FAIL"}))
+}
+
 if ($cap["C"].analysis -and $cap["L"].analysis -and
     $cap["C"].analysis.result -and $cap["L"].analysis.result) {
     $baseLiveBytes = [double]$cap["C"].analysis.result.live_bytes
@@ -355,10 +434,11 @@ if ($result1) {
         if ($r.failed) {
             Write-Host "  [$($r.scenario)] FAILED: $($r.reason)"
         } else {
-            Write-Host ("  [{0}] frames={1}/{2} events={3} payloadBytes={4} dropped={5} memory={6}" -f `
+            Write-Host ("  [{0}] frames={1}/{2} events={3} payloadBytes={4} dropped={5} memory={6} nativeGc={7}" -f `
                 $r.scenario, $r.framesRan, $r.targetFrames,
                 $r.postStop.events, $r.postStop.payloadBytes,
-                $r.postStop.dropped, $r.preStop.memoryEnabled)
+                $r.postStop.dropped, $r.preStop.memoryEnabled,
+                $r.nativeGcRequested)
         }
     }
 }

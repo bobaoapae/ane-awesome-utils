@@ -2,6 +2,7 @@
 
 #include "DeepProfilerController.hpp"
 #include "IDiskMonitor.hpp"
+#include "profiler/WindowsAirRuntime.hpp"
 #include "profiler/WindowsAs3ObjectHook.hpp"
 #include "profiler/WindowsDeepMemoryHook.hpp"
 
@@ -19,6 +20,7 @@ std::unique_ptr<DeepProfilerController> g_ctrl;
 std::unique_ptr<IDiskMonitor> g_disk;
 std::unique_ptr<WindowsDeepMemoryHook> g_memory_hook;
 std::unique_ptr<WindowsAs3ObjectHook> g_as3_object_hook;
+std::unique_ptr<WindowsAirRuntime> g_air_runtime;
 
 FREObject make_bool(bool v) {
     FREObject o = nullptr;
@@ -104,6 +106,12 @@ bool ensure_controller() {
     if (!g_memory_hook) g_memory_hook = std::make_unique<WindowsDeepMemoryHook>();
     if (!g_as3_object_hook) g_as3_object_hook = std::make_unique<WindowsAs3ObjectHook>();
     return static_cast<bool>(g_ctrl);
+}
+
+WindowsAirRuntime* ensure_air_runtime() {
+    if (!g_air_runtime) g_air_runtime = std::make_unique<WindowsAirRuntime>();
+    g_air_runtime->initialize();
+    return g_air_runtime.get();
 }
 
 } // namespace
@@ -197,6 +205,12 @@ FREObject profiler_marker(FREContext, void*, std::uint32_t argc, FREObject* argv
     return make_bool(g_ctrl->marker(name, value_json));
 }
 
+FREObject profiler_request_gc(FREContext ctx, void*, std::uint32_t, FREObject*) {
+    std::lock_guard<std::mutex> g(g_mu);
+    WindowsAirRuntime* runtime = ensure_air_runtime();
+    return make_bool(runtime != nullptr && runtime->requestNativeGc(ctx));
+}
+
 FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
     std::lock_guard<std::mutex> g(g_mu);
     FREObject obj = nullptr;
@@ -272,6 +286,17 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
         set_prop_u32(obj, "as3ObjectHookLastFailureStage",
                      g_as3_object_hook->lastFailureStage());
     }
+    WindowsAirRuntime* runtime = ensure_air_runtime();
+    const bool native_gc_available = runtime != nullptr && runtime->initialized();
+    set_prop_bool(obj, "nativeGcAvailable", native_gc_available);
+    set_prop_u32(obj, "nativeGcLastFailure",
+                 runtime ? static_cast<std::uint32_t>(runtime->nativeGcLastError()) : 0u);
+    set_prop_u32(obj, "nativeGcRequestCount",
+                 runtime ? runtime->nativeGcRequestCount() : 0u);
+    set_prop_bool(obj, "nativeGcPending",
+                  runtime != nullptr && runtime->nativeGcPending());
+    set_prop_f64(obj, "nativeGcPtr",
+                 runtime ? static_cast<double>(runtime->nativeGcPtr()) : 0.0);
     set_prop_u32(obj, "modeBAvailable", 0);
     set_prop_u32(obj, "modeBActive", 0);
     set_prop_u32(obj, "weOwnTransport", 0);
@@ -353,6 +378,7 @@ void register_all(FRENamedFunction* out_functions, int capacity, int* cursor) {
         { "awesomeUtils_profilerGetStatus",           &profiler_get_status },
         { "awesomeUtils_profilerSnapshot",            &profiler_snapshot },
         { "awesomeUtils_profilerMarker",              &profiler_marker },
+        { "awesomeUtils_profilerRequestGc",           &profiler_request_gc },
         { "awesomeUtils_profilerProbeEnter",          &profiler_probe_enter },
         { "awesomeUtils_profilerProbeExit",           &profiler_probe_exit },
         { "awesomeUtils_profilerRegisterMethodTable", &profiler_register_method_table },
@@ -378,6 +404,7 @@ void shutdown() {
     g_disk.reset();
     g_memory_hook.reset();
     g_as3_object_hook.reset();
+    g_air_runtime.reset();
 }
 
 } // namespace ane::profiler::bindings

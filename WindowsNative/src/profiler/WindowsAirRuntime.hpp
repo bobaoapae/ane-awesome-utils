@@ -57,6 +57,11 @@ public:
                               std::uint32_t        port,
                               const ProfilerFeatures& features);
 
+    // Request a native MMgc collection using the same one-byte flag toggled
+    // by AIR's internal `.player.gc` telemetry command. This does not call
+    // GC::Collect directly; it asks the runtime to collect on its own tick.
+    bool requestNativeGc(void* fre_context = nullptr);
+
     // Destroy the PlayerTelemetry/Telemetry/SocketTransport trio and zero
     // the Player fields. Symmetric counterpart to forceEnableTelemetry().
     // Safe to call when telemetry was never force-enabled (no-op).
@@ -79,6 +84,27 @@ public:
         NullGcHeap               = 8,
     };
     Error lastError() const { return last_error_.load(std::memory_order_acquire); }
+
+    enum class NativeGcError : std::uint32_t {
+        Ok                      = 0,
+        NotInitialized          = 1,
+        PlayerNull              = 2,
+        AvmCoreNull             = 3,
+        GcNull                  = 4,
+        BadGcMemory             = 5,
+        BadNeedsCollectionSlot  = 6,
+        WriteFailed             = 7,
+    };
+    NativeGcError nativeGcLastError() const {
+        return native_gc_error_.load(std::memory_order_acquire);
+    }
+    std::uint32_t nativeGcRequestCount() const {
+        return native_gc_request_count_.load(std::memory_order_acquire);
+    }
+    std::uintptr_t nativeGcPtr() const {
+        return diag_gc_ptr_.load(std::memory_order_acquire);
+    }
+    bool nativeGcPending() const;
 
     // Diagnostic getters for the three Player slots the runtime populates
     // inside init_telemetry. Called from the status FREFunction to debug
@@ -121,6 +147,9 @@ private:
     std::atomic<std::uintptr_t> diag_chain_step2_{0};
     std::atomic<std::uintptr_t> diag_chain_step3_{0};
     std::atomic<std::uintptr_t> diag_player_vtable_{0};
+    std::atomic<std::uintptr_t> diag_gc_ptr_{0};
+    std::atomic<std::uint32_t>  native_gc_request_count_{0};
+    std::atomic<NativeGcError>  native_gc_error_{NativeGcError::Ok};
     // True when forceEnableTelemetry constructed the SocketTransport /
     // Telemetry / PlayerTelemetry trio ourselves (the legacy pre-patch
     // path). False when we attached to a trio Adobe had already wired at

@@ -20,6 +20,18 @@
 //                long-lived dispatcher.
 //                Output: test_capture_E.aneprof
 //
+//   Scenario T:  Timer leak: short-lived views are retained by running timers
+//                whose listeners are never removed.
+//                Output: test_capture_T.aneprof
+//
+//   Scenario M:  Closure leak: callbacks stored in a static queue capture
+//                removed views and payloads.
+//                Output: test_capture_M.aneprof
+//
+//   Scenario S:  Static display cache leak: removed display objects with
+//                BitmapData payloads stay in a long-lived cache.
+//                Output: test_capture_S.aneprof
+//
 //   Scenario L:  Memory capture with intentional retained ByteArrays so the
 //                analyzer can distinguish a leak-like run from Scenario C.
 //                Output: test_capture_L.aneprof
@@ -34,16 +46,19 @@
 
 package {
     import flash.desktop.NativeApplication;
+    import flash.display.BitmapData;
     import flash.display.Shape;
     import flash.display.Sprite;
     import flash.events.Event;
     import flash.events.EventDispatcher;
+    import flash.events.TimerEvent;
     import flash.filesystem.File;
     import flash.filesystem.FileMode;
     import flash.filesystem.FileStream;
     import flash.geom.Point;
     import flash.utils.ByteArray;
     import flash.utils.Dictionary;
+    import flash.utils.Timer;
     import flash.utils.setTimeout;
     import flash.utils.getTimer;
 
@@ -61,6 +76,8 @@ package {
         private var active:Object;  // {name, outPath, targetFrames, frameCount, lastMarkerSec, churnPool, allocScratch, startTs}
         private static var retainedLeaks:Array = [];
         private static var listenerLeakBus:EventDispatcher = new EventDispatcher();
+        private static var closureLeakCallbacks:Array = [];
+        private static var staticDisplayCache:Dictionary = new Dictionary();
 
         public function TestProfilerApp() {
             log("[test] boot");
@@ -76,7 +93,7 @@ package {
             storage.resolvePath("").createDirectory();
 
             // Clean prior outputs.
-            for each (var n:String in ["A", "B", "C", "D", "E", "L"]) {
+            for each (var n:String in ["A", "B", "C", "D", "E", "T", "M", "S", "L"]) {
                 removeIfPresent(storage.resolvePath("test_capture_" + n + ".aneprof"));
             }
             removeIfPresent(storage.resolvePath("test_result.json"));
@@ -107,6 +124,15 @@ package {
                     { name:"E", label:"hidden-listener-leak", frames:180,
                       timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000,
                       listenerLeak:true },
+                    { name:"T", label:"timer-closure-leak", frames:120,
+                      timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000,
+                      timerLeak:true },
+                    { name:"M", label:"closure-capture-leak", frames:120,
+                      timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000,
+                      closureLeak:true },
+                    { name:"S", label:"static-display-cache-leak", frames:120,
+                      timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000,
+                      staticCacheLeak:true },
                     { name:"L", label:"intentional-memory-retention", frames:240,
                       timing:true, memory:true, snapshots:true, snapshotIntervalMs:1000,
                       leak:true }
@@ -132,7 +158,14 @@ package {
                 leak:          Boolean(sc.leak),
                 syntheticBase:  16777216 + (scenarioIndex * 1048576),
                 listenerLeak:   Boolean(sc.listenerLeak),
+                timerLeak:      Boolean(sc.timerLeak),
+                closureLeak:    Boolean(sc.closureLeak),
+                staticCacheLeak:Boolean(sc.staticCacheLeak),
                 listenerLeakCreated: 0,
+                timerLeakCreated: 0,
+                closureLeakCreated: 0,
+                staticCacheCreated: 0,
+                nativeGcRequested: false,
                 frameCount:    0,
                 lastMarkerSec: -1,
                 churnPool:     new Vector.<Sprite>(),
@@ -148,8 +181,13 @@ package {
                 metadata:         {
                     scenario: sc.name,
                     label: sc.label,
-                    leak: Boolean(sc.leak) || Boolean(sc.listenerLeak),
-                    listenerLeak: Boolean(sc.listenerLeak)
+                    leak: Boolean(sc.leak) || Boolean(sc.listenerLeak) ||
+                          Boolean(sc.timerLeak) || Boolean(sc.closureLeak) ||
+                          Boolean(sc.staticCacheLeak),
+                    listenerLeak: Boolean(sc.listenerLeak),
+                    timerLeak: Boolean(sc.timerLeak),
+                    closureLeak: Boolean(sc.closureLeak),
+                    staticCacheLeak: Boolean(sc.staticCacheLeak)
                 }
             };
             var ok:Boolean = util.profilerStart(active.outPath, options);
@@ -173,6 +211,9 @@ package {
             doSpriteChurn();
             doAllocationWork();
             doHiddenListenerLeakWork();
+            doTimerClosureLeakWork();
+            doClosureCaptureLeakWork();
+            doStaticDisplayCacheLeakWork();
             doSyntheticProfilerRecords();
             doComputeWork();
 
@@ -198,7 +239,16 @@ package {
             if (active.listenerLeak) {
                 util.profilerMarker("listener.leak.created", active.listenerLeakCreated);
             }
-            util.profilerSnapshot("pre-stop");
+            if (active.timerLeak) {
+                util.profilerMarker("timer.leak.created", active.timerLeakCreated);
+            }
+            if (active.closureLeak) {
+                util.profilerMarker("closure.leak.created", active.closureLeakCreated);
+            }
+            if (active.staticCacheLeak) {
+                util.profilerMarker("static.cache.leak.created", active.staticCacheCreated);
+            }
+            util.profilerSnapshot("pre-release");
 
             if (active.leak) {
                 retainedLeaks.push(active.churnPool);
@@ -215,6 +265,17 @@ package {
             } else {
                 active.allocScratch.length = 0;
             }
+
+            active.nativeGcRequested = util.profilerRequestGc();
+            util.profilerMarker("gc.native.request", {
+                scenario: active.name,
+                ok: active.nativeGcRequested
+            });
+            setTimeout(stopAfterNativeGcSnapshot, 250);
+        }
+
+        private function stopAfterNativeGcSnapshot():void {
+            util.profilerSnapshot("post-native-gc-pre-stop");
 
             var pre:Object = util.profilerGetStatus();
             var stopOk:Boolean = util.profilerStop();
@@ -236,7 +297,11 @@ package {
                     preStop:         pre,
                     postStop:        post,
                     outputPath:      active.outPath,
+                    nativeGcRequested: active.nativeGcRequested,
                     listenerLeakCreated: active.listenerLeakCreated,
+                    timerLeakCreated: active.timerLeakCreated,
+                    closureLeakCreated: active.closureLeakCreated,
+                    staticCacheCreated: active.staticCacheCreated,
                     markers:         ["battle.start", "battle.tick*", "battle.end"]
                 };
                 log("[test] scenario " + active.name + " done: " + JSON.stringify(rec.postStop));
@@ -338,6 +403,48 @@ package {
             return new HiddenListenerLeak(listenerLeakBus, id);
         }
 
+        private function doTimerClosureLeakWork():void {
+            if (!active.timerLeak) return;
+            for (var i:int = 0; i < 2; i++) {
+                var view:TimerClosureLeak = new TimerClosureLeak(active.frameCount * 10 + i);
+                addChild(view);
+                view.renderOnce();
+                removeChild(view);
+                view.disposeVisualOnly();
+                active.timerLeakCreated++;
+            }
+        }
+
+        private function doClosureCaptureLeakWork():void {
+            if (!active.closureLeak) return;
+            for (var i:int = 0; i < 4; i++) {
+                var view:ClosureCaptureLeak = new ClosureCaptureLeak(active.frameCount * 10 + i);
+                addChild(view);
+                view.renderOnce();
+                removeChild(view);
+                closureLeakCallbacks.push(makeClosureLeakCallback(view));
+                active.closureLeakCreated++;
+            }
+        }
+
+        private function makeClosureLeakCallback(view:ClosureCaptureLeak):Function {
+            return function():int {
+                return view.touch();
+            };
+        }
+
+        private function doStaticDisplayCacheLeakWork():void {
+            if (!active.staticCacheLeak) return;
+            for (var i:int = 0; i < 3; i++) {
+                var view:StaticDisplayCacheLeak = new StaticDisplayCacheLeak(active.frameCount * 10 + i);
+                addChild(view);
+                view.renderOnce();
+                removeChild(view);
+                staticDisplayCache["view-" + active.frameCount + "-" + i] = view;
+                active.staticCacheCreated++;
+            }
+        }
+
         private function doSyntheticProfilerRecords():void {
             if (!active) return;
             var i:int;
@@ -404,10 +511,13 @@ package {
 }
 
 import flash.display.Sprite;
+import flash.display.BitmapData;
 import flash.events.Event;
 import flash.events.EventDispatcher;
+import flash.events.TimerEvent;
 import flash.geom.Point;
 import flash.utils.ByteArray;
+import flash.utils.Timer;
 
 internal class HiddenListenerLeak extends Sprite {
     private var bus:EventDispatcher;
@@ -451,5 +561,101 @@ internal class HiddenListenerLeak extends Sprite {
             payload.position = 0;
             payload.writeByte((id + ticks) & 0xff);
         }
+    }
+}
+
+internal class TimerClosureLeak extends Sprite {
+    private var timer:Timer;
+    private var payload:ByteArray;
+    private var points:Array;
+    private var id:int;
+    private var ticks:int = 0;
+
+    public function TimerClosureLeak(id:int) {
+        this.id = id;
+        payload = new ByteArray();
+        payload.length = 12288;
+        payload.position = payload.length - 1;
+        payload.writeByte(id & 0xff);
+        points = [];
+        for (var i:int = 0; i < 12; i++) {
+            points.push(new Point(id + i, id * 2 - i));
+        }
+
+        var self:TimerClosureLeak = this;
+        timer = new Timer(40);
+        timer.addEventListener(TimerEvent.TIMER, function(e:TimerEvent):void {
+            self.onTimerTick();
+        });
+        timer.start();
+    }
+
+    public function renderOnce():void {
+        graphics.beginFill(0x8844cc, 0.35);
+        graphics.drawCircle(0, 0, 8 + (id % 4));
+        graphics.endFill();
+    }
+
+    public function disposeVisualOnly():void {
+        graphics.clear();
+        if (parent) parent.removeChild(this);
+        // Intentional leak: timer keeps running and its closure captures this.
+    }
+
+    private function onTimerTick():void {
+        ticks++;
+        if (payload.length > 0) {
+            payload.position = 0;
+            payload.writeByte((id + ticks) & 0xff);
+        }
+    }
+}
+
+internal class ClosureCaptureLeak extends Sprite {
+    private var payload:ByteArray;
+    private var points:Array;
+    private var id:int;
+
+    public function ClosureCaptureLeak(id:int) {
+        this.id = id;
+        payload = new ByteArray();
+        payload.length = 8192;
+        payload.position = payload.length - 1;
+        payload.writeByte(id & 0xff);
+        points = [];
+        for (var i:int = 0; i < 8; i++) {
+            points.push(new Point(id - i, id + i));
+        }
+    }
+
+    public function renderOnce():void {
+        graphics.beginFill(0xcc8844, 0.35);
+        graphics.drawRect(0, 0, 9 + (id % 3), 9 + (id % 5));
+        graphics.endFill();
+    }
+
+    public function touch():int {
+        return payload.length + points.length + id;
+    }
+}
+
+internal class StaticDisplayCacheLeak extends Sprite {
+    private var bitmap:BitmapData;
+    private var payload:ByteArray;
+    private var id:int;
+
+    public function StaticDisplayCacheLeak(id:int) {
+        this.id = id;
+        bitmap = new BitmapData(96, 96, false, 0x224466 + (id & 0xff));
+        payload = new ByteArray();
+        payload.length = 24576;
+        payload.position = payload.length - 1;
+        payload.writeByte(id & 0xff);
+    }
+
+    public function renderOnce():void {
+        graphics.beginBitmapFill(bitmap);
+        graphics.drawRect(0, 0, 24, 24);
+        graphics.endFill();
     }
 }

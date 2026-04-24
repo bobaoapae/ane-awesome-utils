@@ -826,6 +826,7 @@ public class AneAwesomeUtils {
     //   profilerStop():                 Boolean
     //   profilerSnapshot(label=null):   Boolean
     //   profilerMarker(name, value):    Boolean
+    //   profilerRequestGc():            Boolean
     //   profilerGetStatus():            Object
     //       memoryLeakDiagnosticsReady is true only while memory + free/realloc
     //       hooks are installed for a live capture.
@@ -898,6 +899,12 @@ public class AneAwesomeUtils {
                                     profilerValueToJson(value)) as Boolean;
         }
         return true;
+    }
+
+    public function profilerRequestGc():Boolean {
+        if (!_successInit) return false;
+        if (!IsWindows()) return false;
+        return _extContext.call("awesomeUtils_profilerRequestGc") as Boolean;
     }
 
     public function profilerTakeMarker(name:String):Boolean {
