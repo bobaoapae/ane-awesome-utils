@@ -414,6 +414,17 @@ bool DeepProfilerController::record_as3_free(std::uint64_t sample_id,
                        static_cast<std::uint32_t>(payload.size()));
 }
 
+bool DeepProfilerController::record_as3_reference(std::uint64_t owner_id,
+                                                  std::uint64_t dependent_id) {
+    if (state_.load(std::memory_order_acquire) != State::Recording) return false;
+    if (owner_id == 0 || dependent_id == 0 || owner_id == dependent_id) return true;
+
+    aneprof::As3ReferenceEvent payload{};
+    payload.owner_id = owner_id;
+    payload.dependent_id = dependent_id;
+    return write_event(aneprof::EventType::As3Reference, &payload, sizeof(payload));
+}
+
 DeepProfilerController::Status DeepProfilerController::status() const {
     Status s{};
     s.state = state_.load(std::memory_order_acquire);

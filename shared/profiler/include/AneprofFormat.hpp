@@ -32,6 +32,7 @@ enum class EventType : std::uint16_t {
     MethodTable   = 11,
     As3Alloc      = 12,
     As3Free       = 13,
+    As3Reference  = 14,
 };
 
 #pragma pack(push, 1)
@@ -106,12 +107,18 @@ struct As3ObjectEvent {
     std::uint32_t type_name_len;
     std::uint32_t stack_len;
 };
+
+struct As3ReferenceEvent {
+    std::uint64_t owner_id;
+    std::uint64_t dependent_id;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(FileHeader) == 24, "FileHeader size drift");
 static_assert(sizeof(EventHeader) == 24, "EventHeader size drift");
 static_assert(sizeof(FileFooter) == 72, "FileFooter size drift");
 static_assert(sizeof(As3ObjectEvent) == 24, "As3ObjectEvent size drift");
+static_assert(sizeof(As3ReferenceEvent) == 16, "As3ReferenceEvent size drift");
 
 inline std::array<std::uint8_t, sizeof(FileHeader)>
 make_header_bytes(std::uint32_t header_json_len, std::uint64_t started_utc) {
@@ -181,7 +188,7 @@ inline bool parse_event_header_bytes(const void* src, EventHeader* out) noexcept
     if (src == nullptr || out == nullptr) return false;
     std::memcpy(out, src, sizeof(EventHeader));
     return out->type >= static_cast<std::uint16_t>(EventType::Start) &&
-           out->type <= static_cast<std::uint16_t>(EventType::As3Free);
+           out->type <= static_cast<std::uint16_t>(EventType::As3Reference);
 }
 
 inline bool parse_footer_bytes(const void* src, FileFooter* out) noexcept {

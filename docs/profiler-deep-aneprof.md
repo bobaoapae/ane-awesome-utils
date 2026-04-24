@@ -42,6 +42,8 @@ It then stores fixed event headers plus typed payloads:
 - alloc/free/realloc
 - live allocation entries
 - method table
+- AS3 alloc/free entries with runtime type name and AS3 stack
+- AS3 reference/dependent edges from the runtime memory sampler
 
 The footer uses `ANEPEND\0` and records event counts, payload bytes, dropped
 events, final live allocations and final live bytes.
@@ -82,6 +84,17 @@ hooks only emit events for pointers already tracked, or for new HeapAlloc
 returns not seen by the narrower MMgc hooks, so AIR-internal frees do not flood
 the report as unknown frees.
 
+The Windows AS3 object hook also attaches a runtime `IMemorySampler`
+implementation. It records AS3 object allocations/frees with the runtime type
+name and the current AS3 stack without requiring compiler-injected probes. Its
+`addDependentObject` callback is stored as `as3_reference` events. In current
+AIR `51.1.3.10` captures, these are often runtime dependent refs owned by live
+AS3 objects rather than a full AS3-to-AS3 retainer graph, so the analyzer reports
+both:
+
+- live AS3-to-AS3 reference edges when both sides are sampled AS3 objects;
+- live-owner dependent refs grouped by AS3 type and allocation site.
+
 ## Validation
 
 Use:
@@ -91,7 +104,7 @@ python tools\profiler-cli\aneprof_validate.py path\to\capture.aneprof
 python tools\profiler-cli\aneprof_analyze.py path\to\capture.aneprof --require-free-events
 ```
 
-The E2E harness runs scenarios A/B/C/L for both architectures:
+The E2E harness runs scenarios A/B/C/E/L for both architectures:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x64
@@ -99,5 +112,7 @@ powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x
 ```
 
 Scenario C validates timing + memory with real runtime allocation/free pairing.
-Scenario L adds deterministic retained allocation records so the analyzer can
-assert that the leak path reports a larger final live set than the baseline.
+Scenario E simulates a hidden listener leak and validates AS3 type, stack,
+suspect and runtime dependent-ref reporting. Scenario L adds deterministic
+retained allocation records so the analyzer can assert that the leak path
+reports a larger final live set than the baseline.

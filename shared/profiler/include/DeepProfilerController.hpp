@@ -87,6 +87,7 @@ public:
     bool record_as3_free(std::uint64_t sample_id,
                          const std::string& type_name,
                          std::uint64_t size);
+    bool record_as3_reference(std::uint64_t owner_id, std::uint64_t dependent_id);
 
     State state() const noexcept { return state_.load(std::memory_order_acquire); }
     Status status() const;

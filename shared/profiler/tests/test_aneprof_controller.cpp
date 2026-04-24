@@ -103,6 +103,41 @@ TEST("controller writes marker, timing, memory and snapshots") {
     std::filesystem::remove(path);
 }
 
+TEST("controller writes AS3 reference payloads") {
+    const std::string path = tmp_path("ane_deep_profiler_as3_ref.aneprof");
+    DeepProfilerController cc;
+    DeepProfilerController::Config cfg;
+    cfg.output_path = path;
+    cfg.header_json = R"({"format":"aneprof","test":"as3-ref"})";
+    cfg.memory_enabled = true;
+    EXPECT(cc.start(cfg));
+    EXPECT(cc.record_as3_reference(0x11112222u, 0x33334444u));
+    EXPECT(cc.stop());
+
+    const auto bytes = read_all(path);
+    ap::FileHeader header{};
+    EXPECT(ap::parse_header_bytes(bytes.data(), &header));
+    std::size_t off = sizeof(ap::FileHeader) + header.header_json_len;
+    const std::size_t end = bytes.size() - sizeof(ap::FileFooter);
+    bool found = false;
+    while (off < end) {
+        ap::EventHeader eh{};
+        EXPECT(ap::parse_event_header_bytes(bytes.data() + off, &eh));
+        off += sizeof(ap::EventHeader);
+        if (eh.type == static_cast<std::uint16_t>(ap::EventType::As3Reference)) {
+            ap::As3ReferenceEvent payload{};
+            EXPECT_EQ(eh.payload_size, static_cast<std::uint32_t>(sizeof(payload)));
+            std::memcpy(&payload, bytes.data() + off, sizeof(payload));
+            EXPECT_EQ(payload.owner_id, static_cast<std::uint64_t>(0x11112222u));
+            EXPECT_EQ(payload.dependent_id, static_cast<std::uint64_t>(0x33334444u));
+            found = true;
+        }
+        off += eh.payload_size;
+    }
+    EXPECT(found);
+    std::filesystem::remove(path);
+}
+
 TEST("periodic snapshots add events while recording") {
     const std::string path = tmp_path("ane_deep_profiler_periodic.aneprof");
     DeepProfilerController cc;

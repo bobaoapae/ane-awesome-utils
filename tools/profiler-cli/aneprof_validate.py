@@ -37,6 +37,7 @@ EVENT_TYPES = {
     11: "method_table",
     12: "as3_alloc",
     13: "as3_free",
+    14: "as3_reference",
 }
 
 

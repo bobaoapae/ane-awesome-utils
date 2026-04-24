@@ -38,6 +38,7 @@ EVENT_TYPES = {
     11: "method_table",
     12: "as3_alloc",
     13: "as3_free",
+    14: "as3_reference",
 }
 
 
@@ -101,6 +102,12 @@ def parse_as3_payload(payload: bytes) -> tuple[int, int, str, str]:
     return sample_id, size, type_name, stack
 
 
+def parse_as3_reference_payload(payload: bytes) -> tuple[int, int]:
+    if len(payload) < 16:
+        raise ValueError("truncated AS3 reference payload")
+    return struct.unpack_from("<QQ", payload, 0)
+
+
 def normalize_stack_frame(frame: str) -> str:
     text = frame.strip()
     if text.startswith("#"):
@@ -157,6 +164,13 @@ def sorted_counter_rows(counter: dict[str, list[int]], limit: int = 8) -> list[d
     ]
 
 
+def sorted_count_rows(counter: dict[tuple[str, str], int], limit: int = 8) -> list[dict[str, Any]]:
+    return [
+        {"type_name": key[0], "site": key[1], "count": count}
+        for key, count in sorted(counter.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    ]
+
+
 def snapshot_diffs(snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     diffs: list[dict[str, Any]] = []
     for prev, cur in zip(snapshots, snapshots[1:]):
@@ -188,6 +202,12 @@ def build_leak_suspects(sites: list[dict[str, Any]]) -> list[dict[str, Any]]:
             reasons.append("live ByteArray payloads retained with this site")
         if any(is_custom_as3_type(name) for name in type_names):
             reasons.append("custom AS3 types are still live")
+        if site.get("retainer_hints"):
+            reasons.append("runtime reference edges point at this allocation site")
+            if any("MethodClosure" in item["type_name"] for item in site["retainer_hints"]):
+                reasons.append("MethodClosure retains objects from this site")
+        if site.get("owned_dependent_refs", 0):
+            reasons.append("live AS3 objects from this site own runtime dependent refs")
         stack_text = site["sample_stack"]
         if "addEventListener" in stack_text or "EventDispatcher" in stack_text or "listener" in site["site"].lower():
             reasons.append("listener-related allocation stack")
@@ -208,6 +228,9 @@ def build_leak_suspects(sites: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "bytes": site["bytes"],
                 "reasons": reasons,
                 "top_types": site["top_types"][:5],
+                "retainer_hints": site.get("retainer_hints", [])[:5],
+                "owned_dependent_refs": site.get("owned_dependent_refs", 0),
+                "dependent_ref_hints": site.get("dependent_ref_hints", [])[:5],
                 "sample_stack": site["sample_stack"],
             }
         )
@@ -232,6 +255,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     as3_live_by_type: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     as3_live_by_stack: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     as3_live_by_site: dict[str, dict[str, Any]] = {}
+    as3_references: list[tuple[int, int]] = []
     as3_unknown_frees = 0
     unknown_frees = 0
     unknown_reallocs = 0
@@ -327,6 +351,9 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
             sample_id, _size, _type_name, _stack = parse_as3_payload(payload)
             if as3_live.pop(sample_id, None) is None:
                 as3_unknown_frees += 1
+        elif name == "as3_reference":
+            owner_id, dependent_id = parse_as3_reference_payload(payload)
+            as3_references.append((owner_id, dependent_id))
 
     if off != event_end:
         raise ValueError("event walk ended at wrong offset")
@@ -364,6 +391,51 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         site_meta["types"][type_name][0] += 1
         site_meta["types"][type_name][1] += size
 
+    sample_site: dict[int, str] = {}
+    for sample_id, meta in as3_live.items():
+        sample_site[sample_id] = allocation_site(meta["stack"])
+
+    live_reference_edges: list[tuple[int, int]] = []
+    retainer_hints_by_site: dict[str, dict[str, Any]] = {}
+    dependent_refs_by_site: dict[str, dict[str, Any]] = {}
+    reference_type_edges: dict[tuple[str, str], int] = defaultdict(int)
+    reference_owner_edges: dict[tuple[str, str], int] = defaultdict(int)
+    as3_reference_edges_with_live_owner = 0
+    for owner_id, dependent_id in as3_references:
+        owner = as3_live.get(owner_id)
+        dependent = as3_live.get(dependent_id)
+        if owner:
+            owner_site = sample_site.get(owner_id, "<no stack>")
+            owner_type = owner["type_name"]
+            as3_reference_edges_with_live_owner += 1
+            reference_owner_edges[(owner_type, owner_site)] += 1
+            owned_hint = dependent_refs_by_site.setdefault(
+                owner_site,
+                {
+                    "count": 0,
+                    "owner_types": defaultdict(int),
+                },
+            )
+            owned_hint["count"] += 1
+            owned_hint["owner_types"][(owner_type, owner_site)] += 1
+
+        if not owner or not dependent:
+            continue
+        live_reference_edges.append((owner_id, dependent_id))
+        dependent_site = sample_site.get(dependent_id, "<no stack>")
+        dependent_type = dependent["type_name"]
+        reference_type_edges[(owner_type, dependent_type)] += 1
+
+        hint = retainer_hints_by_site.setdefault(
+            dependent_site,
+            {
+                "count": 0,
+                "owner_types": defaultdict(int),
+            },
+        )
+        hint["count"] += 1
+        hint["owner_types"][(owner_type, owner_site)] += 1
+
     warnings: list[str] = []
     if event_count != footer["event_count"]:
         warnings.append(f"footer.event_count={footer['event_count']} actual={event_count}")
@@ -382,6 +454,13 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
             "count": vals["count"],
             "bytes": vals["bytes"],
             "top_types": sorted_counter_rows(vals["types"]),
+            "owned_dependent_refs": dependent_refs_by_site.get(site, {}).get("count", 0),
+            "dependent_ref_hints": sorted_count_rows(
+                dependent_refs_by_site.get(site, {}).get("owner_types", {})
+            ),
+            "retainer_hints": sorted_count_rows(
+                retainer_hints_by_site.get(site, {}).get("owner_types", {})
+            ),
             "sample_stack": vals["sample_stack"],
         }
         for site, vals in sorted(
@@ -406,6 +485,17 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         "as3_live_allocations": len(as3_live),
         "as3_live_bytes": as3_live_bytes,
         "as3_unknown_frees": as3_unknown_frees,
+        "as3_reference_edges": len(as3_references),
+        "as3_reference_edges_with_live_owner": as3_reference_edges_with_live_owner,
+        "live_as3_reference_edges": len(live_reference_edges),
+        "top_as3_reference_edges": [
+            {"owner_type": key[0], "dependent_type": key[1], "count": count}
+            for key, count in sorted(reference_type_edges.items(), key=lambda kv: kv[1], reverse=True)
+        ][:50],
+        "top_as3_reference_owners": [
+            {"owner_type": key[0], "owner_site": key[1], "count": count}
+            for key, count in sorted(reference_owner_edges.items(), key=lambda kv: kv[1], reverse=True)
+        ][:50],
         "snapshots": snapshots,
         "snapshot_diffs": snapshot_diffs(snapshots),
         "top_live_methods": [
@@ -461,6 +551,9 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
     print(f"  AS3 live objects: {result['as3_live_allocations']:>12}")
     print(f"  AS3 live bytes  : {result['as3_live_bytes']:>12}")
     print(f"  AS3 unknown free: {result['as3_unknown_frees']:>12}")
+    print(f"  AS3 ref edges   : {result['live_as3_reference_edges']:>6} live AS3-AS3 / "
+          f"{result['as3_reference_edges_with_live_owner']:>6} live-owner / "
+          f"{result['as3_reference_edges']:>6} total")
 
     if warnings:
         print("  warnings:")
@@ -502,6 +595,14 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
             )
             if top_types:
                 print(f"    types: {top_types}")
+            retainers = ", ".join(
+                f"{hint['type_name']} x{hint['count']} @ {hint['site']}"
+                for hint in item.get("retainer_hints", [])[:3]
+            )
+            if retainers:
+                print(f"    retained by: {retainers}")
+            if item.get("owned_dependent_refs", 0):
+                print(f"    runtime dependent refs: {item['owned_dependent_refs']}")
             for reason in item["reasons"][:3]:
                 print(f"    - {reason}")
 
@@ -541,6 +642,31 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
             )
             if top_types:
                 print(f"    types: {top_types}")
+            retainers = ", ".join(
+                f"{hint['type_name']} x{hint['count']} @ {hint['site']}"
+                for hint in item.get("retainer_hints", [])[:3]
+            )
+            if retainers:
+                print(f"    retained by: {retainers}")
+            if item.get("owned_dependent_refs", 0):
+                print(f"    runtime dependent refs: {item['owned_dependent_refs']}")
+
+    as3_refs = result["top_as3_reference_edges"][:top]
+    if as3_refs:
+        print("\nTop AS3 reference edges:")
+        for item in as3_refs:
+            print(
+                f"  {item['owner_type']} -> {item['dependent_type']} count={item['count']}"
+            )
+
+    as3_ref_owners = result["top_as3_reference_owners"][:top]
+    if as3_ref_owners:
+        print("\nTop AS3 reference owners:")
+        for item in as3_ref_owners:
+            print(
+                f"  type={item['owner_type']:<48} count={item['count']:<8} "
+                f"site={item['owner_site']}"
+            )
 
     as3_stacks = result["top_as3_live_stacks"][:top]
     if as3_stacks:

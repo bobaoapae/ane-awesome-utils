@@ -232,6 +232,8 @@ foreach ($name in @("A", "B", "C", "E", "L")) {
         $ok = $ok -and $s.analysis -and $s.analysis.exit -eq 0
         if ($s.analysis -and $s.analysis.result) {
             $as3Allocs = [double]$s.analysis.result.counts.as3_alloc
+            $as3ReferenceEvents = [double]$s.analysis.result.counts.as3_reference
+            $as3LiveOwnerRefs = [double]$s.analysis.result.as3_reference_edges_with_live_owner
             $as3Types = @($s.analysis.result.top_as3_allocation_types)
             $as3Stacks = @($s.analysis.result.top_as3_live_stacks)
             $hasAs3Stack = $false
@@ -241,7 +243,8 @@ foreach ($name in @("A", "B", "C", "E", "L")) {
                     break
                 }
             }
-            $ok = $ok -and ($as3Allocs -gt 0) -and ($as3Types.Count -gt 0) -and $hasAs3Stack
+            $ok = $ok -and ($as3Allocs -gt 0) -and ($as3ReferenceEvents -gt 0) -and
+                ($as3LiveOwnerRefs -gt 0) -and ($as3Types.Count -gt 0) -and $hasAs3Stack
         }
     }
     if (-not $ok) { $allPass = $false }

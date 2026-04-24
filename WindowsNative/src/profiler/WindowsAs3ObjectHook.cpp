@@ -18,7 +18,9 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace ane::profiler {
 
@@ -41,6 +43,28 @@ std::mutex g_live_mu;
 std::unordered_map<std::uintptr_t, LiveAs3Object> g_live_as3;
 std::mutex g_sampler_alloc_mu;
 std::map<std::uintptr_t, std::uint64_t> g_sampler_alloc_sizes;
+
+struct As3ReferenceKey {
+    std::uintptr_t owner = 0;
+    std::uintptr_t dependent = 0;
+
+    bool operator==(const As3ReferenceKey& other) const noexcept {
+        return owner == other.owner && dependent == other.dependent;
+    }
+};
+
+struct As3ReferenceKeyHash {
+    std::size_t operator()(const As3ReferenceKey& key) const noexcept {
+        const auto a = static_cast<std::uint64_t>(key.owner);
+        const auto b = static_cast<std::uint64_t>(key.dependent);
+        return static_cast<std::size_t>(a ^ (b + 0x9e3779b97f4a7c15ull + (a << 6) + (a >> 2)));
+    }
+};
+
+std::mutex g_as3_ref_mu;
+std::unordered_set<As3ReferenceKey, As3ReferenceKeyHash> g_as3_refs;
+std::unordered_map<std::uintptr_t, std::unordered_set<std::uintptr_t>> g_as3_refs_by_owner;
+std::unordered_map<std::uintptr_t, std::unordered_set<std::uintptr_t>> g_as3_refs_by_dependent;
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
 
@@ -541,6 +565,52 @@ std::string stack_from_core(std::uintptr_t core) {
     return method_frame_stack_from_core(core);
 }
 
+void erase_as3_reference_locked(const As3ReferenceKey& edge) {
+    if (g_as3_refs.erase(edge) == 0) return;
+
+    auto owner_it = g_as3_refs_by_owner.find(edge.owner);
+    if (owner_it != g_as3_refs_by_owner.end()) {
+        owner_it->second.erase(edge.dependent);
+        if (owner_it->second.empty()) {
+            g_as3_refs_by_owner.erase(owner_it);
+        }
+    }
+
+    auto dependent_it = g_as3_refs_by_dependent.find(edge.dependent);
+    if (dependent_it != g_as3_refs_by_dependent.end()) {
+        dependent_it->second.erase(edge.owner);
+        if (dependent_it->second.empty()) {
+            g_as3_refs_by_dependent.erase(dependent_it);
+        }
+    }
+}
+
+void erase_as3_references_for_object(std::uintptr_t key) {
+    std::vector<As3ReferenceKey> to_erase;
+    {
+        std::lock_guard<std::mutex> lock(g_as3_ref_mu);
+        auto owner_it = g_as3_refs_by_owner.find(key);
+        if (owner_it != g_as3_refs_by_owner.end()) {
+            to_erase.reserve(to_erase.size() + owner_it->second.size());
+            for (const auto dependent : owner_it->second) {
+                to_erase.push_back(As3ReferenceKey{key, dependent});
+            }
+        }
+
+        auto dependent_it = g_as3_refs_by_dependent.find(key);
+        if (dependent_it != g_as3_refs_by_dependent.end()) {
+            to_erase.reserve(to_erase.size() + dependent_it->second.size());
+            for (const auto owner : dependent_it->second) {
+                to_erase.push_back(As3ReferenceKey{owner, key});
+            }
+        }
+
+        for (const auto& edge : to_erase) {
+            erase_as3_reference_locked(edge);
+        }
+    }
+}
+
 std::uint64_t sampler_allocation_size_for_object(std::uintptr_t obj) {
     if (obj == 0) return 0;
 #if defined(_M_X64) || defined(__x86_64__)
@@ -641,11 +711,32 @@ void record_as3_free(const void* item, std::uint64_t explicit_size) {
         meta = std::move(it->second);
         g_live_as3.erase(it);
     }
+    erase_as3_references_for_object(key);
     if (meta.size == 0) meta.size = explicit_size;
 
     g_inside_hook = true;
     ctrl->record_as3_free(key, meta.type_name, meta.size);
     g_as3_free_calls.fetch_add(1, std::memory_order_relaxed);
+    g_inside_hook = false;
+}
+
+void record_as3_reference(const void* obj, const void* dep_obj) {
+    if (obj == nullptr || dep_obj == nullptr || obj == dep_obj || g_inside_hook) return;
+    auto* ctrl = g_controller.load(std::memory_order_acquire);
+    if (ctrl == nullptr) return;
+
+    const auto owner = reinterpret_cast<std::uintptr_t>(obj);
+    const auto dependent = reinterpret_cast<std::uintptr_t>(dep_obj);
+    {
+        std::lock_guard<std::mutex> lock(g_as3_ref_mu);
+        const auto inserted = g_as3_refs.insert(As3ReferenceKey{owner, dependent}).second;
+        if (!inserted) return;
+        g_as3_refs_by_owner[owner].insert(dependent);
+        g_as3_refs_by_dependent[dependent].insert(owner);
+    }
+
+    g_inside_hook = true;
+    ctrl->record_as3_reference(owner, dependent);
     g_inside_hook = false;
 }
 
@@ -686,9 +777,8 @@ public:
         // Back-buffer growth is already visible in the native allocation stream.
     }
 
-    void addDependentObject(const void*, const void*) override {
-        // v1 leak diagnosis is object-centric; dependent native buffers stay in
-        // the raw allocation table.
+    void addDependentObject(const void* obj, const void* dep_obj) override {
+        record_as3_reference(obj, dep_obj);
     }
 
     void recordNewObjectAllocation(void* obj, const char* object_type, std::size_t size) override {
@@ -800,6 +890,12 @@ bool WindowsAs3ObjectHook::install(DeepProfilerController* controller) {
         std::lock_guard<std::mutex> lock(g_sampler_alloc_mu);
         g_sampler_alloc_sizes.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(g_as3_ref_mu);
+        g_as3_refs.clear();
+        g_as3_refs_by_owner.clear();
+        g_as3_refs_by_dependent.clear();
+    }
     installed_ = true;
     g_last_failure_stage.store(0, std::memory_order_relaxed);
     return true;
@@ -827,6 +923,12 @@ void WindowsAs3ObjectHook::uninstall() {
     {
         std::lock_guard<std::mutex> lock(g_sampler_alloc_mu);
         g_sampler_alloc_sizes.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_as3_ref_mu);
+        g_as3_refs.clear();
+        g_as3_refs_by_owner.clear();
+        g_as3_refs_by_dependent.clear();
     }
 #endif
     installed_ = false;
