@@ -3,8 +3,7 @@ aneprof_analyze.py — reconstruct allocation state from a native .aneprof captu
 
 This is the quick leak triage CLI. It validates the container, walks allocation
 events, rebuilds the live pointer table, and reports probable leak sites by
-method id. Symbolication/method-table decoding can be layered on top later; v1
-keeps the report numeric and deterministic for CI.
+method, AS3 type, allocation stack, and allocation site.
 """
 
 from __future__ import annotations
@@ -102,6 +101,119 @@ def parse_as3_payload(payload: bytes) -> tuple[int, int, str, str]:
     return sample_id, size, type_name, stack
 
 
+def normalize_stack_frame(frame: str) -> str:
+    text = frame.strip()
+    if text.startswith("#"):
+        parts = text.split(" ", 1)
+        text = parts[1] if len(parts) == 2 else text
+    left, sep, right = text.rpartition(" ")
+    if sep and right.startswith("0x"):
+        text = left
+    return text.strip() or "<unknown>"
+
+
+def is_framework_frame(frame: str) -> bool:
+    return (
+        frame.startswith("CodeContext@")
+        or frame.startswith("flash.external::ExtensionContext/")
+        or frame.startswith("AneAwesomeUtils/profiler")
+        or frame.startswith("flash.utils::Timer/")
+        or frame.startswith("SetIntervalTimer/")
+        or frame.startswith("global/flash.utils::setTimeout")
+    )
+
+
+def stack_frames(stack: str) -> list[str]:
+    return [normalize_stack_frame(frame) for frame in stack.splitlines() if frame.strip()]
+
+
+def allocation_site(stack: str) -> str:
+    frames = stack_frames(stack)
+    for frame in frames:
+        if "/" in frame and not is_framework_frame(frame):
+            return frame
+    for frame in frames:
+        if not is_framework_frame(frame):
+            return frame
+    return frames[0] if frames else "<no stack>"
+
+
+def is_custom_as3_type(type_name: str) -> bool:
+    if type_name in {"Array", "Object", "String", "<unknown>"}:
+        return False
+    if "/" in type_name:
+        return False
+    return not (
+        type_name.startswith("flash.")
+        or type_name.startswith("builtin.")
+        or type_name.startswith("global.")
+    )
+
+
+def sorted_counter_rows(counter: dict[str, list[int]], limit: int = 8) -> list[dict[str, Any]]:
+    return [
+        {"type_name": key, "count": vals[0], "bytes": vals[1]}
+        for key, vals in sorted(counter.items(), key=lambda kv: (kv[1][1], kv[1][0]), reverse=True)[:limit]
+    ]
+
+
+def snapshot_diffs(snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    diffs: list[dict[str, Any]] = []
+    for prev, cur in zip(snapshots, snapshots[1:]):
+        diffs.append(
+            {
+                "from": prev.get("label") or "<unnamed>",
+                "to": cur.get("label") or "<unnamed>",
+                "live_allocations_delta": cur["live_allocations"] - prev["live_allocations"],
+                "live_bytes_delta": cur["live_bytes"] - prev["live_bytes"],
+                "total_allocations_delta": cur["total_allocations"] - prev["total_allocations"],
+                "total_frees_delta": cur["total_frees"] - prev["total_frees"],
+            }
+        )
+    return diffs
+
+
+def build_leak_suspects(sites: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    suspects: list[dict[str, Any]] = []
+    for site in sites:
+        type_names = [item["type_name"] for item in site["top_types"]]
+        reasons: list[str] = []
+        if site["count"] >= 100:
+            reasons.append("many live AS3 objects from this site")
+        if site["bytes"] >= 64 * 1024:
+            reasons.append("large live AS3 byte total from this site")
+        if any("MethodClosure" in name for name in type_names):
+            reasons.append("live MethodClosure objects suggest listener/closure retention")
+        if any(name == "flash.utils::ByteArray" for name in type_names):
+            reasons.append("live ByteArray payloads retained with this site")
+        if any(is_custom_as3_type(name) for name in type_names):
+            reasons.append("custom AS3 types are still live")
+        stack_text = site["sample_stack"]
+        if "addEventListener" in stack_text or "EventDispatcher" in stack_text or "listener" in site["site"].lower():
+            reasons.append("listener-related allocation stack")
+        if not reasons:
+            continue
+
+        confidence = "medium"
+        if len(reasons) >= 3 and site["count"] >= 100:
+            confidence = "high"
+        elif site["count"] < 20 and site["bytes"] < 64 * 1024:
+            confidence = "low"
+
+        suspects.append(
+            {
+                "site": site["site"],
+                "confidence": confidence,
+                "count": site["count"],
+                "bytes": site["bytes"],
+                "reasons": reasons,
+                "top_types": site["top_types"][:5],
+                "sample_stack": site["sample_stack"],
+            }
+        )
+    return sorted(suspects, key=lambda item: (item["confidence"] == "high", item["bytes"], item["count"]), reverse=True)
+
+
 def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     raw = path.read_bytes()
     if len(raw) < HEADER_SIZE + FOOTER_SIZE:
@@ -119,6 +231,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     as3_alloc_by_type: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     as3_live_by_type: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     as3_live_by_stack: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    as3_live_by_site: dict[str, dict[str, Any]] = {}
     as3_unknown_frees = 0
     unknown_frees = 0
     unknown_reallocs = 0
@@ -231,11 +344,25 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         size = meta["size"]
         type_name = meta["type_name"]
         stack = meta["stack"]
+        site = allocation_site(stack)
         as3_live_bytes += size
         as3_live_by_type[type_name][0] += 1
         as3_live_by_type[type_name][1] += size
         as3_live_by_stack[(type_name, stack)][0] += 1
         as3_live_by_stack[(type_name, stack)][1] += size
+        site_meta = as3_live_by_site.setdefault(
+            site,
+            {
+                "count": 0,
+                "bytes": 0,
+                "types": defaultdict(lambda: [0, 0]),
+                "sample_stack": stack,
+            },
+        )
+        site_meta["count"] += 1
+        site_meta["bytes"] += size
+        site_meta["types"][type_name][0] += 1
+        site_meta["types"][type_name][1] += size
 
     warnings: list[str] = []
     if event_count != footer["event_count"]:
@@ -248,6 +375,21 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         )
     if live_bytes != footer["live_bytes"]:
         warnings.append(f"footer.live_bytes={footer['live_bytes']} reconstructed={live_bytes}")
+
+    top_as3_allocation_sites = [
+        {
+            "site": site,
+            "count": vals["count"],
+            "bytes": vals["bytes"],
+            "top_types": sorted_counter_rows(vals["types"]),
+            "sample_stack": vals["sample_stack"],
+        }
+        for site, vals in sorted(
+            as3_live_by_site.items(),
+            key=lambda kv: (kv[1]["bytes"], kv[1]["count"]),
+            reverse=True,
+        )
+    ]
 
     result: dict[str, Any] = {
         "path": str(path),
@@ -265,6 +407,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         "as3_live_bytes": as3_live_bytes,
         "as3_unknown_frees": as3_unknown_frees,
         "snapshots": snapshots,
+        "snapshot_diffs": snapshot_diffs(snapshots),
         "top_live_methods": [
             {"method_id": mid, "count": vals[0], "bytes": vals[1]}
             for mid, vals in sorted(live_by_method.items(), key=lambda kv: kv[1][1], reverse=True)
@@ -291,7 +434,9 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
                 as3_live_by_stack.items(), key=lambda kv: (kv[1][1], kv[1][0]), reverse=True
             )
         ],
+        "top_as3_allocation_sites": top_as3_allocation_sites,
     }
+    result["leak_suspects"] = build_leak_suspects(top_as3_allocation_sites)
     return result, warnings
 
 
@@ -331,6 +476,35 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
     else:
         print("  diagnostic      : no reconstructed live allocations at stop")
 
+    growth = [
+        item for item in result["snapshot_diffs"]
+        if item["live_bytes_delta"] > 0 or item["live_allocations_delta"] > 0
+    ]
+    if growth:
+        print("\nSnapshot growth:")
+        for item in growth[-min(top, len(growth)):]:
+            print(
+                f"  {item['from']} -> {item['to']}: "
+                f"liveCount {item['live_allocations_delta']:+} "
+                f"liveBytes {item['live_bytes_delta']:+}"
+            )
+
+    suspects = result["leak_suspects"][:top]
+    if suspects:
+        print("\nLeak suspects:")
+        for item in suspects:
+            top_types = ", ".join(
+                f"{typ['type_name']} x{typ['count']}" for typ in item["top_types"][:3]
+            )
+            print(
+                f"  [{item['confidence']}] {item['site']} "
+                f"count={item['count']} bytes={item['bytes']}"
+            )
+            if top_types:
+                print(f"    types: {top_types}")
+            for reason in item["reasons"][:3]:
+                print(f"    - {reason}")
+
     live_methods = result["top_live_methods"][:top]
     if live_methods:
         print("\nTop live methods:")
@@ -354,6 +528,19 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
             print(
                 f"  type={item['type_name']:<48} count={item['count']:<8} bytes={item['bytes']}"
             )
+
+    as3_sites = result["top_as3_allocation_sites"][:top]
+    if as3_sites:
+        print("\nTop AS3 allocation sites:")
+        for item in as3_sites:
+            top_types = ", ".join(
+                f"{typ['type_name']} x{typ['count']}" for typ in item["top_types"][:3]
+            )
+            print(
+                f"  site={item['site']:<48} count={item['count']:<8} bytes={item['bytes']}"
+            )
+            if top_types:
+                print(f"    types: {top_types}")
 
     as3_stacks = result["top_as3_live_stacks"][:top]
     if as3_stacks:

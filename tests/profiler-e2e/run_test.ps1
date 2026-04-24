@@ -275,16 +275,27 @@ if ($cap["C"].analysis -and $cap["E"].analysis -and
         }
     }
 
+    $hiddenSuspectSeen = $false
+    foreach ($suspect in @($cap["E"].analysis.result.leak_suspects)) {
+        if (($suspect.site -like "*HiddenListenerLeak*") -or
+            ($suspect.site -like "*createHiddenListenerLeak*") -or
+            ($suspect.sample_stack -like "*HiddenListenerLeak*")) {
+            $hiddenSuspectSeen = $true
+            break
+        }
+    }
+
     $listenerLeakDetected = (
         ($deltaEventAs3LiveCount -ge 128 -or $deltaEventAs3LiveBytes -ge 8192) -and
         $hiddenTypeSeen -and
-        $hiddenStackSeen
+        $hiddenStackSeen -and
+        $hiddenSuspectSeen
     )
     if (-not $listenerLeakDetected) { $allPass = $false }
-    Write-Host ("  Listener leak C->E: AS3 count {0} -> {1} (delta={2}), bytes {3} -> {4} (delta={5}), type={6}, stack={7} {8}" -f `
+    Write-Host ("  Listener leak C->E: AS3 count {0} -> {1} (delta={2}), bytes {3} -> {4} (delta={5}), type={6}, stack={7}, suspect={8} {9}" -f `
         $baseAs3LiveCount, $eventAs3LiveCount, $deltaEventAs3LiveCount,
         $baseAs3LiveBytes, $eventAs3LiveBytes, $deltaEventAs3LiveBytes,
-        $hiddenTypeSeen, $hiddenStackSeen,
+        $hiddenTypeSeen, $hiddenStackSeen, $hiddenSuspectSeen,
         $(if ($listenerLeakDetected) {"OK"} else {"FAIL"}))
 } else {
     $allPass = $false
