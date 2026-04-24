@@ -45,6 +45,7 @@ EVENT_TYPES = {
     17: "as3_payload",
     18: "frame",
     19: "gc_cycle",
+    20: "as3_reference_remove",
 }
 
 EVENT_FLAG_INFERRED = 1 << 0
@@ -286,6 +287,38 @@ def merge_reference_infos(reference_infos: list[dict[str, Any]]) -> list[dict[st
             current["suggested_kind"] = ref.get("suggested_kind")
             current["suggested_label"] = ref.get("suggested_label", "")
     return list(merged.values())
+
+
+def active_reference_ex_infos(mutations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def mutation_identity(ref: dict[str, Any]) -> str:
+        kind = str(ref.get("kind") or AS3_REFERENCE_KINDS.get(int(ref.get("kind_id") or 0), "unknown"))
+        label = str(ref.get("label") or "")
+        if kind == "display_child":
+            return "display-list:parent"
+        if kind in ("event_listener", "timer_callback") and label.startswith("event-listener:"):
+            for prefix in (
+                "event-listener:addEventListener:",
+                "event-listener:removeEventListener:",
+            ):
+                if label.startswith(prefix):
+                    return "event-listener:" + label[len(prefix):]
+        return label
+
+    active: dict[tuple[int, int, int, str], dict[str, Any]] = {}
+    for ref in mutations:
+        owner_id = int(ref.get("owner_id") or 0)
+        dependent_id = int(ref.get("dependent_id") or 0)
+        kind_id = int(ref.get("kind_id") or 0)
+        if owner_id == 0 or dependent_id == 0 or owner_id == dependent_id:
+            continue
+        key = (owner_id, dependent_id, kind_id, mutation_identity(ref))
+        if ref.get("action") == "remove":
+            active.pop(key, None)
+            continue
+        stored = dict(ref)
+        stored.pop("action", None)
+        active[key] = stored
+    return list(active.values())
 
 
 def parse_header(raw: bytes) -> tuple[int, dict[str, Any]]:
@@ -1414,6 +1447,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     as3_objects: dict[int, dict[str, Any]] = {}
     as3_references: list[tuple[int, int]] = []
     as3_reference_ex: list[dict[str, Any]] = []
+    as3_reference_ex_mutations: list[dict[str, Any]] = []
     as3_roots: list[dict[str, Any]] = []
     as3_payloads: list[dict[str, Any]] = []
     frames: list[dict[str, Any]] = []
@@ -1679,6 +1713,15 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
             parsed["timestamp_ns"] = timestamp_ns
             parsed["thread_id"] = thread_id
             as3_reference_ex.append(parsed)
+            mutation = dict(parsed)
+            mutation["action"] = "add"
+            as3_reference_ex_mutations.append(mutation)
+        elif name == "as3_reference_remove":
+            parsed = parse_as3_reference_ex_payload(payload, flags)
+            parsed["timestamp_ns"] = timestamp_ns
+            parsed["thread_id"] = thread_id
+            parsed["action"] = "remove"
+            as3_reference_ex_mutations.append(parsed)
         elif name == "as3_root":
             parsed = parse_as3_root_payload(payload, flags)
             parsed["timestamp_ns"] = timestamp_ns
@@ -1754,7 +1797,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     for sample_id, meta in as3_live.items():
         sample_site[sample_id] = allocation_site(meta["stack"])
 
-    reference_infos: list[dict[str, Any]] = [
+    base_reference_infos: list[dict[str, Any]] = [
         {
             "owner_id": owner_id,
             "dependent_id": dependent_id,
@@ -1764,8 +1807,16 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         }
         for owner_id, dependent_id in as3_references
     ]
-    reference_infos.extend(as3_reference_ex)
-    reference_infos, reference_id_aliases = canonicalize_reference_infos(reference_infos, as3_live)
+    reference_infos_for_alias = base_reference_infos + as3_reference_ex_mutations
+    reference_infos_for_alias, reference_id_aliases = canonicalize_reference_infos(
+        reference_infos_for_alias,
+        as3_live,
+    )
+    base_reference_infos = reference_infos_for_alias[: len(base_reference_infos)]
+    reference_ex_active = active_reference_ex_infos(
+        reference_infos_for_alias[len(base_reference_infos) :]
+    )
+    reference_infos = base_reference_infos + reference_ex_active
     (
         reference_infos,
         reference_kind_counts,
@@ -2078,6 +2129,8 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         "as3_unknown_frees": as3_unknown_frees,
         "as3_reference_edges": len(as3_references),
         "as3_reference_ex_edges": len(as3_reference_ex),
+        "as3_reference_remove_edges": counts.get("as3_reference_remove", 0),
+        "active_as3_reference_ex_edges": len(reference_ex_active),
         "as3_reference_edges_with_live_owner": as3_reference_edges_with_live_owner,
         "as3_reference_edges_with_live_dependent": as3_reference_edges_with_live_dependent,
         "as3_reference_edges_with_live_owner_and_dependent": as3_reference_edges_with_live_owner_and_dependent,
@@ -2195,7 +2248,9 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
     if result.get("as3_reference_ex_edges") or result.get("as3_roots") or result.get("payload_by_owner"):
         print(f"  AS3 roots/payload: {len(result.get('as3_roots', [])):>6} roots / "
               f"{len(result.get('payload_by_owner', [])):>6} payload owner(s) / "
-              f"{result.get('as3_reference_ex_edges', 0):>6} reference-ex events")
+              f"{result.get('active_as3_reference_ex_edges', 0):>6} active reference-ex")
+        if result.get("as3_reference_remove_edges"):
+            print(f"  AS3 ref removes : {result.get('as3_reference_remove_edges', 0):>6} reference-remove events")
     overhead = result["overhead"]
     print(f"  event rate      : {overhead['events_per_sec']:>12.2f} events/s")
     print(f"  payload rate    : {overhead['payload_bytes_per_sec']:>12.2f} B/s")

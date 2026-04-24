@@ -32,6 +32,13 @@ public:
     std::uint64_t directSlotFailures() const;
     std::uint64_t forwardedCalls() const;
     std::uint64_t forwardFailures() const;
+    std::uint64_t realEdgeHookInstalls() const;
+    std::uint64_t realEdgeHookFailures() const;
+    std::uint64_t realDisplayChildEdges() const;
+    std::uint64_t realDisplayChildRemoves() const;
+    std::uint64_t realEventListenerEdges() const;
+    std::uint64_t realEventListenerRemoves() const;
+    std::uint32_t realEdgeLastFailureStage() const;
     std::uint32_t lastFailureStage() const;
     bool chainedSampler() const;
     std::uintptr_t currentSamplerPtr() const;

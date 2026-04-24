@@ -31,6 +31,7 @@ AS3_ALLOC = 12
 AS3_FREE = 13
 AS3_REFERENCE = 14
 AS3_REFERENCE_EX = 15
+AS3_REFERENCE_REMOVE = 20
 AS3_ROOT = 16
 AS3_PAYLOAD = 17
 FRAME = 18
@@ -237,6 +238,55 @@ class AneprofAnalyzeTests(unittest.TestCase):
         self.assertEqual(result["top_as3_reference_kinds"][0]["kind"], "display_child")
         child_path = next(item for item in result["retainer_paths"] if item["object_id"] == 2)
         self.assertEqual(child_path["path"][-1]["edge_kind"], "display_child")
+
+    def test_reference_remove_deactivates_real_typed_edge(self) -> None:
+        events = [
+            event(START, timestamp_ns=1),
+            event(AS3_ALLOC, as3_object(1, 10, "flash.display::Sprite", "View/root"), 2),
+            event(AS3_ALLOC, as3_object(2, 20, "flash.display::Bitmap", "View/child"), 3),
+            event(AS3_ROOT, as3_root(1, 1, "stage"), 4),
+            event(AS3_REFERENCE_EX, as3_ref_ex(1, 2, 4, "display-list:addChild"), 5),
+            event(AS3_REFERENCE_REMOVE, as3_ref_ex(1, 2, 4, "display-list:removeChild"), 6),
+            event(STOP, timestamp_ns=7),
+        ]
+        result = analyze_events(events)
+
+        self.assertEqual(result["as3_reference_ex_edges"], 1)
+        self.assertEqual(result["as3_reference_remove_edges"], 1)
+        self.assertEqual(result["active_as3_reference_ex_edges"], 0)
+        self.assertEqual(result["as3_reference_real_typed_edges"], 0)
+        self.assertEqual(result["live_as3_reference_edges"], 0)
+
+    def test_reference_remove_keeps_other_listener_registration_active(self) -> None:
+        events = [
+            event(START, timestamp_ns=1),
+            event(AS3_ALLOC, as3_object(1, 10, "flash.events::EventDispatcher", "View/root"), 2),
+            event(AS3_ALLOC, as3_object(2, 20, "builtin.as$0::MethodClosure", "View/listener"), 3),
+            event(AS3_ROOT, as3_root(1, 1, "stage"), 4),
+            event(
+                AS3_REFERENCE_EX,
+                as3_ref_ex(1, 2, 5, "event-listener:addEventListener:click:bubble"),
+                5,
+            ),
+            event(
+                AS3_REFERENCE_EX,
+                as3_ref_ex(1, 2, 5, "event-listener:addEventListener:rollOver:bubble"),
+                6,
+            ),
+            event(
+                AS3_REFERENCE_REMOVE,
+                as3_ref_ex(1, 2, 5, "event-listener:removeEventListener:click:bubble"),
+                7,
+            ),
+            event(STOP, timestamp_ns=8),
+        ]
+        result = analyze_events(events)
+
+        self.assertEqual(result["as3_reference_ex_edges"], 2)
+        self.assertEqual(result["as3_reference_remove_edges"], 1)
+        self.assertEqual(result["active_as3_reference_ex_edges"], 1)
+        self.assertEqual(result["as3_reference_real_typed_edges"], 1)
+        self.assertEqual(result["live_as3_reference_edges"], 1)
 
     def test_frame_events_are_filled_with_allocations_from_the_frame_interval(self) -> None:
         events = [

@@ -1,9 +1,14 @@
-# Profiler Hook RVAs for Adobe AIR 51.1.3.10 (Windows x64)
+# Profiler Hook RVAs for Adobe AIR 51.1.3.10 (Windows)
 
 Static binary analysis of `Adobe AIR.dll` 51.1.3.10 x64 to identify the RVAs
 of telemetry-related functions for an on-demand Scout-compatible profiler
 hook. All RVAs are relative to image base `0x180000000` (i.e. add `0x180000000`
 to obtain the ghidra-style absolute address).
+
+The same document now also records the x64/x86 Windows RVAs used by the
+`.aneprof` backend for factual AS3 typed reference edges. Those hooks are not
+part of the Scout socket path; they feed `as3_reference_ex` and
+`as3_reference_remove` events directly into `.aneprof`.
 
 ## Target binary
 
@@ -104,6 +109,38 @@ Both RVAs are documented:
 
 Hooking the thunk is fine for interception because every call to send_bytes
 goes through it.
+
+## AS3 typed edge hooks
+
+These are real operation hooks used by `.aneprof` to label retainer edges
+without relying on `IMemorySampler.addDependentObject` inference.
+
+- x64 targets were mapped from the 51.1.3.12 Ghidra decompile to AIR
+  `51.1.3.10` with the same masked prologue search method described above.
+- x86 targets were pinned in AIR `51.1.3.10` by string xrefs/disassembly around
+  the `child` and `listener` argument paths, then guarded by byte prologues at
+  install time.
+- `addEventListener` records only successful non-weak listeners. Weak listeners
+  are intentionally skipped because they should not retain the listener.
+- Event-listener identity includes event type and capture/bubble phase.
+- Display-list reparenting emits a removal for the previously observed parent
+  when a successful add hook moves the child.
+- `removeChild`, `removeChildAt` and `removeEventListener` emit
+  `as3_reference_remove`; the analyzer replays add/remove mutations before
+  building the live graph.
+
+| Operation | Edge kind | x64 RVA | x86 RVA | Event |
+| --- | --- | ---: | ---: | --- |
+| `DisplayObjectContainer.addChild` | `display_child` | `0x0050724c` | `0x003eccb2` | `as3_reference_ex` |
+| `DisplayObjectContainer.addChildAt` | `display_child` | `0x005073e0` | `0x003ecdf0` | `as3_reference_ex` |
+| `DisplayObjectContainer.removeChild` | `display_child` | `0x00507cac` | `0x003ed487` | `as3_reference_remove` |
+| `DisplayObjectContainer.removeChildAt` | `display_child` | `0x00507d5c` | `0x003ed501` | `as3_reference_remove` |
+| `EventDispatcher.addEventListener` | `event_listener` / `timer_callback` | `0x001fc6fc` | `0x0019d862` | `as3_reference_ex` |
+| `EventDispatcher.removeEventListener` | `event_listener` / `timer_callback` | `0x001ff3e4` | `0x0019fe4e` | `as3_reference_remove` |
+
+Timer callbacks are classified conservatively at hook time: if the dispatcher is
+already sampled and its AS3 type name contains `Timer` or `SetIntervalTimer`,
+the edge is stored as `timer_callback`; otherwise it remains `event_listener`.
 
 ## Init sequence (narrated)
 

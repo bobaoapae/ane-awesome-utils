@@ -38,6 +38,7 @@ enum class EventType : std::uint16_t {
     As3Payload    = 17,
     Frame         = 18,
     GcCycle       = 19,
+    As3ReferenceRemove = 20,
 };
 
 enum class As3ReferenceKind : std::uint16_t {
@@ -288,7 +289,7 @@ inline bool parse_event_header_bytes(const void* src, EventHeader* out) noexcept
     if (src == nullptr || out == nullptr) return false;
     std::memcpy(out, src, sizeof(EventHeader));
     return out->type >= static_cast<std::uint16_t>(EventType::Start) &&
-           out->type <= static_cast<std::uint16_t>(EventType::GcCycle);
+           out->type <= static_cast<std::uint16_t>(EventType::As3ReferenceRemove);
 }
 
 inline bool parse_footer_bytes(const void* src, FileFooter* out) noexcept {

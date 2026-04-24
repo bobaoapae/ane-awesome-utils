@@ -468,6 +468,27 @@ bool DeepProfilerController::record_as3_reference_ex(std::uint64_t owner_id,
                               flags);
 }
 
+bool DeepProfilerController::record_as3_reference_remove(std::uint64_t owner_id,
+                                                         std::uint64_t dependent_id,
+                                                         aneprof::As3ReferenceKind kind,
+                                                         const std::string& label) {
+    if (state_.load(std::memory_order_acquire) != State::Recording) return false;
+    if (owner_id == 0 || dependent_id == 0 || owner_id == dependent_id) return true;
+
+    aneprof::As3ReferenceExEvent fixed{};
+    fixed.owner_id = owner_id;
+    fixed.dependent_id = dependent_id;
+    fixed.kind = static_cast<std::uint16_t>(kind);
+    fixed.label_len = static_cast<std::uint32_t>(label.size());
+    auto payload = fixed_with_label_payload(fixed, label);
+    return write_event_locked(aneprof::EventType::As3ReferenceRemove,
+                              payload.data(),
+                              static_cast<std::uint32_t>(payload.size()),
+                              now_ns(),
+                              thread_id(),
+                              0);
+}
+
 bool DeepProfilerController::record_as3_root(std::uint64_t object_id,
                                              aneprof::As3RootKind kind,
                                              const std::string& label,

@@ -151,6 +151,10 @@ TEST("controller writes extended AS3 graph payloads") {
                                       ap::As3ReferenceKind::EventListener,
                                       "click",
                                       true));
+    EXPECT(cc.record_as3_reference_remove(0x1000u,
+                                          0x2000u,
+                                          ap::As3ReferenceKind::EventListener,
+                                          "click"));
     EXPECT(cc.record_as3_root(0x1000u, ap::As3RootKind::Stage, "stage", false));
     EXPECT(cc.record_as3_payload(0x2000u,
                                  0x3000u,
@@ -176,6 +180,7 @@ TEST("controller writes extended AS3 graph payloads") {
     std::size_t off = sizeof(ap::FileHeader) + header.header_json_len;
     const std::size_t end = bytes.size() - sizeof(ap::FileFooter);
     bool found_ref_ex = false;
+    bool found_ref_remove = false;
     bool found_root = false;
     bool found_payload = false;
     bool found_frame = false;
@@ -194,6 +199,14 @@ TEST("controller writes extended AS3 graph payloads") {
             EXPECT_EQ(payload.kind, static_cast<std::uint16_t>(ap::As3ReferenceKind::EventListener));
             EXPECT_EQ(payload.label_len, 5u);
             found_ref_ex = true;
+        } else if (eh.type == static_cast<std::uint16_t>(ap::EventType::As3ReferenceRemove)) {
+            ap::As3ReferenceExEvent payload{};
+            EXPECT(eh.payload_size >= sizeof(payload));
+            std::memcpy(&payload, bytes.data() + off, sizeof(payload));
+            EXPECT_EQ(payload.owner_id, static_cast<std::uint64_t>(0x1000u));
+            EXPECT_EQ(payload.dependent_id, static_cast<std::uint64_t>(0x2000u));
+            EXPECT_EQ(payload.kind, static_cast<std::uint16_t>(ap::As3ReferenceKind::EventListener));
+            found_ref_remove = true;
         } else if (eh.type == static_cast<std::uint16_t>(ap::EventType::As3Root)) {
             ap::As3RootEvent payload{};
             EXPECT(eh.payload_size >= sizeof(payload));
@@ -229,6 +242,7 @@ TEST("controller writes extended AS3 graph payloads") {
         off += eh.payload_size;
     }
     EXPECT(found_ref_ex);
+    EXPECT(found_ref_remove);
     EXPECT(found_root);
     EXPECT(found_payload);
     EXPECT(found_frame);

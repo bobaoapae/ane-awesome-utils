@@ -100,6 +100,10 @@ public:
                                  aneprof::As3ReferenceKind kind,
                                  const std::string& label = std::string(),
                                  bool inferred = false);
+    bool record_as3_reference_remove(std::uint64_t owner_id,
+                                     std::uint64_t dependent_id,
+                                     aneprof::As3ReferenceKind kind,
+                                     const std::string& label = std::string());
     bool record_as3_root(std::uint64_t object_id,
                          aneprof::As3RootKind kind,
                          const std::string& label = std::string(),

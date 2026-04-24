@@ -9,11 +9,13 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -35,6 +37,13 @@ std::atomic<std::uint64_t> g_direct_slot_installs{0};
 std::atomic<std::uint64_t> g_direct_slot_failures{0};
 std::atomic<std::uint64_t> g_forwarded_calls{0};
 std::atomic<std::uint64_t> g_forward_failures{0};
+std::atomic<std::uint64_t> g_real_edge_hook_installs{0};
+std::atomic<std::uint64_t> g_real_edge_hook_failures{0};
+std::atomic<std::uint64_t> g_real_display_child_edges{0};
+std::atomic<std::uint64_t> g_real_display_child_removes{0};
+std::atomic<std::uint64_t> g_real_event_listener_edges{0};
+std::atomic<std::uint64_t> g_real_event_listener_removes{0};
+std::atomic<std::uint32_t> g_real_edge_last_failure_stage{0};
 std::atomic<std::uint32_t> g_last_failure_stage{0};
 std::atomic<std::uintptr_t> g_last_core{0};
 std::atomic<void*> g_previous_sampler{nullptr};
@@ -72,10 +81,37 @@ struct As3ReferenceKeyHash {
     }
 };
 
+struct As3TypedReferenceKey {
+    std::uintptr_t owner = 0;
+    std::uintptr_t dependent = 0;
+    aneprof::As3ReferenceKind kind = aneprof::As3ReferenceKind::Unknown;
+    std::string detail;
+
+    bool operator==(const As3TypedReferenceKey& other) const noexcept {
+        return owner == other.owner &&
+               dependent == other.dependent &&
+               kind == other.kind &&
+               detail == other.detail;
+    }
+};
+
+struct As3TypedReferenceKeyHash {
+    std::size_t operator()(const As3TypedReferenceKey& key) const noexcept {
+        const auto a = static_cast<std::uint64_t>(key.owner);
+        const auto b = static_cast<std::uint64_t>(key.dependent);
+        const auto c = static_cast<std::uint64_t>(key.kind);
+        const auto mixed = static_cast<std::size_t>(
+            a ^ (b + 0x9e3779b97f4a7c15ull + (a << 6) + (a >> 2)) ^
+            (c + 0xbf58476d1ce4e5b9ull + (b << 5) + (b >> 3)));
+        return mixed ^ (std::hash<std::string>{}(key.detail) + 0x9e3779b9u + (mixed << 6) + (mixed >> 2));
+    }
+};
+
 std::mutex g_as3_ref_mu;
 std::unordered_set<As3ReferenceKey, As3ReferenceKeyHash> g_as3_refs;
 std::unordered_map<std::uintptr_t, std::unordered_set<std::uintptr_t>> g_as3_refs_by_owner;
 std::unordered_map<std::uintptr_t, std::unordered_set<std::uintptr_t>> g_as3_refs_by_dependent;
+std::unordered_set<As3TypedReferenceKey, As3TypedReferenceKeyHash> g_as3_real_refs;
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
 
@@ -83,6 +119,21 @@ std::unordered_map<std::uintptr_t, std::unordered_set<std::uintptr_t>> g_as3_ref
 using AttachSamplerFn = void (*)(void*);
 using GetSamplerFn = void* (*)();
 using MethodNameWithTraitsFn = std::uintptr_t (*)(void*, void*, bool);
+using DisplayAddChildFn = std::uintptr_t (*)(std::uintptr_t, std::uintptr_t);
+using DisplayAddChildAtFn = std::uintptr_t (*)(std::uintptr_t, std::uintptr_t, std::int32_t);
+using DisplayRemoveChildFn = std::uintptr_t (*)(std::uintptr_t, std::uintptr_t);
+using DisplayRemoveChildAtFn = std::uintptr_t (*)(std::uintptr_t, std::uint32_t);
+using EventAddListenerFn = std::uintptr_t (*)(std::uintptr_t,
+                                              std::uintptr_t,
+                                              std::uintptr_t,
+                                              std::uint8_t,
+                                              std::uint32_t,
+                                              std::uint8_t);
+using EventRemoveListenerFn = std::uintptr_t (*)(std::uintptr_t,
+                                                 std::uintptr_t,
+                                                 std::uintptr_t,
+                                                 std::uint8_t);
+inline constexpr std::size_t kJumpSize = 14;
 
 inline constexpr std::uint32_t kVTableOffTraits = 0x28;
 inline constexpr std::uint32_t kTraitsOffCore = 0x08;
@@ -127,11 +178,58 @@ constexpr std::uint8_t kMethodNameWithTraitsMask[] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
+constexpr std::uint8_t kDisplayAddChildPrologue[] = {
+    0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x08, 0x48,
+    0x89, 0x68, 0x10, 0x48, 0x89, 0x70, 0x18
+};
+constexpr std::uint8_t kDisplayAddChildAtPrologue[] = {
+    0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c,
+    0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18
+};
+constexpr std::uint8_t kDisplayRemoveChildPrologue[] = {
+    0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74,
+    0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x30
+};
+constexpr std::uint8_t kDisplayRemoveChildAtPrologue[] = {
+    0x48, 0x89, 0x5c, 0x24, 0x10, 0x55, 0x56, 0x57,
+    0x48, 0x83, 0xec, 0x30, 0x48, 0x8b, 0x59, 0x58
+};
+constexpr std::uint8_t kEventAddListenerPrologue[] = {
+    0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x08, 0x48,
+    0x89, 0x70, 0x10, 0x48, 0x89, 0x78, 0x18
+};
+constexpr std::uint8_t kEventRemoveListenerPrologue[] = {
+    0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74,
+    0x24, 0x10, 0x48, 0x89, 0x7c, 0x24, 0x18
+};
+constexpr std::uint8_t kRealEdgeMask15[] = {
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+constexpr std::uint8_t kRealEdgeMask16[] = {
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
 
 #else
 using AttachSamplerFn = void (__cdecl*)(void*);
 using GetSamplerFn = void* (__cdecl*)();
 using MethodNameWithTraitsFn = std::uintptr_t (__fastcall*)(void*, void*, bool);
+using DisplayAddChildFn = std::uintptr_t (__thiscall*)(void*, std::uintptr_t);
+using DisplayAddChildAtFn = std::uintptr_t (__thiscall*)(void*, std::uintptr_t, std::int32_t);
+using DisplayRemoveChildFn = std::uintptr_t (__thiscall*)(void*, std::uintptr_t);
+using DisplayRemoveChildAtFn = std::uintptr_t (__thiscall*)(void*, std::uint32_t);
+using EventAddListenerFn = std::uintptr_t (__thiscall*)(void*,
+                                                        std::uintptr_t,
+                                                        std::uintptr_t,
+                                                        std::uint8_t,
+                                                        std::uint32_t,
+                                                        std::uint8_t);
+using EventRemoveListenerFn = std::uintptr_t (__thiscall*)(void*,
+                                                           std::uintptr_t,
+                                                           std::uintptr_t,
+                                                           std::uint8_t);
+inline constexpr std::size_t kJumpSize = 6;
 
 inline constexpr std::uint32_t kVTableOffTraits = 0x14;
 inline constexpr std::uint32_t kTraitsOffCore = 0x04;
@@ -176,6 +274,36 @@ constexpr std::uint8_t kMethodNameWithTraitsMask[] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
+constexpr std::uint8_t kDisplayAddChildPrologue[] = {
+    0x83, 0xec, 0x0c, 0x53, 0x8b, 0x5c, 0x24, 0x14
+};
+constexpr std::uint8_t kDisplayAddChildAtPrologue[] = {
+    0x83, 0xec, 0x10, 0x53, 0x8b, 0x5c, 0x24, 0x18
+};
+constexpr std::uint8_t kDisplayRemoveChildPrologue[] = {
+    0x56, 0x8b, 0x74, 0x24, 0x0c, 0x33, 0xdb
+};
+constexpr std::uint8_t kDisplayRemoveChildAtPrologue[] = {
+    0x83, 0xec, 0x0c, 0x53, 0x8b, 0xd9
+};
+constexpr std::uint8_t kEventAddListenerPrologue[] = {
+    0x83, 0xec, 0x28, 0xa1, 0x00, 0x00, 0x00, 0x00
+};
+constexpr std::uint8_t kEventRemoveListenerPrologue[] = {
+    0x83, 0xec, 0x20, 0xa1, 0x00, 0x00, 0x00, 0x00
+};
+constexpr std::uint8_t kRealEdgeMask6[] = {
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+constexpr std::uint8_t kRealEdgeMask7[] = {
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+constexpr std::uint8_t kRealEdgeMask8[] = {
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00
+};
+constexpr std::uint8_t kRealEdgeMask8Exact[] = {
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
 #endif
 
 bool matches_signature(const void* target,
@@ -188,6 +316,105 @@ bool matches_signature(const void* target,
         if ((actual[i] & mask[i]) != (expected[i] & mask[i])) return false;
     }
     return true;
+}
+
+struct Detour {
+    void* target = nullptr;
+    void* hook = nullptr;
+    void* trampoline = nullptr;
+    std::array<std::uint8_t, 32> original{};
+    std::size_t stolen = 0;
+};
+
+Detour g_display_add_child;
+Detour g_display_add_child_at;
+Detour g_display_remove_child;
+Detour g_display_remove_child_at;
+Detour g_event_add_listener;
+Detour g_event_remove_listener;
+DisplayAddChildFn g_original_display_add_child = nullptr;
+DisplayAddChildAtFn g_original_display_add_child_at = nullptr;
+DisplayRemoveChildFn g_original_display_remove_child = nullptr;
+DisplayRemoveChildAtFn g_original_display_remove_child_at = nullptr;
+EventAddListenerFn g_original_event_add_listener = nullptr;
+EventRemoveListenerFn g_original_event_remove_listener = nullptr;
+
+void write_jump(std::uint8_t* dst, void* target) {
+#if defined(_M_X64) || defined(__x86_64__)
+    dst[0] = 0xff;
+    dst[1] = 0x25;
+    dst[2] = 0x00;
+    dst[3] = 0x00;
+    dst[4] = 0x00;
+    dst[5] = 0x00;
+    std::memcpy(dst + 6, &target, sizeof(target));
+#else
+    const auto target32 = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(target));
+    dst[0] = 0x68;
+    std::memcpy(dst + 1, &target32, sizeof(target32));
+    dst[5] = 0xc3;
+#endif
+}
+
+bool install_detour(Detour& d,
+                    void* target,
+                    void* hook,
+                    const std::uint8_t* expected,
+                    const std::uint8_t* mask,
+                    std::size_t expected_size,
+                    std::size_t stolen) {
+    if (target == nullptr || hook == nullptr ||
+        stolen < kJumpSize || stolen > d.original.size() || expected_size < stolen) {
+        return false;
+    }
+    if (!matches_signature(target, expected, mask, expected_size)) {
+        return false;
+    }
+
+    auto* trampoline = static_cast<std::uint8_t*>(
+        VirtualAlloc(nullptr, stolen + kJumpSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (trampoline == nullptr) return false;
+
+    std::memcpy(d.original.data(), target, stolen);
+    std::memcpy(trampoline, target, stolen);
+    void* return_addr = static_cast<std::uint8_t*>(target) + stolen;
+    write_jump(trampoline + stolen, return_addr);
+
+    DWORD old_prot = 0;
+    if (!VirtualProtect(target, stolen, PAGE_EXECUTE_READWRITE, &old_prot)) {
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return false;
+    }
+
+    std::uint8_t patch[32] = {};
+    std::memset(patch, 0x90, sizeof(patch));
+    write_jump(patch, hook);
+    std::memcpy(target, patch, stolen);
+    FlushInstructionCache(GetCurrentProcess(), target, stolen);
+
+    DWORD tmp = 0;
+    VirtualProtect(target, stolen, old_prot, &tmp);
+
+    d.target = target;
+    d.hook = hook;
+    d.trampoline = trampoline;
+    d.stolen = stolen;
+    return true;
+}
+
+void uninstall_detour(Detour& d) {
+    if (d.target == nullptr || d.stolen == 0) return;
+    DWORD old_prot = 0;
+    if (VirtualProtect(d.target, d.stolen, PAGE_EXECUTE_READWRITE, &old_prot)) {
+        std::memcpy(d.target, d.original.data(), d.stolen);
+        FlushInstructionCache(GetCurrentProcess(), d.target, d.stolen);
+        DWORD tmp = 0;
+        VirtualProtect(d.target, d.stolen, old_prot, &tmp);
+    }
+    if (d.trampoline != nullptr) {
+        VirtualFree(d.trampoline, 0, MEM_RELEASE);
+    }
+    d = Detour{};
 }
 
 template <typename T>
@@ -666,6 +893,14 @@ void erase_as3_references_for_object(std::uintptr_t key) {
         for (const auto& edge : to_erase) {
             erase_as3_reference_locked(edge);
         }
+
+        for (auto it = g_as3_real_refs.begin(); it != g_as3_real_refs.end();) {
+            if (it->owner == key || it->dependent == key) {
+                it = g_as3_real_refs.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 }
 
@@ -822,6 +1057,366 @@ void record_as3_reference(const void* obj, const void* dep_obj) {
     ctrl->record_as3_reference(owner, dependent);
     g_inside_hook = false;
 }
+
+std::uintptr_t normalize_as3_object_arg(std::uintptr_t value) {
+    if (value == 0) return 0;
+    if ((value & static_cast<std::uintptr_t>(7)) != 0) {
+        value &= ~static_cast<std::uintptr_t>(7);
+    }
+    return is_aligned_ptr(value) ? value : 0;
+}
+
+bool is_timer_type_name(const std::string& type_name) {
+    return type_name.find("Timer") != std::string::npos ||
+           type_name.find("SetIntervalTimer") != std::string::npos;
+}
+
+aneprof::As3ReferenceKind classify_reference_kind(std::uintptr_t owner,
+                                                  aneprof::As3ReferenceKind kind) {
+    if (kind != aneprof::As3ReferenceKind::EventListener) return kind;
+    std::lock_guard<std::mutex> live_lock(g_live_mu);
+    const auto canonical_owner = canonical_live_as3_key_locked(owner);
+    const auto it = g_live_as3.find(canonical_owner);
+    if (it != g_live_as3.end() && is_timer_type_name(it->second.type_name)) {
+        return aneprof::As3ReferenceKind::TimerCallback;
+    }
+    return kind;
+}
+
+bool canonicalize_typed_reference(std::uintptr_t raw_owner,
+                                  std::uintptr_t raw_dependent,
+                                  std::uintptr_t& owner,
+                                  std::uintptr_t& dependent) {
+    owner = normalize_as3_object_arg(raw_owner);
+    dependent = normalize_as3_object_arg(raw_dependent);
+    if (owner == 0 || dependent == 0 || owner == dependent) return false;
+    std::lock_guard<std::mutex> live_lock(g_live_mu);
+    owner = canonical_live_as3_key_locked(owner);
+    dependent = canonical_live_as3_key_locked(dependent);
+    return owner != 0 && dependent != 0 && owner != dependent;
+}
+
+void record_as3_typed_reference(std::uintptr_t raw_owner,
+                                std::uintptr_t raw_dependent,
+                                aneprof::As3ReferenceKind kind,
+                                const std::string& label,
+                                const std::string& identity) {
+    if (raw_owner == 0 || raw_dependent == 0 || raw_owner == raw_dependent || g_inside_hook) return;
+    auto* ctrl = g_controller.load(std::memory_order_acquire);
+    if (ctrl == nullptr) return;
+
+    std::uintptr_t owner = 0;
+    std::uintptr_t dependent = 0;
+    if (!canonicalize_typed_reference(raw_owner, raw_dependent, owner, dependent)) return;
+    kind = classify_reference_kind(owner, kind);
+    const std::string detail = identity.empty() ? label : identity;
+
+    std::vector<As3TypedReferenceKey> detached_display_parents;
+    if (kind == aneprof::As3ReferenceKind::DisplayChild) {
+        std::lock_guard<std::mutex> lock(g_as3_ref_mu);
+        for (auto it = g_as3_real_refs.begin(); it != g_as3_real_refs.end();) {
+            if (it->kind == aneprof::As3ReferenceKind::DisplayChild &&
+                it->dependent == dependent &&
+                it->owner != owner) {
+                detached_display_parents.push_back(*it);
+                it = g_as3_real_refs.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    bool inserted = false;
+    {
+        std::lock_guard<std::mutex> lock(g_as3_ref_mu);
+        inserted =
+            g_as3_real_refs.insert(As3TypedReferenceKey{owner, dependent, kind, detail}).second;
+    }
+    if (!inserted && detached_display_parents.empty()) return;
+
+    g_inside_hook = true;
+    for (const auto& detached : detached_display_parents) {
+        if (ctrl->record_as3_reference_remove(detached.owner,
+                                              detached.dependent,
+                                              detached.kind,
+                                              "display-list:reparent")) {
+            g_real_display_child_removes.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (inserted && ctrl->record_as3_reference_ex(owner, dependent, kind, label, false)) {
+        if (kind == aneprof::As3ReferenceKind::DisplayChild) {
+            g_real_display_child_edges.fetch_add(1, std::memory_order_relaxed);
+        } else if (kind == aneprof::As3ReferenceKind::EventListener ||
+                   kind == aneprof::As3ReferenceKind::TimerCallback) {
+            g_real_event_listener_edges.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    g_inside_hook = false;
+}
+
+void record_as3_typed_reference_remove(std::uintptr_t raw_owner,
+                                       std::uintptr_t raw_dependent,
+                                       aneprof::As3ReferenceKind kind,
+                                       const std::string& label,
+                                       const std::string& identity) {
+    if (raw_owner == 0 || raw_dependent == 0 || raw_owner == raw_dependent || g_inside_hook) return;
+    auto* ctrl = g_controller.load(std::memory_order_acquire);
+    if (ctrl == nullptr) return;
+
+    std::uintptr_t owner = 0;
+    std::uintptr_t dependent = 0;
+    if (!canonicalize_typed_reference(raw_owner, raw_dependent, owner, dependent)) return;
+    kind = classify_reference_kind(owner, kind);
+    const std::string detail = identity.empty() ? label : identity;
+
+    {
+        std::lock_guard<std::mutex> lock(g_as3_ref_mu);
+        const auto erased = g_as3_real_refs.erase(As3TypedReferenceKey{owner, dependent, kind, detail});
+        if (erased == 0) return;
+    }
+
+    g_inside_hook = true;
+    if (ctrl->record_as3_reference_remove(owner, dependent, kind, label)) {
+        if (kind == aneprof::As3ReferenceKind::DisplayChild) {
+            g_real_display_child_removes.fetch_add(1, std::memory_order_relaxed);
+        } else if (kind == aneprof::As3ReferenceKind::EventListener ||
+                   kind == aneprof::As3ReferenceKind::TimerCallback) {
+            g_real_event_listener_removes.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    g_inside_hook = false;
+}
+
+std::string event_listener_name(std::uintptr_t event_type) {
+    std::string type_name;
+    if (avm_string_to_utf8(event_type & ~static_cast<std::uintptr_t>(7), type_name, 128) &&
+        !type_name.empty()) {
+        return type_name;
+    }
+    return "unknown";
+}
+
+std::string event_listener_label(const char* operation,
+                                 std::uintptr_t event_type,
+                                 std::uint8_t use_capture) {
+    std::string label = operation != nullptr ? operation : "event-listener";
+    label.push_back(':');
+    label += event_listener_name(event_type);
+    label += use_capture != 0 ? ":capture" : ":bubble";
+    return label;
+}
+
+std::string event_listener_identity(std::uintptr_t event_type, std::uint8_t use_capture) {
+    std::string identity = "event-listener:";
+    identity += event_listener_name(event_type);
+    identity += use_capture != 0 ? ":capture" : ":bubble";
+    return identity;
+}
+
+#if defined(_M_X64) || defined(__x86_64__)
+
+std::uintptr_t hook_display_add_child(std::uintptr_t owner, std::uintptr_t child) {
+    auto* real = g_original_display_add_child;
+    if (real == nullptr) return 0;
+    const auto result = real(owner, child);
+    if (result != 0) {
+        record_as3_typed_reference(owner,
+                                   result,
+                                   aneprof::As3ReferenceKind::DisplayChild,
+                                   "display-list:addChild",
+                                   "display-list:parent");
+    }
+    return result;
+}
+
+std::uintptr_t hook_display_add_child_at(std::uintptr_t owner,
+                                         std::uintptr_t child,
+                                         std::int32_t index) {
+    auto* real = g_original_display_add_child_at;
+    if (real == nullptr) return 0;
+    const auto result = real(owner, child, index);
+    if (result != 0) {
+        record_as3_typed_reference(owner,
+                                   result,
+                                   aneprof::As3ReferenceKind::DisplayChild,
+                                   "display-list:addChildAt",
+                                   "display-list:parent");
+    }
+    return result;
+}
+
+std::uintptr_t hook_display_remove_child(std::uintptr_t owner, std::uintptr_t child) {
+    auto* real = g_original_display_remove_child;
+    if (real == nullptr) return 0;
+    const auto result = real(owner, child);
+    if (result != 0) {
+        record_as3_typed_reference_remove(owner,
+                                          result,
+                                          aneprof::As3ReferenceKind::DisplayChild,
+                                          "display-list:removeChild",
+                                          "display-list:parent");
+    }
+    return result;
+}
+
+std::uintptr_t hook_display_remove_child_at(std::uintptr_t owner, std::uint32_t index) {
+    auto* real = g_original_display_remove_child_at;
+    if (real == nullptr) return 0;
+    const auto result = real(owner, index);
+    if (result != 0) {
+        record_as3_typed_reference_remove(owner,
+                                          result,
+                                          aneprof::As3ReferenceKind::DisplayChild,
+                                          "display-list:removeChildAt",
+                                          "display-list:parent");
+    }
+    return result;
+}
+
+std::uintptr_t hook_event_add_listener(std::uintptr_t dispatcher,
+                                       std::uintptr_t event_type,
+                                       std::uintptr_t listener,
+                                       std::uint8_t use_capture,
+                                       std::uint32_t priority,
+                                       std::uint8_t weak) {
+    auto* real = g_original_event_add_listener;
+    if (real == nullptr) return 0;
+    const auto result = real(dispatcher, event_type, listener, use_capture, priority, weak);
+    if (result != 0 && weak == 0) {
+        record_as3_typed_reference(dispatcher,
+                                   listener,
+                                   aneprof::As3ReferenceKind::EventListener,
+                                   event_listener_label("event-listener:addEventListener",
+                                                        event_type,
+                                                        use_capture),
+                                   event_listener_identity(event_type, use_capture));
+    }
+    return result;
+}
+
+std::uintptr_t hook_event_remove_listener(std::uintptr_t dispatcher,
+                                          std::uintptr_t event_type,
+                                          std::uintptr_t listener,
+                                          std::uint8_t use_capture) {
+    auto* real = g_original_event_remove_listener;
+    if (real == nullptr) return 0;
+    const auto result = real(dispatcher, event_type, listener, use_capture);
+    if (result != 0) {
+        record_as3_typed_reference_remove(dispatcher,
+                                          listener,
+                                          aneprof::As3ReferenceKind::EventListener,
+                                          event_listener_label("event-listener:removeEventListener",
+                                                               event_type,
+                                                               use_capture),
+                                          event_listener_identity(event_type, use_capture));
+    }
+    return result;
+}
+
+#else
+
+std::uintptr_t __fastcall hook_display_add_child(void* owner, void*, std::uintptr_t child) {
+    auto* real = g_original_display_add_child;
+    if (real == nullptr) return 0;
+    const auto result = real(owner, child);
+    if (result != 0) {
+        record_as3_typed_reference(reinterpret_cast<std::uintptr_t>(owner),
+                                   result,
+                                   aneprof::As3ReferenceKind::DisplayChild,
+                                   "display-list:addChild",
+                                   "display-list:parent");
+    }
+    return result;
+}
+
+std::uintptr_t __fastcall hook_display_add_child_at(void* owner,
+                                                    void*,
+                                                    std::uintptr_t child,
+                                                    std::int32_t index) {
+    auto* real = g_original_display_add_child_at;
+    if (real == nullptr) return 0;
+    const auto result = real(owner, child, index);
+    if (result != 0) {
+        record_as3_typed_reference(reinterpret_cast<std::uintptr_t>(owner),
+                                   result,
+                                   aneprof::As3ReferenceKind::DisplayChild,
+                                   "display-list:addChildAt",
+                                   "display-list:parent");
+    }
+    return result;
+}
+
+std::uintptr_t __fastcall hook_display_remove_child(void* owner, void*, std::uintptr_t child) {
+    auto* real = g_original_display_remove_child;
+    if (real == nullptr) return 0;
+    const auto result = real(owner, child);
+    if (result != 0) {
+        record_as3_typed_reference_remove(reinterpret_cast<std::uintptr_t>(owner),
+                                          result,
+                                          aneprof::As3ReferenceKind::DisplayChild,
+                                          "display-list:removeChild",
+                                          "display-list:parent");
+    }
+    return result;
+}
+
+std::uintptr_t __fastcall hook_display_remove_child_at(void* owner, void*, std::uint32_t index) {
+    auto* real = g_original_display_remove_child_at;
+    if (real == nullptr) return 0;
+    const auto result = real(owner, index);
+    if (result != 0) {
+        record_as3_typed_reference_remove(reinterpret_cast<std::uintptr_t>(owner),
+                                          result,
+                                          aneprof::As3ReferenceKind::DisplayChild,
+                                          "display-list:removeChildAt",
+                                          "display-list:parent");
+    }
+    return result;
+}
+
+std::uintptr_t __fastcall hook_event_add_listener(void* dispatcher,
+                                                  void*,
+                                                  std::uintptr_t event_type,
+                                                  std::uintptr_t listener,
+                                                  std::uint8_t use_capture,
+                                                  std::uint32_t priority,
+                                                  std::uint8_t weak) {
+    auto* real = g_original_event_add_listener;
+    if (real == nullptr) return 0;
+    const auto result = real(dispatcher, event_type, listener, use_capture, priority, weak);
+    if (result != 0 && weak == 0) {
+        record_as3_typed_reference(reinterpret_cast<std::uintptr_t>(dispatcher),
+                                   listener,
+                                   aneprof::As3ReferenceKind::EventListener,
+                                   event_listener_label("event-listener:addEventListener",
+                                                        event_type,
+                                                        use_capture),
+                                   event_listener_identity(event_type, use_capture));
+    }
+    return result;
+}
+
+std::uintptr_t __fastcall hook_event_remove_listener(void* dispatcher,
+                                                     void*,
+                                                     std::uintptr_t event_type,
+                                                     std::uintptr_t listener,
+                                                     std::uint8_t use_capture) {
+    auto* real = g_original_event_remove_listener;
+    if (real == nullptr) return 0;
+    const auto result = real(dispatcher, event_type, listener, use_capture);
+    if (result != 0) {
+        record_as3_typed_reference_remove(reinterpret_cast<std::uintptr_t>(dispatcher),
+                                          listener,
+                                          aneprof::As3ReferenceKind::EventListener,
+                                          event_listener_label("event-listener:removeEventListener",
+                                                               event_type,
+                                                               use_capture),
+                                          event_listener_identity(event_type, use_capture));
+    }
+    return result;
+}
+
+#endif
 
 struct IMemorySamplerCompat {
     virtual int getSamplerType() = 0;
@@ -1140,6 +1735,192 @@ bool install_sampler_via_slot(void* sampler) {
     return true;
 }
 
+bool install_real_edge_detour(Detour& detour,
+                              HMODULE air,
+                              std::uint32_t rva,
+                              void* hook,
+                              const std::uint8_t* expected,
+                              const std::uint8_t* mask,
+                              std::size_t expected_size,
+                              std::size_t stolen,
+                              std::uint32_t failure_stage) {
+    if (detour.target != nullptr) return true;
+    if (air == nullptr || rva == 0) return false;
+    auto* target = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(air) + rva);
+    if (!install_detour(detour, target, hook, expected, mask, expected_size, stolen)) {
+        g_real_edge_hook_failures.fetch_add(1, std::memory_order_relaxed);
+        g_real_edge_last_failure_stage.store(failure_stage, std::memory_order_relaxed);
+        return false;
+    }
+    g_real_edge_hook_installs.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+void install_real_edge_hooks(HMODULE air) {
+    g_real_edge_last_failure_stage.store(0, std::memory_order_relaxed);
+
+#if defined(_M_X64) || defined(__x86_64__)
+    if (install_real_edge_detour(g_display_add_child,
+                                 air,
+                                 air_rvas::kRvaDisplayObjectContainerAddChild,
+                                 reinterpret_cast<void*>(&hook_display_add_child),
+                                 kDisplayAddChildPrologue,
+                                 kRealEdgeMask15,
+                                 sizeof(kDisplayAddChildPrologue),
+                                 sizeof(kDisplayAddChildPrologue),
+                                 21)) {
+        g_original_display_add_child = reinterpret_cast<DisplayAddChildFn>(g_display_add_child.trampoline);
+    }
+    if (install_real_edge_detour(g_display_add_child_at,
+                                 air,
+                                 air_rvas::kRvaDisplayObjectContainerAddChildAt,
+                                 reinterpret_cast<void*>(&hook_display_add_child_at),
+                                 kDisplayAddChildAtPrologue,
+                                 kRealEdgeMask15,
+                                 sizeof(kDisplayAddChildAtPrologue),
+                                 sizeof(kDisplayAddChildAtPrologue),
+                                 22)) {
+        g_original_display_add_child_at =
+            reinterpret_cast<DisplayAddChildAtFn>(g_display_add_child_at.trampoline);
+    }
+    if (install_real_edge_detour(g_display_remove_child,
+                                 air,
+                                 air_rvas::kRvaDisplayObjectContainerRemoveChild,
+                                 reinterpret_cast<void*>(&hook_display_remove_child),
+                                 kDisplayRemoveChildPrologue,
+                                 kRealEdgeMask15,
+                                 sizeof(kDisplayRemoveChildPrologue),
+                                 sizeof(kDisplayRemoveChildPrologue),
+                                 23)) {
+        g_original_display_remove_child =
+            reinterpret_cast<DisplayRemoveChildFn>(g_display_remove_child.trampoline);
+    }
+    if (install_real_edge_detour(g_display_remove_child_at,
+                                 air,
+                                 air_rvas::kRvaDisplayObjectContainerRemoveChildAt,
+                                 reinterpret_cast<void*>(&hook_display_remove_child_at),
+                                 kDisplayRemoveChildAtPrologue,
+                                 kRealEdgeMask16,
+                                 sizeof(kDisplayRemoveChildAtPrologue),
+                                 sizeof(kDisplayRemoveChildAtPrologue),
+                                 24)) {
+        g_original_display_remove_child_at =
+            reinterpret_cast<DisplayRemoveChildAtFn>(g_display_remove_child_at.trampoline);
+    }
+    if (install_real_edge_detour(g_event_add_listener,
+                                 air,
+                                 air_rvas::kRvaEventDispatcherAddEventListener,
+                                 reinterpret_cast<void*>(&hook_event_add_listener),
+                                 kEventAddListenerPrologue,
+                                 kRealEdgeMask15,
+                                 sizeof(kEventAddListenerPrologue),
+                                 sizeof(kEventAddListenerPrologue),
+                                 25)) {
+        g_original_event_add_listener =
+            reinterpret_cast<EventAddListenerFn>(g_event_add_listener.trampoline);
+    }
+    if (install_real_edge_detour(g_event_remove_listener,
+                                 air,
+                                 air_rvas::kRvaEventDispatcherRemoveEventListener,
+                                 reinterpret_cast<void*>(&hook_event_remove_listener),
+                                 kEventRemoveListenerPrologue,
+                                 kRealEdgeMask15,
+                                 sizeof(kEventRemoveListenerPrologue),
+                                 sizeof(kEventRemoveListenerPrologue),
+                                 26)) {
+        g_original_event_remove_listener =
+            reinterpret_cast<EventRemoveListenerFn>(g_event_remove_listener.trampoline);
+    }
+#else
+    if (install_real_edge_detour(g_display_add_child,
+                                 air,
+                                 air_rvas::kRvaDisplayObjectContainerAddChild,
+                                 reinterpret_cast<void*>(&hook_display_add_child),
+                                 kDisplayAddChildPrologue,
+                                 kRealEdgeMask8Exact,
+                                 sizeof(kDisplayAddChildPrologue),
+                                 sizeof(kDisplayAddChildPrologue),
+                                 21)) {
+        g_original_display_add_child = reinterpret_cast<DisplayAddChildFn>(g_display_add_child.trampoline);
+    }
+    if (install_real_edge_detour(g_display_add_child_at,
+                                 air,
+                                 air_rvas::kRvaDisplayObjectContainerAddChildAt,
+                                 reinterpret_cast<void*>(&hook_display_add_child_at),
+                                 kDisplayAddChildAtPrologue,
+                                 kRealEdgeMask8Exact,
+                                 sizeof(kDisplayAddChildAtPrologue),
+                                 sizeof(kDisplayAddChildAtPrologue),
+                                 22)) {
+        g_original_display_add_child_at =
+            reinterpret_cast<DisplayAddChildAtFn>(g_display_add_child_at.trampoline);
+    }
+    if (install_real_edge_detour(g_display_remove_child,
+                                 air,
+                                 air_rvas::kRvaDisplayObjectContainerRemoveChild,
+                                 reinterpret_cast<void*>(&hook_display_remove_child),
+                                 kDisplayRemoveChildPrologue,
+                                 kRealEdgeMask7,
+                                 sizeof(kDisplayRemoveChildPrologue),
+                                 sizeof(kDisplayRemoveChildPrologue),
+                                 23)) {
+        g_original_display_remove_child =
+            reinterpret_cast<DisplayRemoveChildFn>(g_display_remove_child.trampoline);
+    }
+    if (install_real_edge_detour(g_display_remove_child_at,
+                                 air,
+                                 air_rvas::kRvaDisplayObjectContainerRemoveChildAt,
+                                 reinterpret_cast<void*>(&hook_display_remove_child_at),
+                                 kDisplayRemoveChildAtPrologue,
+                                 kRealEdgeMask6,
+                                 sizeof(kDisplayRemoveChildAtPrologue),
+                                 sizeof(kDisplayRemoveChildAtPrologue),
+                                 24)) {
+        g_original_display_remove_child_at =
+            reinterpret_cast<DisplayRemoveChildAtFn>(g_display_remove_child_at.trampoline);
+    }
+    if (install_real_edge_detour(g_event_add_listener,
+                                 air,
+                                 air_rvas::kRvaEventDispatcherAddEventListener,
+                                 reinterpret_cast<void*>(&hook_event_add_listener),
+                                 kEventAddListenerPrologue,
+                                 kRealEdgeMask8,
+                                 sizeof(kEventAddListenerPrologue),
+                                 sizeof(kEventAddListenerPrologue),
+                                 25)) {
+        g_original_event_add_listener =
+            reinterpret_cast<EventAddListenerFn>(g_event_add_listener.trampoline);
+    }
+    if (install_real_edge_detour(g_event_remove_listener,
+                                 air,
+                                 air_rvas::kRvaEventDispatcherRemoveEventListener,
+                                 reinterpret_cast<void*>(&hook_event_remove_listener),
+                                 kEventRemoveListenerPrologue,
+                                 kRealEdgeMask8,
+                                 sizeof(kEventRemoveListenerPrologue),
+                                 sizeof(kEventRemoveListenerPrologue),
+                                 26)) {
+        g_original_event_remove_listener =
+            reinterpret_cast<EventRemoveListenerFn>(g_event_remove_listener.trampoline);
+    }
+#endif
+}
+
+void uninstall_real_edge_hooks() {
+    uninstall_detour(g_event_remove_listener);
+    uninstall_detour(g_event_add_listener);
+    uninstall_detour(g_display_remove_child_at);
+    uninstall_detour(g_display_remove_child);
+    uninstall_detour(g_display_add_child_at);
+    uninstall_detour(g_display_add_child);
+    g_original_display_add_child = nullptr;
+    g_original_display_add_child_at = nullptr;
+    g_original_display_remove_child = nullptr;
+    g_original_display_remove_child_at = nullptr;
+    g_original_event_add_listener = nullptr;
+    g_original_event_remove_listener = nullptr;
+}
+
 #endif
 } // namespace
 
@@ -1243,7 +2024,9 @@ bool WindowsAs3ObjectHook::install(DeepProfilerController* controller) {
         g_as3_refs.clear();
         g_as3_refs_by_owner.clear();
         g_as3_refs_by_dependent.clear();
+        g_as3_real_refs.clear();
     }
+    install_real_edge_hooks(air);
     installed_ = true;
     g_last_failure_stage.store(0, std::memory_order_relaxed);
     return true;
@@ -1256,6 +2039,7 @@ bool WindowsAs3ObjectHook::install(DeepProfilerController* controller) {
 
 void WindowsAs3ObjectHook::uninstall() {
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    uninstall_real_edge_hooks();
     if (installed_ && g_get_sampler != nullptr && g_attach_sampler != nullptr) {
         if (call_get_sampler() == &g_sampler) {
             void* previous = g_previous_sampler.load(std::memory_order_acquire);
@@ -1284,6 +2068,7 @@ void WindowsAs3ObjectHook::uninstall() {
         g_as3_refs.clear();
         g_as3_refs_by_owner.clear();
         g_as3_refs_by_dependent.clear();
+        g_as3_real_refs.clear();
     }
 #endif
     installed_ = false;
@@ -1324,6 +2109,34 @@ std::uint64_t WindowsAs3ObjectHook::forwardedCalls() const {
 
 std::uint64_t WindowsAs3ObjectHook::forwardFailures() const {
     return g_forward_failures.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::realEdgeHookInstalls() const {
+    return g_real_edge_hook_installs.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::realEdgeHookFailures() const {
+    return g_real_edge_hook_failures.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::realDisplayChildEdges() const {
+    return g_real_display_child_edges.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::realDisplayChildRemoves() const {
+    return g_real_display_child_removes.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::realEventListenerEdges() const {
+    return g_real_event_listener_edges.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::realEventListenerRemoves() const {
+    return g_real_event_listener_removes.load(std::memory_order_relaxed);
+}
+
+std::uint32_t WindowsAs3ObjectHook::realEdgeLastFailureStage() const {
+    return g_real_edge_last_failure_stage.load(std::memory_order_relaxed);
 }
 
 std::uint32_t WindowsAs3ObjectHook::lastFailureStage() const {

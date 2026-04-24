@@ -69,6 +69,7 @@ Append-only event IDs currently reserved by the `.aneprof` backend:
 | 17 | `as3_payload` | no | native/logical payload bytes owned by an AS3 object |
 | 18 | `frame` | no | frame or interval duration plus allocation count/bytes |
 | 19 | `gc_cycle` | no | requested or observed GC cycle counters before/after collection |
+| 20 | `as3_reference_remove` | no | factual removal of a previously emitted typed AS3 edge |
 
 ## Probe Surface
 
@@ -120,6 +121,8 @@ from raw events. The JSON output includes:
   still live
 - `as3_reference_real_typed_edges` and `top_as3_reference_kinds` for typed
   edges that came from factual `as3_reference_ex` events
+- `active_as3_reference_ex_edges` and `as3_reference_remove_edges` so real
+  add/remove hooks do not leave stale retainer edges in the final graph
 - `as3_reference_inferred_typed_edges` and
   `top_as3_reference_inferred_kinds` for conservative typed-edge suggestions
   (`timer_callback`, `event_listener`, `array`, `dictionary`,
@@ -161,13 +164,24 @@ events from this callback. The analyzer may still report type-based suggestions
 for triage, but retainer paths keep `edge_kind=unknown` unless a real
 `as3_reference_ex` event exists.
 
-Real typed edges must come from a hook at the operation that creates the
-relationship, for example `DisplayObjectContainer.addChild/removeChild` for
-`display_child`, `EventDispatcher.addEventListener/removeEventListener` for
-`event_listener`, timer APIs for `timer_callback`, or verified collection/slot
-write paths. Until those hooks are implemented and validated for both x64 and
-x86, `.aneprof` keeps the exact object-to-object reference and labels the type
-only as a suggestion.
+Real typed edges come from hooks at the operation that creates or removes the
+relationship. Windows x64 and x86 AIR `51.1.3.10` currently hooks
+`DisplayObjectContainer.addChild/addChildAt/removeChild/removeChildAt` for
+`display_child`, and `EventDispatcher.addEventListener/removeEventListener` for
+`event_listener`. Non-weak event listeners are recorded as factual edges;
+weak listeners are skipped because they should not retain the listener. Listener
+identity includes event type and capture/bubble phase, so removing one
+registration does not hide another registration that still retains the same
+listener. If the dispatcher is sampled as a timer-like type, the event-listener
+edge is recorded as `timer_callback`. Display-list reparenting emits a removal
+for the previously observed parent when the add hook sees the child move. The
+matching removal operations emit `as3_reference_remove`, and the analyzer
+replays those mutations before building retainer paths and dominator summaries.
+
+Hooks for static fields, array/dictionary slot writes, closure capture slots and
+native payload owner links still require separate verified write-path hooks.
+Until those exist, the analyzer keeps such edge kinds as conservative
+suggestions instead of factual retainer-path labels.
 
 Frame summaries can be supplied explicitly through `profilerRecordFrame()`.
 The AS3 test bridge uses this to write one `frame` event per `ENTER_FRAME` when
@@ -197,6 +211,14 @@ Check `profilerGetStatus()` during a capture:
   installed.
 - `as3SamplerPreviousVtableModule` and `as3SamplerPreviousVtableHead` identify
   the sampler that occupied the AIR slot before the ANE installed its proxy.
+- `as3RealEdgeHookInstalls` should be `6` when the display-list and
+  event-listener hook set installed successfully.
+- `as3RealEdgeHookFailures` and `as3RealEdgeLastFailureStage` identify optional
+  real-edge hook install failures. AS3 allocation diagnostics may still run if
+  only one of these optional hooks fails.
+- `as3RealDisplayChildEdges`, `as3RealDisplayChildRemoves`,
+  `as3RealEventListenerEdges` and `as3RealEventListenerRemoves` count factual
+  typed add/remove edges captured during the run.
 - `memoryLeakDiagnosticsReady=true` with `as3LeakDiagnosticsReady=false` now
   indicates a lower-level attach/prologue failure rather than normal sampler
   contention.

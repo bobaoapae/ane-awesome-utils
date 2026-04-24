@@ -328,6 +328,20 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
                      static_cast<double>(g_as3_object_hook->forwardedCalls()));
         set_prop_f64(obj, "as3ObjectHookForwardFailures",
                      static_cast<double>(g_as3_object_hook->forwardFailures()));
+        set_prop_f64(obj, "as3RealEdgeHookInstalls",
+                     static_cast<double>(g_as3_object_hook->realEdgeHookInstalls()));
+        set_prop_f64(obj, "as3RealEdgeHookFailures",
+                     static_cast<double>(g_as3_object_hook->realEdgeHookFailures()));
+        set_prop_f64(obj, "as3RealDisplayChildEdges",
+                     static_cast<double>(g_as3_object_hook->realDisplayChildEdges()));
+        set_prop_f64(obj, "as3RealDisplayChildRemoves",
+                     static_cast<double>(g_as3_object_hook->realDisplayChildRemoves()));
+        set_prop_f64(obj, "as3RealEventListenerEdges",
+                     static_cast<double>(g_as3_object_hook->realEventListenerEdges()));
+        set_prop_f64(obj, "as3RealEventListenerRemoves",
+                     static_cast<double>(g_as3_object_hook->realEventListenerRemoves()));
+        set_prop_u32(obj, "as3RealEdgeLastFailureStage",
+                     g_as3_object_hook->realEdgeLastFailureStage());
         set_prop_u32(obj, "as3ObjectHookLastFailureStage",
                      g_as3_object_hook->lastFailureStage());
 
