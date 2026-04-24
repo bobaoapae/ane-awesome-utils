@@ -88,6 +88,35 @@ public:
                          const std::string& type_name,
                          std::uint64_t size);
     bool record_as3_reference(std::uint64_t owner_id, std::uint64_t dependent_id);
+    bool record_as3_reference_ex(std::uint64_t owner_id,
+                                 std::uint64_t dependent_id,
+                                 aneprof::As3ReferenceKind kind,
+                                 const std::string& label = std::string(),
+                                 bool inferred = false);
+    bool record_as3_root(std::uint64_t object_id,
+                         aneprof::As3RootKind kind,
+                         const std::string& label = std::string(),
+                         bool inferred = false);
+    bool record_as3_payload(std::uint64_t owner_id,
+                            std::uint64_t payload_id,
+                            aneprof::As3PayloadKind kind,
+                            std::uint64_t logical_bytes,
+                            std::uint64_t native_bytes,
+                            const std::string& label = std::string(),
+                            bool inferred = false);
+    bool record_frame(std::uint64_t frame_index,
+                      std::uint64_t duration_ns,
+                      std::uint32_t allocation_count,
+                      std::uint64_t allocation_bytes,
+                      const std::string& label = std::string());
+    bool record_gc_cycle(std::uint64_t gc_id,
+                         aneprof::GcCycleKind kind,
+                         std::uint64_t before_live_count,
+                         std::uint64_t before_live_bytes,
+                         std::uint64_t after_live_count,
+                         std::uint64_t after_live_bytes,
+                         const std::string& label = std::string(),
+                         std::uint16_t flags = 0);
 
     State state() const noexcept { return state_.load(std::memory_order_acquire); }
     Status status() const;
@@ -106,7 +135,8 @@ private:
                             const void* payload,
                             std::uint32_t size,
                             std::uint64_t timestamp_ns,
-                            std::uint32_t thread_id);
+                            std::uint32_t thread_id,
+                            std::uint16_t flags = 0);
     bool write_snapshot_events(const std::string& label, bool include_live_entries);
     void snapshot_thread_main();
 

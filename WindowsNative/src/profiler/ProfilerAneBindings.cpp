@@ -207,8 +207,25 @@ FREObject profiler_marker(FREContext, void*, std::uint32_t argc, FREObject* argv
 
 FREObject profiler_request_gc(FREContext ctx, void*, std::uint32_t, FREObject*) {
     std::lock_guard<std::mutex> g(g_mu);
+    DeepProfilerController::Status before{};
+    if (g_ctrl) before = g_ctrl->status();
     WindowsAirRuntime* runtime = ensure_air_runtime();
-    return make_bool(runtime != nullptr && runtime->requestNativeGc(ctx));
+    const bool ok = runtime != nullptr && runtime->requestNativeGc(ctx);
+    if (g_ctrl) {
+        const DeepProfilerController::Status after = g_ctrl->status();
+        const std::uint64_t gc_id = runtime ? runtime->nativeGcRequestCount() : 0;
+        std::uint16_t flags = aneprof::EventFlagRequested;
+        if (!ok) flags |= aneprof::EventFlagAfterUnknown;
+        g_ctrl->record_gc_cycle(gc_id,
+                                aneprof::GcCycleKind::NativeRequested,
+                                before.live_allocations,
+                                before.live_bytes,
+                                after.live_allocations,
+                                after.live_bytes,
+                                ok ? "native-gc-requested" : "native-gc-request-failed",
+                                flags);
+    }
+    return make_bool(ok);
 }
 
 FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {

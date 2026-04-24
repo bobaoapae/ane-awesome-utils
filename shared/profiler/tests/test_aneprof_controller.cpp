@@ -138,6 +138,104 @@ TEST("controller writes AS3 reference payloads") {
     std::filesystem::remove(path);
 }
 
+TEST("controller writes extended AS3 graph payloads") {
+    const std::string path = tmp_path("ane_deep_profiler_as3_extended.aneprof");
+    DeepProfilerController cc;
+    DeepProfilerController::Config cfg;
+    cfg.output_path = path;
+    cfg.header_json = R"({"format":"aneprof","test":"as3-extended"})";
+    cfg.memory_enabled = true;
+    EXPECT(cc.start(cfg));
+    EXPECT(cc.record_as3_reference_ex(0x1000u,
+                                      0x2000u,
+                                      ap::As3ReferenceKind::EventListener,
+                                      "click",
+                                      true));
+    EXPECT(cc.record_as3_root(0x1000u, ap::As3RootKind::Stage, "stage", false));
+    EXPECT(cc.record_as3_payload(0x2000u,
+                                 0x3000u,
+                                 ap::As3PayloadKind::BitmapData,
+                                 4096,
+                                 8192,
+                                 "bitmap",
+                                 false));
+    EXPECT(cc.record_frame(7, 20'000'000, 3, 12288, "enterFrame"));
+    EXPECT(cc.record_gc_cycle(1,
+                              ap::GcCycleKind::NativeRequested,
+                              5,
+                              1024,
+                              4,
+                              768,
+                              "native-gc",
+                              ap::EventFlagRequested));
+    EXPECT(cc.stop());
+
+    const auto bytes = read_all(path);
+    ap::FileHeader header{};
+    EXPECT(ap::parse_header_bytes(bytes.data(), &header));
+    std::size_t off = sizeof(ap::FileHeader) + header.header_json_len;
+    const std::size_t end = bytes.size() - sizeof(ap::FileFooter);
+    bool found_ref_ex = false;
+    bool found_root = false;
+    bool found_payload = false;
+    bool found_frame = false;
+    bool found_gc = false;
+    while (off < end) {
+        ap::EventHeader eh{};
+        EXPECT(ap::parse_event_header_bytes(bytes.data() + off, &eh));
+        off += sizeof(ap::EventHeader);
+        if (eh.type == static_cast<std::uint16_t>(ap::EventType::As3ReferenceEx)) {
+            ap::As3ReferenceExEvent payload{};
+            EXPECT(eh.payload_size >= sizeof(payload));
+            EXPECT_EQ(eh.flags, static_cast<std::uint16_t>(ap::EventFlagInferred));
+            std::memcpy(&payload, bytes.data() + off, sizeof(payload));
+            EXPECT_EQ(payload.owner_id, static_cast<std::uint64_t>(0x1000u));
+            EXPECT_EQ(payload.dependent_id, static_cast<std::uint64_t>(0x2000u));
+            EXPECT_EQ(payload.kind, static_cast<std::uint16_t>(ap::As3ReferenceKind::EventListener));
+            EXPECT_EQ(payload.label_len, 5u);
+            found_ref_ex = true;
+        } else if (eh.type == static_cast<std::uint16_t>(ap::EventType::As3Root)) {
+            ap::As3RootEvent payload{};
+            EXPECT(eh.payload_size >= sizeof(payload));
+            std::memcpy(&payload, bytes.data() + off, sizeof(payload));
+            EXPECT_EQ(payload.object_id, static_cast<std::uint64_t>(0x1000u));
+            EXPECT_EQ(payload.kind, static_cast<std::uint16_t>(ap::As3RootKind::Stage));
+            found_root = true;
+        } else if (eh.type == static_cast<std::uint16_t>(ap::EventType::As3Payload)) {
+            ap::As3PayloadEvent payload{};
+            EXPECT(eh.payload_size >= sizeof(payload));
+            std::memcpy(&payload, bytes.data() + off, sizeof(payload));
+            EXPECT_EQ(payload.owner_id, static_cast<std::uint64_t>(0x2000u));
+            EXPECT_EQ(payload.native_bytes, static_cast<std::uint64_t>(8192));
+            EXPECT_EQ(payload.kind, static_cast<std::uint16_t>(ap::As3PayloadKind::BitmapData));
+            found_payload = true;
+        } else if (eh.type == static_cast<std::uint16_t>(ap::EventType::Frame)) {
+            ap::FrameEvent payload{};
+            EXPECT_EQ(eh.payload_size, static_cast<std::uint32_t>(sizeof(payload) + 10));
+            std::memcpy(&payload, bytes.data() + off, sizeof(payload));
+            EXPECT_EQ(payload.frame_index, static_cast<std::uint64_t>(7));
+            EXPECT_EQ(payload.allocation_count, 3u);
+            found_frame = true;
+        } else if (eh.type == static_cast<std::uint16_t>(ap::EventType::GcCycle)) {
+            ap::GcCycleEvent payload{};
+            EXPECT(eh.payload_size >= sizeof(payload));
+            EXPECT_EQ(eh.flags, static_cast<std::uint16_t>(ap::EventFlagRequested));
+            std::memcpy(&payload, bytes.data() + off, sizeof(payload));
+            EXPECT_EQ(payload.gc_id, static_cast<std::uint64_t>(1));
+            EXPECT_EQ(payload.before_live_count, static_cast<std::uint64_t>(5));
+            EXPECT_EQ(payload.after_live_count, static_cast<std::uint64_t>(4));
+            found_gc = true;
+        }
+        off += eh.payload_size;
+    }
+    EXPECT(found_ref_ex);
+    EXPECT(found_root);
+    EXPECT(found_payload);
+    EXPECT(found_frame);
+    EXPECT(found_gc);
+    std::filesystem::remove(path);
+}
+
 TEST("periodic snapshots add events while recording") {
     const std::string path = tmp_path("ane_deep_profiler_periodic.aneprof");
     DeepProfilerController cc;

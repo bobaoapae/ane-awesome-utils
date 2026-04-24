@@ -38,6 +38,11 @@ EVENT_TYPES = {
     12: "as3_alloc",
     13: "as3_free",
     14: "as3_reference",
+    15: "as3_reference_ex",
+    16: "as3_root",
+    17: "as3_payload",
+    18: "frame",
+    19: "gc_cycle",
 }
 
 

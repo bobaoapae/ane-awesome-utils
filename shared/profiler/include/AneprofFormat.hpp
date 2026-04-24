@@ -33,6 +33,57 @@ enum class EventType : std::uint16_t {
     As3Alloc      = 12,
     As3Free       = 13,
     As3Reference  = 14,
+    As3ReferenceEx = 15,
+    As3Root       = 16,
+    As3Payload    = 17,
+    Frame         = 18,
+    GcCycle       = 19,
+};
+
+enum class As3ReferenceKind : std::uint16_t {
+    Unknown       = 0,
+    Slot          = 1,
+    Array         = 2,
+    Dictionary    = 3,
+    DisplayChild  = 4,
+    EventListener = 5,
+    TimerCallback = 6,
+    StaticField   = 7,
+    NativePayload = 8,
+};
+
+enum class As3RootKind : std::uint16_t {
+    Unknown         = 0,
+    Stage           = 1,
+    DisplayList     = 2,
+    Static          = 3,
+    Timer           = 4,
+    EventDispatcher = 5,
+    Loader          = 6,
+    Native          = 7,
+};
+
+enum class As3PayloadKind : std::uint16_t {
+    Unknown    = 0,
+    BitmapData = 1,
+    ByteArray  = 2,
+    Texture    = 3,
+    Vector     = 4,
+    NativePeer = 5,
+};
+
+enum class GcCycleKind : std::uint16_t {
+    Unknown         = 0,
+    NativeRequested = 1,
+    NativeObserved  = 2,
+    Runtime         = 3,
+};
+
+enum EventFlags : std::uint16_t {
+    EventFlagInferred = 1u << 0,
+    EventFlagRequested = 1u << 1,
+    EventFlagBeforeUnknown = 1u << 2,
+    EventFlagAfterUnknown = 1u << 3,
 };
 
 #pragma pack(push, 1)
@@ -112,6 +163,50 @@ struct As3ReferenceEvent {
     std::uint64_t owner_id;
     std::uint64_t dependent_id;
 };
+
+struct As3ReferenceExEvent {
+    std::uint64_t owner_id;
+    std::uint64_t dependent_id;
+    std::uint16_t kind;
+    std::uint16_t reserved;
+    std::uint32_t label_len;
+};
+
+struct As3RootEvent {
+    std::uint64_t object_id;
+    std::uint16_t kind;
+    std::uint16_t reserved;
+    std::uint32_t label_len;
+};
+
+struct As3PayloadEvent {
+    std::uint64_t owner_id;
+    std::uint64_t payload_id;
+    std::uint64_t logical_bytes;
+    std::uint64_t native_bytes;
+    std::uint16_t kind;
+    std::uint16_t reserved;
+    std::uint32_t label_len;
+};
+
+struct FrameEvent {
+    std::uint64_t frame_index;
+    std::uint64_t duration_ns;
+    std::uint64_t allocation_bytes;
+    std::uint32_t allocation_count;
+    std::uint32_t label_len;
+};
+
+struct GcCycleEvent {
+    std::uint64_t gc_id;
+    std::uint64_t before_live_bytes;
+    std::uint64_t after_live_bytes;
+    std::uint64_t before_live_count;
+    std::uint64_t after_live_count;
+    std::uint16_t kind;
+    std::uint16_t reserved;
+    std::uint32_t label_len;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(FileHeader) == 24, "FileHeader size drift");
@@ -119,6 +214,11 @@ static_assert(sizeof(EventHeader) == 24, "EventHeader size drift");
 static_assert(sizeof(FileFooter) == 72, "FileFooter size drift");
 static_assert(sizeof(As3ObjectEvent) == 24, "As3ObjectEvent size drift");
 static_assert(sizeof(As3ReferenceEvent) == 16, "As3ReferenceEvent size drift");
+static_assert(sizeof(As3ReferenceExEvent) == 24, "As3ReferenceExEvent size drift");
+static_assert(sizeof(As3RootEvent) == 16, "As3RootEvent size drift");
+static_assert(sizeof(As3PayloadEvent) == 40, "As3PayloadEvent size drift");
+static_assert(sizeof(FrameEvent) == 32, "FrameEvent size drift");
+static_assert(sizeof(GcCycleEvent) == 48, "GcCycleEvent size drift");
 
 inline std::array<std::uint8_t, sizeof(FileHeader)>
 make_header_bytes(std::uint32_t header_json_len, std::uint64_t started_utc) {
@@ -188,7 +288,7 @@ inline bool parse_event_header_bytes(const void* src, EventHeader* out) noexcept
     if (src == nullptr || out == nullptr) return false;
     std::memcpy(out, src, sizeof(EventHeader));
     return out->type >= static_cast<std::uint16_t>(EventType::Start) &&
-           out->type <= static_cast<std::uint16_t>(EventType::As3Reference);
+           out->type <= static_cast<std::uint16_t>(EventType::GcCycle);
 }
 
 inline bool parse_footer_bytes(const void* src, FileFooter* out) noexcept {

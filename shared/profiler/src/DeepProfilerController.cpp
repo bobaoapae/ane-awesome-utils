@@ -21,6 +21,16 @@ bool write_pod(std::ofstream& out, const T& value) {
     out.write(reinterpret_cast<const char*>(&value), static_cast<std::streamsize>(sizeof(T)));
     return static_cast<bool>(out);
 }
+
+template <typename T>
+std::vector<std::uint8_t> fixed_with_label_payload(const T& fixed, const std::string& label) {
+    std::vector<std::uint8_t> payload(sizeof(T) + label.size());
+    std::memcpy(payload.data(), &fixed, sizeof(T));
+    if (!label.empty()) {
+        std::memcpy(payload.data() + sizeof(T), label.data(), label.size());
+    }
+    return payload;
+}
 } // namespace
 
 DeepProfilerController::DeepProfilerController() = default;
@@ -425,6 +435,123 @@ bool DeepProfilerController::record_as3_reference(std::uint64_t owner_id,
     return write_event(aneprof::EventType::As3Reference, &payload, sizeof(payload));
 }
 
+bool DeepProfilerController::record_as3_reference_ex(std::uint64_t owner_id,
+                                                     std::uint64_t dependent_id,
+                                                     aneprof::As3ReferenceKind kind,
+                                                     const std::string& label,
+                                                     bool inferred) {
+    if (state_.load(std::memory_order_acquire) != State::Recording) return false;
+    if (owner_id == 0 || dependent_id == 0 || owner_id == dependent_id) return true;
+
+    aneprof::As3ReferenceExEvent fixed{};
+    fixed.owner_id = owner_id;
+    fixed.dependent_id = dependent_id;
+    fixed.kind = static_cast<std::uint16_t>(kind);
+    fixed.label_len = static_cast<std::uint32_t>(label.size());
+    auto payload = fixed_with_label_payload(fixed, label);
+    const std::uint16_t flags = inferred ? aneprof::EventFlagInferred : 0;
+    return write_event_locked(aneprof::EventType::As3ReferenceEx,
+                              payload.data(),
+                              static_cast<std::uint32_t>(payload.size()),
+                              now_ns(),
+                              thread_id(),
+                              flags);
+}
+
+bool DeepProfilerController::record_as3_root(std::uint64_t object_id,
+                                             aneprof::As3RootKind kind,
+                                             const std::string& label,
+                                             bool inferred) {
+    if (state_.load(std::memory_order_acquire) != State::Recording) return false;
+    if (object_id == 0) return true;
+
+    aneprof::As3RootEvent fixed{};
+    fixed.object_id = object_id;
+    fixed.kind = static_cast<std::uint16_t>(kind);
+    fixed.label_len = static_cast<std::uint32_t>(label.size());
+    auto payload = fixed_with_label_payload(fixed, label);
+    const std::uint16_t flags = inferred ? aneprof::EventFlagInferred : 0;
+    return write_event_locked(aneprof::EventType::As3Root,
+                              payload.data(),
+                              static_cast<std::uint32_t>(payload.size()),
+                              now_ns(),
+                              thread_id(),
+                              flags);
+}
+
+bool DeepProfilerController::record_as3_payload(std::uint64_t owner_id,
+                                                std::uint64_t payload_id,
+                                                aneprof::As3PayloadKind kind,
+                                                std::uint64_t logical_bytes,
+                                                std::uint64_t native_bytes,
+                                                const std::string& label,
+                                                bool inferred) {
+    if (state_.load(std::memory_order_acquire) != State::Recording) return false;
+    if (owner_id == 0 && payload_id == 0) return true;
+
+    aneprof::As3PayloadEvent fixed{};
+    fixed.owner_id = owner_id;
+    fixed.payload_id = payload_id;
+    fixed.logical_bytes = logical_bytes;
+    fixed.native_bytes = native_bytes;
+    fixed.kind = static_cast<std::uint16_t>(kind);
+    fixed.label_len = static_cast<std::uint32_t>(label.size());
+    auto payload = fixed_with_label_payload(fixed, label);
+    const std::uint16_t flags = inferred ? aneprof::EventFlagInferred : 0;
+    return write_event_locked(aneprof::EventType::As3Payload,
+                              payload.data(),
+                              static_cast<std::uint32_t>(payload.size()),
+                              now_ns(),
+                              thread_id(),
+                              flags);
+}
+
+bool DeepProfilerController::record_frame(std::uint64_t frame_index,
+                                          std::uint64_t duration_ns,
+                                          std::uint32_t allocation_count,
+                                          std::uint64_t allocation_bytes,
+                                          const std::string& label) {
+    if (state_.load(std::memory_order_acquire) != State::Recording) return false;
+
+    aneprof::FrameEvent fixed{};
+    fixed.frame_index = frame_index;
+    fixed.duration_ns = duration_ns;
+    fixed.allocation_bytes = allocation_bytes;
+    fixed.allocation_count = allocation_count;
+    fixed.label_len = static_cast<std::uint32_t>(label.size());
+    auto payload = fixed_with_label_payload(fixed, label);
+    return write_event(aneprof::EventType::Frame,
+                       payload.data(),
+                       static_cast<std::uint32_t>(payload.size()));
+}
+
+bool DeepProfilerController::record_gc_cycle(std::uint64_t gc_id,
+                                             aneprof::GcCycleKind kind,
+                                             std::uint64_t before_live_count,
+                                             std::uint64_t before_live_bytes,
+                                             std::uint64_t after_live_count,
+                                             std::uint64_t after_live_bytes,
+                                             const std::string& label,
+                                             std::uint16_t flags) {
+    if (state_.load(std::memory_order_acquire) != State::Recording) return false;
+
+    aneprof::GcCycleEvent fixed{};
+    fixed.gc_id = gc_id;
+    fixed.before_live_bytes = before_live_bytes;
+    fixed.after_live_bytes = after_live_bytes;
+    fixed.before_live_count = before_live_count;
+    fixed.after_live_count = after_live_count;
+    fixed.kind = static_cast<std::uint16_t>(kind);
+    fixed.label_len = static_cast<std::uint32_t>(label.size());
+    auto payload = fixed_with_label_payload(fixed, label);
+    return write_event_locked(aneprof::EventType::GcCycle,
+                              payload.data(),
+                              static_cast<std::uint32_t>(payload.size()),
+                              now_ns(),
+                              thread_id(),
+                              flags);
+}
+
 DeepProfilerController::Status DeepProfilerController::status() const {
     Status s{};
     s.state = state_.load(std::memory_order_acquire);
@@ -464,7 +591,8 @@ bool DeepProfilerController::write_event_locked(aneprof::EventType type,
                                                 const void* payload,
                                                 std::uint32_t size,
                                                 std::uint64_t timestamp_ns,
-                                                std::uint32_t tid) {
+                                                std::uint32_t tid,
+                                                std::uint16_t flags) {
     if (state_.load(std::memory_order_acquire) == State::Idle) {
         dropped_.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -479,7 +607,7 @@ bool DeepProfilerController::write_event_locked(aneprof::EventType type,
         return false;
     }
 
-    const auto header = aneprof::make_event_header_bytes(type, size, timestamp_ns, tid);
+    const auto header = aneprof::make_event_header_bytes(type, size, timestamp_ns, tid, flags);
     file_.write(reinterpret_cast<const char*>(header.data()),
                 static_cast<std::streamsize>(header.size()));
     if (size != 0) {

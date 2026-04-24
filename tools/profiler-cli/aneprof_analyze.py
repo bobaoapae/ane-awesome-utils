@@ -13,7 +13,7 @@ import html
 import json
 import struct
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +40,65 @@ EVENT_TYPES = {
     12: "as3_alloc",
     13: "as3_free",
     14: "as3_reference",
+    15: "as3_reference_ex",
+    16: "as3_root",
+    17: "as3_payload",
+    18: "frame",
+    19: "gc_cycle",
 }
+
+EVENT_FLAG_INFERRED = 1 << 0
+EVENT_FLAG_REQUESTED = 1 << 1
+EVENT_FLAG_BEFORE_UNKNOWN = 1 << 2
+EVENT_FLAG_AFTER_UNKNOWN = 1 << 3
+
+AS3_REFERENCE_KINDS = {
+    0: "unknown",
+    1: "slot",
+    2: "array",
+    3: "dictionary",
+    4: "display_child",
+    5: "event_listener",
+    6: "timer_callback",
+    7: "static_field",
+    8: "native_payload",
+}
+
+AS3_ROOT_KINDS = {
+    0: "unknown",
+    1: "stage",
+    2: "display_list",
+    3: "static",
+    4: "timer",
+    5: "event_dispatcher",
+    6: "loader",
+    7: "native",
+}
+
+AS3_PAYLOAD_KINDS = {
+    0: "unknown",
+    1: "bitmap_data",
+    2: "byte_array",
+    3: "texture",
+    4: "vector",
+    5: "native_peer",
+}
+
+GC_CYCLE_KINDS = {
+    0: "unknown",
+    1: "native_requested",
+    2: "native_observed",
+    3: "runtime",
+}
+
+PSEUDO_PAYLOAD_TYPES = {
+    ".mem.bitmap.data": "bitmap_data",
+    "flash.display::BitmapData": "bitmap_data",
+    "flash.utils::ByteArray": "byte_array",
+}
+
+DOMINATOR_EXACT_NODE_LIMIT = 800
+DOMINATOR_EXACT_EDGE_LIMIT = 12000
 
 
 def parse_header(raw: bytes) -> tuple[int, dict[str, Any]]:
@@ -107,6 +165,106 @@ def parse_as3_reference_payload(payload: bytes) -> tuple[int, int]:
     if len(payload) < 16:
         raise ValueError("truncated AS3 reference payload")
     return struct.unpack_from("<QQ", payload, 0)
+
+
+def payload_label(payload: bytes, offset: int, label_len: int, what: str) -> str:
+    end = offset + label_len
+    if label_len < 0 or end > len(payload):
+        raise ValueError(f"{what} label exceeds payload size")
+    return payload[offset:end].decode("utf-8", "replace")
+
+
+def parse_as3_reference_ex_payload(payload: bytes, flags: int) -> dict[str, Any]:
+    if len(payload) < 24:
+        raise ValueError("truncated AS3 reference-ex payload")
+    owner_id, dependent_id, kind_id, _reserved, label_len = struct.unpack_from("<QQHHI", payload, 0)
+    return {
+        "owner_id": owner_id,
+        "dependent_id": dependent_id,
+        "kind": AS3_REFERENCE_KINDS.get(kind_id, f"kind#{kind_id}"),
+        "kind_id": kind_id,
+        "label": payload_label(payload, 24, label_len, "AS3 reference-ex"),
+        "inferred": bool(flags & EVENT_FLAG_INFERRED),
+    }
+
+
+def parse_as3_root_payload(payload: bytes, flags: int) -> dict[str, Any]:
+    if len(payload) < 16:
+        raise ValueError("truncated AS3 root payload")
+    object_id, kind_id, _reserved, label_len = struct.unpack_from("<QHHI", payload, 0)
+    return {
+        "object_id": object_id,
+        "kind": AS3_ROOT_KINDS.get(kind_id, f"kind#{kind_id}"),
+        "kind_id": kind_id,
+        "label": payload_label(payload, 16, label_len, "AS3 root"),
+        "inferred": bool(flags & EVENT_FLAG_INFERRED),
+    }
+
+
+def parse_as3_payload_payload(payload: bytes, flags: int) -> dict[str, Any]:
+    if len(payload) < 40:
+        raise ValueError("truncated AS3 payload payload")
+    owner_id, payload_id, logical_bytes, native_bytes, kind_id, _reserved, label_len = struct.unpack_from(
+        "<QQQQHHI", payload, 0
+    )
+    return {
+        "owner_id": owner_id,
+        "payload_id": payload_id,
+        "logical_bytes": logical_bytes,
+        "native_bytes": native_bytes,
+        "known_bytes": native_bytes or logical_bytes,
+        "bytes_unknown": logical_bytes == 0 and native_bytes == 0,
+        "kind": AS3_PAYLOAD_KINDS.get(kind_id, f"kind#{kind_id}"),
+        "kind_id": kind_id,
+        "label": payload_label(payload, 40, label_len, "AS3 payload"),
+        "inferred": bool(flags & EVENT_FLAG_INFERRED),
+    }
+
+
+def parse_frame_payload(payload: bytes) -> dict[str, Any]:
+    if len(payload) < 32:
+        raise ValueError("truncated frame payload")
+    frame_index, duration_ns, allocation_bytes, allocation_count, label_len = struct.unpack_from(
+        "<QQQII", payload, 0
+    )
+    return {
+        "frame_index": frame_index,
+        "duration_ns": duration_ns,
+        "duration_ms": fmt_ms(duration_ns),
+        "allocation_bytes": allocation_bytes,
+        "allocation_count": allocation_count,
+        "label": payload_label(payload, 32, label_len, "frame"),
+    }
+
+
+def parse_gc_cycle_payload(payload: bytes, flags: int) -> dict[str, Any]:
+    if len(payload) < 48:
+        raise ValueError("truncated GC cycle payload")
+    (
+        gc_id,
+        before_live_bytes,
+        after_live_bytes,
+        before_live_count,
+        after_live_count,
+        kind_id,
+        _reserved,
+        label_len,
+    ) = struct.unpack_from("<QQQQQHHI", payload, 0)
+    return {
+        "gc_id": gc_id,
+        "kind": GC_CYCLE_KINDS.get(kind_id, f"kind#{kind_id}"),
+        "kind_id": kind_id,
+        "label": payload_label(payload, 48, label_len, "GC cycle"),
+        "before_live_allocations": before_live_count,
+        "before_live_bytes": before_live_bytes,
+        "after_live_allocations": after_live_count,
+        "after_live_bytes": after_live_bytes,
+        "live_allocations_delta": after_live_count - before_live_count,
+        "live_bytes_delta": after_live_bytes - before_live_bytes,
+        "requested": bool(flags & EVENT_FLAG_REQUESTED),
+        "before_unknown": bool(flags & EVENT_FLAG_BEFORE_UNKNOWN),
+        "after_unknown": bool(flags & EVENT_FLAG_AFTER_UNKNOWN),
+    }
 
 
 def parse_marker_payload(payload: bytes) -> tuple[str, str]:
@@ -387,6 +545,606 @@ def build_leak_suspects(sites: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(suspects, key=lambda item: (item["confidence"] == "high", item["bytes"], item["count"]), reverse=True)
 
 
+def payload_known_bytes(payload: dict[str, Any]) -> int:
+    return int(payload.get("known_bytes") or payload.get("native_bytes") or payload.get("logical_bytes") or 0)
+
+
+def pseudo_payload_kind(type_name: str) -> str | None:
+    if type_name in PSEUDO_PAYLOAD_TYPES:
+        return PSEUDO_PAYLOAD_TYPES[type_name]
+    lowered = type_name.lower()
+    if "bitmapdata" in lowered or ".mem.bitmap" in lowered:
+        return "bitmap_data"
+    if "bytearray" in lowered:
+        return "byte_array"
+    return None
+
+
+def infer_root_kind(meta: dict[str, Any]) -> tuple[str, str]:
+    type_name = str(meta.get("type_name") or "")
+    stack = str(meta.get("stack") or "")
+    text = f"{type_name}\n{stack}".lower()
+    if "stage" in text:
+        return "stage", "inferred from AS3 type/stack"
+    if "timer" in text or "settimeout" in text or "setintervaltimer" in text:
+        return "timer", "inferred from timer-related AS3 type/stack"
+    if "addeventlistener" in text or "eventdispatcher" in text or "listener" in text:
+        return "event_dispatcher", "inferred from listener-related AS3 type/stack"
+    if "static" in text or "cache" in text:
+        return "static", "inferred from static/cache-related AS3 type/stack"
+    if "loader" in text:
+        return "loader", "inferred from loader-related AS3 type/stack"
+    return "unknown", "inferred root because no retaining owner was sampled"
+
+
+def describe_object(sample_id: int, meta: dict[str, Any], payload_bytes: int = 0) -> dict[str, Any]:
+    return {
+        "object_id": sample_id,
+        "type_name": meta.get("type_name", "<unknown>"),
+        "site": allocation_site(str(meta.get("stack") or "")),
+        "shallow_bytes": int(meta.get("size", 0) or 0),
+        "payload_bytes": payload_bytes,
+        "bytes": int(meta.get("size", 0) or 0) + payload_bytes,
+    }
+
+
+def build_payload_by_owner(
+    as3_objects: dict[int, dict[str, Any]],
+    payload_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[int, dict[str, Any]] = {}
+    for payload in payload_records:
+        owner_id = int(payload.get("owner_id") or 0)
+        payload_id = int(payload.get("payload_id") or 0)
+        owner = as3_objects.get(owner_id)
+        payload_object = as3_objects.get(payload_id)
+        if owner_id and owner and owner.get("freed_timestamp_ns") is not None:
+            continue
+        if not owner_id and payload_object and payload_object.get("freed_timestamp_ns") is not None:
+            continue
+        group = grouped.setdefault(
+            owner_id,
+            {
+                "owner_id": owner_id or None,
+                "owner_type": owner.get("type_name", "<unknown>") if owner else "<unowned>",
+                "owner_site": allocation_site(str(owner.get("stack") or "")) if owner else "<unowned>",
+                "owner_live": bool(owner and owner.get("freed_timestamp_ns") is None),
+                "payload_count": 0,
+                "logical_bytes": 0,
+                "native_bytes": 0,
+                "known_bytes": 0,
+                "unknown_payloads": 0,
+                "payloads": [],
+            },
+        )
+        logical = int(payload.get("logical_bytes") or 0)
+        native = int(payload.get("native_bytes") or 0)
+        known = payload_known_bytes(payload)
+        group["payload_count"] += 1
+        group["logical_bytes"] += logical
+        group["native_bytes"] += native
+        group["known_bytes"] += known
+        if payload.get("bytes_unknown"):
+            group["unknown_payloads"] += 1
+        if len(group["payloads"]) < 20:
+            group["payloads"].append(
+                {
+                    "payload_id": payload.get("payload_id") or None,
+                    "kind": payload.get("kind", "unknown"),
+                    "label": payload.get("label", ""),
+                    "logical_bytes": logical,
+                    "native_bytes": native,
+                    "known_bytes": known,
+                    "inferred": bool(payload.get("inferred")),
+                    "bytes_unknown": bool(payload.get("bytes_unknown")),
+                }
+            )
+    return sorted(
+        grouped.values(),
+        key=lambda item: (item["known_bytes"], item["payload_count"]),
+        reverse=True,
+    )
+
+
+def build_retention_analysis(
+    as3_live: dict[int, dict[str, Any]],
+    reference_infos: list[dict[str, Any]],
+    explicit_roots: list[dict[str, Any]],
+    payload_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    live_ids = set(as3_live)
+    payload_bytes_by_owner: dict[int, int] = defaultdict(int)
+    for payload in payload_records:
+        owner_id = int(payload.get("owner_id") or 0)
+        if owner_id in live_ids:
+            payload_bytes_by_owner[owner_id] += payload_known_bytes(payload)
+
+    children: dict[int, list[int]] = defaultdict(list)
+    parents: dict[int, list[int]] = defaultdict(list)
+    edge_details: dict[tuple[int, int], dict[str, Any]] = {}
+    for ref in reference_infos:
+        owner_id = int(ref.get("owner_id") or 0)
+        dependent_id = int(ref.get("dependent_id") or 0)
+        if owner_id not in live_ids or dependent_id not in live_ids or owner_id == dependent_id:
+            continue
+        key = (owner_id, dependent_id)
+        if key not in edge_details:
+            children[owner_id].append(dependent_id)
+            parents[dependent_id].append(owner_id)
+            edge_details[key] = {
+                "kind": ref.get("kind", "unknown"),
+                "label": ref.get("label", ""),
+                "inferred": bool(ref.get("inferred")),
+            }
+        elif edge_details[key]["kind"] == "unknown" and ref.get("kind") != "unknown":
+            edge_details[key].update(
+                {
+                    "kind": ref.get("kind", "unknown"),
+                    "label": ref.get("label", ""),
+                    "inferred": bool(ref.get("inferred")),
+                }
+            )
+
+    roots: list[dict[str, Any]] = []
+    seen_root_keys: set[tuple[int, str, str]] = set()
+    for root in explicit_roots:
+        object_id = int(root.get("object_id") or 0)
+        if object_id not in live_ids:
+            continue
+        key = (object_id, root.get("kind", "unknown"), root.get("label", ""))
+        if key in seen_root_keys:
+            continue
+        seen_root_keys.add(key)
+        roots.append(
+            {
+                "object_id": object_id,
+                "kind": root.get("kind", "unknown"),
+                "label": root.get("label", ""),
+                "inferred": bool(root.get("inferred")),
+                "reason": "runtime root event",
+            }
+        )
+
+    rooted_ids = {root["object_id"] for root in roots}
+    for object_id, meta in as3_live.items():
+        if object_id in rooted_ids:
+            continue
+        if parents.get(object_id):
+            continue
+        kind, reason = infer_root_kind(meta)
+        roots.append(
+            {
+                "object_id": object_id,
+                "kind": kind,
+                "label": "",
+                "inferred": True,
+                "reason": reason,
+            }
+        )
+        rooted_ids.add(object_id)
+
+    def bfs_from_roots(root_entries: list[dict[str, Any]]) -> tuple[dict[int, tuple[int | None, dict[str, Any]]], dict[int, dict[str, Any]]]:
+        parent: dict[int, tuple[int | None, dict[str, Any]]] = {}
+        root_for: dict[int, dict[str, Any]] = {}
+        q: deque[int] = deque()
+        for root in root_entries:
+            object_id = root["object_id"]
+            if object_id in parent:
+                continue
+            parent[object_id] = (None, {"kind": "root", "label": root.get("label", ""), "inferred": root.get("inferred", False)})
+            root_for[object_id] = root
+            q.append(object_id)
+        while q:
+            owner_id = q.popleft()
+            for dependent_id in children.get(owner_id, []):
+                if dependent_id in parent:
+                    continue
+                edge = edge_details.get((owner_id, dependent_id), {"kind": "unknown", "label": "", "inferred": False})
+                parent[dependent_id] = (owner_id, edge)
+                root_for[dependent_id] = root_for[owner_id]
+                q.append(dependent_id)
+        return parent, root_for
+
+    parent, root_for = bfs_from_roots(roots)
+    for object_id, meta in as3_live.items():
+        if object_id in parent:
+            continue
+        kind, reason = infer_root_kind(meta)
+        root = {
+            "object_id": object_id,
+            "kind": kind,
+            "label": "",
+            "inferred": True,
+            "reason": f"{reason}; cycle or disconnected component",
+        }
+        roots.append(root)
+        parent, root_for = bfs_from_roots(roots)
+
+    node_weight = {
+        object_id: int(meta.get("size", 0) or 0) + payload_bytes_by_owner.get(object_id, 0)
+        for object_id, meta in as3_live.items()
+    }
+
+    def path_for(object_id: int) -> list[dict[str, Any]]:
+        if object_id not in parent:
+            return []
+        chain: list[tuple[int, dict[str, Any]]] = []
+        cur = object_id
+        while cur in parent and len(chain) < 64:
+            prev, edge = parent[cur]
+            chain.append((cur, edge))
+            if prev is None:
+                break
+            cur = prev
+        chain.reverse()
+        root = root_for.get(object_id, {})
+        out: list[dict[str, Any]] = [
+            {
+                "kind": "root",
+                "root_kind": root.get("kind", "unknown"),
+                "label": root.get("label", ""),
+                "object_id": root.get("object_id"),
+                "inferred": bool(root.get("inferred", True)),
+                "reason": root.get("reason", ""),
+            }
+        ]
+        for idx, (node_id, edge) in enumerate(chain):
+            meta = as3_live[node_id]
+            item = describe_object(node_id, meta, payload_bytes_by_owner.get(node_id, 0))
+            item["edge_kind"] = "root" if idx == 0 else edge.get("kind", "unknown")
+            item["edge_label"] = "" if idx == 0 else edge.get("label", "")
+            item["edge_inferred"] = bool(edge.get("inferred", False))
+            out.append(item)
+        return out
+
+    exact = (
+        len(as3_live) <= DOMINATOR_EXACT_NODE_LIMIT
+        and sum(len(v) for v in children.values()) <= DOMINATOR_EXACT_EDGE_LIMIT
+    )
+    retained_by_node: dict[int, list[int]] = defaultdict(lambda: [0, 0])
+    dominator_mode = "exact"
+    partial = False
+    if exact:
+        root_node = -1
+        reachable = set(parent)
+        preds: dict[int, set[int]] = {node: set(parents.get(node, [])) for node in reachable}
+        for root in roots:
+            object_id = root["object_id"]
+            if object_id in reachable:
+                preds.setdefault(object_id, set()).add(root_node)
+        all_reachable = set(reachable)
+        dom: dict[int, set[int]] = {root_node: {root_node}}
+        for node in all_reachable:
+            dom[node] = set(all_reachable) | {root_node}
+        changed = True
+        while changed:
+            changed = False
+            for node in all_reachable:
+                pred_sets = [dom[p] for p in preds.get(node, set()) if p in dom]
+                if not pred_sets:
+                    new_dom = {node}
+                else:
+                    common = set(pred_sets[0])
+                    for pred_dom in pred_sets[1:]:
+                        common &= pred_dom
+                    new_dom = common | {node}
+                if new_dom != dom[node]:
+                    dom[node] = new_dom
+                    changed = True
+        for node in all_reachable:
+            retained_by_node[node][0] += 1
+            retained_by_node[node][1] += node_weight.get(node, 0)
+        for node in all_reachable:
+            for retained_node in all_reachable:
+                if node == retained_node:
+                    continue
+                if node in dom.get(retained_node, set()):
+                    retained_by_node[node][0] += 1
+                    retained_by_node[node][1] += node_weight.get(retained_node, 0)
+    else:
+        dominator_mode = "fan_in_unique_approximation"
+        partial = True
+        incoming_count = {node: len(parents.get(node, [])) for node in as3_live}
+        for node in as3_live:
+            seen = {node}
+            stack = list(children.get(node, []))
+            retained_by_node[node][0] = 1
+            retained_by_node[node][1] = node_weight.get(node, 0)
+            while stack and len(seen) < 5000:
+                dep = stack.pop()
+                if dep in seen or incoming_count.get(dep, 0) > 1:
+                    continue
+                seen.add(dep)
+                retained_by_node[node][0] += 1
+                retained_by_node[node][1] += node_weight.get(dep, 0)
+                stack.extend(children.get(dep, []))
+
+    retained_by_owner: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    retained_by_type: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    retained_by_site: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    top_objects: list[dict[str, Any]] = []
+    for object_id, vals in retained_by_node.items():
+        meta = as3_live.get(object_id)
+        if not meta:
+            continue
+        site = allocation_site(str(meta.get("stack") or ""))
+        type_name = str(meta.get("type_name") or "<unknown>")
+        retained_by_owner[(type_name, site)][0] += vals[0]
+        retained_by_owner[(type_name, site)][1] += vals[1]
+        retained_by_type[type_name][0] += 1
+        retained_by_type[type_name][1] += vals[1]
+        retained_by_site[site][0] += 1
+        retained_by_site[site][1] += vals[1]
+        row = describe_object(object_id, meta, payload_bytes_by_owner.get(object_id, 0))
+        row["retained_count"] = vals[0]
+        row["retained_bytes"] = vals[1]
+        top_objects.append(row)
+    top_objects.sort(key=lambda item: (item["retained_bytes"], item["bytes"]), reverse=True)
+
+    retainer_paths = []
+    for row in sorted(
+        (describe_object(object_id, meta, payload_bytes_by_owner.get(object_id, 0)) for object_id, meta in as3_live.items()),
+        key=lambda item: (item["bytes"], item["object_id"]),
+        reverse=True,
+    )[:200]:
+        retained_vals = retained_by_node.get(row["object_id"], [0, row["bytes"]])
+        retainer_paths.append(
+            {
+                **row,
+                "retained_count": retained_vals[0],
+                "retained_bytes": retained_vals[1],
+                "path": path_for(row["object_id"]),
+            }
+        )
+
+    root_rows = []
+    for root in roots:
+        meta = as3_live.get(root["object_id"])
+        if not meta:
+            continue
+        root_rows.append({**root, **describe_object(root["object_id"], meta, payload_bytes_by_owner.get(root["object_id"], 0))})
+
+    return {
+        "roots": root_rows,
+        "retainer_paths": retainer_paths,
+        "retained_by_owner": retained_by_owner,
+        "retained_by_type": retained_by_type,
+        "payload_bytes_by_owner": dict(payload_bytes_by_owner),
+        "dominator_summary": {
+            "mode": dominator_mode,
+            "partial": partial,
+            "live_as3_nodes": len(as3_live),
+            "live_as3_edges": sum(len(v) for v in children.values()),
+            "root_count": len(root_rows),
+            "top_objects": top_objects[:50],
+            "top_types": [
+                {"type_name": key, "count": vals[0], "retained_bytes": vals[1]}
+                for key, vals in sorted(retained_by_type.items(), key=lambda kv: kv[1][1], reverse=True)[:50]
+            ],
+            "top_sites": [
+                {"site": key, "count": vals[0], "retained_bytes": vals[1]}
+                for key, vals in sorted(retained_by_site.items(), key=lambda kv: kv[1][1], reverse=True)[:50]
+            ],
+        },
+    }
+
+
+def build_lifetime_summary(
+    as3_objects: dict[int, dict[str, Any]],
+    as3_live: dict[int, dict[str, Any]],
+    first_event_ns: int | None,
+    last_event_ns: int | None,
+    snapshots: list[dict[str, Any]],
+    gc_cycles: list[dict[str, Any]],
+    payload_bytes_by_owner: dict[int, int],
+) -> dict[str, Any]:
+    end_ns = last_event_ns or first_event_ns or 0
+    lifetimes: list[int] = []
+    live_ages: list[int] = []
+    freed_count = 0
+    freed_bytes = 0
+    live_bytes = 0
+    top_survivors: list[dict[str, Any]] = []
+    for sample_id, meta in as3_objects.items():
+        alloc_ns = int(meta.get("timestamp_ns") or first_event_ns or 0)
+        freed_ns = meta.get("freed_timestamp_ns")
+        size = int(meta.get("size", 0) or 0) + payload_bytes_by_owner.get(sample_id, 0)
+        if freed_ns is not None:
+            freed_count += 1
+            freed_bytes += size
+            lifetimes.append(max(0, int(freed_ns) - alloc_ns))
+            continue
+        age_ns = max(0, end_ns - alloc_ns)
+        live_ages.append(age_ns)
+        live_bytes += size
+        row = describe_object(sample_id, meta, payload_bytes_by_owner.get(sample_id, 0))
+        row["age_ms"] = fmt_ms(age_ns)
+        row["snapshot_survivals"] = int(meta.get("snapshot_survival_count", 0) or 0)
+        row["survived_snapshots"] = meta.get("survived_snapshots", [])[:20]
+        top_survivors.append(row)
+    top_survivors.sort(key=lambda item: (item["snapshot_survivals"], item["age_ms"], item["bytes"]), reverse=True)
+    return {
+        "as3_allocated_objects": len(as3_objects),
+        "as3_freed_objects": freed_count,
+        "as3_live_objects": len(as3_live),
+        "as3_freed_bytes": freed_bytes,
+        "as3_live_bytes": live_bytes,
+        "avg_freed_lifetime_ms": fmt_ms(sum(lifetimes) / len(lifetimes)) if lifetimes else 0,
+        "avg_live_age_ms": fmt_ms(sum(live_ages) / len(live_ages)) if live_ages else 0,
+        "max_live_age_ms": fmt_ms(max(live_ages)) if live_ages else 0,
+        "snapshot_count": len(snapshots),
+        "gc_cycle_count": len(gc_cycles),
+        "top_survivors": top_survivors[:50],
+    }
+
+
+def build_marker_allocations(
+    marker_spans: list[dict[str, Any]],
+    allocation_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for span in marker_spans:
+        count = 0
+        bytes_total = 0
+        by_kind: Counter[str] = Counter()
+        for event in allocation_events:
+            ts = event["timestamp_ns"]
+            if span["start_ns"] <= ts <= span["end_ns"]:
+                count += int(event.get("count", 1))
+                bytes_total += int(event.get("bytes", 0) or 0)
+                by_kind[str(event.get("kind", "unknown"))] += int(event.get("count", 1))
+        rows.append(
+            {
+                "name": span["name"],
+                "duration_ms": span["duration_ms"],
+                "allocation_count": count,
+                "allocation_bytes": bytes_total,
+                "allocations_by_kind": dict(by_kind),
+                "start_value": span.get("start_value", ""),
+                "end_value": span.get("end_value", ""),
+            }
+        )
+    rows.sort(key=lambda item: (item["allocation_bytes"], item["allocation_count"], item["duration_ms"]), reverse=True)
+    return rows
+
+
+def build_allocation_rate(
+    allocation_events: list[dict[str, Any]],
+    marker_spans: list[dict[str, Any]],
+    frames: list[dict[str, Any]],
+    first_event_ns: int | None,
+    last_event_ns: int | None,
+) -> dict[str, Any]:
+    duration_ns = max(0, (last_event_ns or 0) - (first_event_ns or 0))
+    duration_sec = duration_ns / 1_000_000_000.0 if duration_ns else 0.0
+    total_count = sum(int(event.get("count", 1)) for event in allocation_events)
+    total_bytes = sum(int(event.get("bytes", 0) or 0) for event in allocation_events)
+    bucket_by_second: dict[int, list[int]] = defaultdict(lambda: [0, 0])
+    base = first_event_ns or 0
+    for event in allocation_events:
+        sec = int(max(0, event["timestamp_ns"] - base) // 1_000_000_000)
+        bucket_by_second[sec][0] += int(event.get("count", 1))
+        bucket_by_second[sec][1] += int(event.get("bytes", 0) or 0)
+    return {
+        "total_allocations": total_count,
+        "total_bytes": total_bytes,
+        "allocations_per_sec": round(total_count / duration_sec, 2) if duration_sec else 0,
+        "bytes_per_sec": round(total_bytes / duration_sec, 2) if duration_sec else 0,
+        "by_second": [
+            {"second": sec, "allocation_count": vals[0], "allocation_bytes": vals[1]}
+            for sec, vals in sorted(bucket_by_second.items())
+        ],
+        "by_marker": build_marker_allocations(marker_spans, allocation_events),
+        "by_frame": [
+            {
+                "frame_index": frame.get("frame_index"),
+                "label": frame.get("label", ""),
+                "duration_ms": frame.get("duration_ms", 0),
+                "allocation_count": frame.get("allocation_count", 0),
+                "allocation_bytes": frame.get("allocation_bytes", 0),
+            }
+            for frame in sorted(frames, key=lambda item: (item.get("allocation_bytes", 0), item.get("duration_ms", 0)), reverse=True)
+        ],
+    }
+
+
+def build_frame_summary(frames: list[dict[str, Any]], allocation_rate: dict[str, Any]) -> dict[str, Any]:
+    slow_frames = [
+        frame for frame in frames
+        if frame.get("duration_ms", 0) >= 16.667
+    ]
+    return {
+        "frame_count": len(frames),
+        "slow_frame_count": len(slow_frames),
+        "max_frame_ms": max((frame.get("duration_ms", 0) for frame in frames), default=0),
+        "avg_frame_ms": round(sum(frame.get("duration_ms", 0) for frame in frames) / len(frames), 3) if frames else 0,
+        "slow_frames": sorted(slow_frames, key=lambda item: item.get("duration_ms", 0), reverse=True)[:50],
+        "allocation_bursts": allocation_rate.get("by_frame", [])[:50],
+    }
+
+
+def build_gc_summary(
+    gc_cycles: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    as3_snapshot_summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    post_gc = snapshot_by_label(as3_snapshot_summaries, "post-native-gc-pre-stop")
+    native_post = snapshot_by_label(snapshots, "post-native-gc-pre-stop")
+    return {
+        "gc_cycles": gc_cycles,
+        "requested_count": sum(1 for item in gc_cycles if item.get("requested")),
+        "observed_count": sum(1 for item in gc_cycles if item.get("kind") in {"native_observed", "runtime"}),
+        "post_native_gc_as3": post_gc,
+        "post_native_gc_native": native_post,
+        "survivor_as3_live_allocations": post_gc.get("as3_live_allocations", 0) if post_gc else 0,
+        "survivor_as3_live_bytes": post_gc.get("as3_live_bytes", 0) if post_gc else 0,
+    }
+
+
+def build_performance_suspects(
+    top_method_timing: list[dict[str, Any]],
+    marker_allocations: list[dict[str, Any]],
+    frame_summary: dict[str, Any],
+    top_as3_allocation_sites: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    suspects: list[dict[str, Any]] = []
+    for method in top_method_timing[:20]:
+        if method.get("inclusive_ms", 0) >= 10 or method.get("avg_inclusive_ms", 0) >= 1:
+            suspects.append(
+                {
+                    "kind": "method",
+                    "name": method["name"],
+                    "score": method.get("inclusive_ms", 0),
+                    "reasons": ["high inclusive AS3 method time"],
+                    "details": method,
+                }
+            )
+    for marker in marker_allocations[:20]:
+        reasons = []
+        if marker.get("duration_ms", 0) >= 16.667:
+            reasons.append("slow marker span")
+        if marker.get("allocation_bytes", 0) >= 64 * 1024:
+            reasons.append("large allocation burst inside marker span")
+        if reasons:
+            suspects.append(
+                {
+                    "kind": "marker",
+                    "name": marker["name"],
+                    "score": marker.get("allocation_bytes", 0) + marker.get("duration_ms", 0),
+                    "reasons": reasons,
+                    "details": marker,
+                }
+            )
+    for frame in frame_summary.get("slow_frames", [])[:20]:
+        suspects.append(
+            {
+                "kind": "frame",
+                "name": str(frame.get("frame_index")),
+                "score": frame.get("duration_ms", 0),
+                "reasons": ["frame duration exceeded 16.667ms"],
+                "details": frame,
+            }
+        )
+    for site in top_as3_allocation_sites[:20]:
+        reasons = []
+        if site.get("bytes", 0) >= 64 * 1024:
+            reasons.append("large live AS3 allocation site")
+        if site.get("count", 0) >= 100:
+            reasons.append("many live AS3 objects from one site")
+        if reasons:
+            suspects.append(
+                {
+                    "kind": "allocation_site",
+                    "name": site["site"],
+                    "score": site.get("bytes", 0),
+                    "reasons": reasons,
+                    "details": site,
+                }
+            )
+    suspects.sort(key=lambda item: item.get("score", 0), reverse=True)
+    return suspects[:100]
+
+
 def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     raw = path.read_bytes()
     if len(raw) < HEADER_SIZE + FOOTER_SIZE:
@@ -405,7 +1163,14 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     as3_live_by_type: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     as3_live_by_stack: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     as3_live_by_site: dict[str, dict[str, Any]] = {}
+    as3_objects: dict[int, dict[str, Any]] = {}
     as3_references: list[tuple[int, int]] = []
+    as3_reference_ex: list[dict[str, Any]] = []
+    as3_roots: list[dict[str, Any]] = []
+    as3_payloads: list[dict[str, Any]] = []
+    frames: list[dict[str, Any]] = []
+    gc_cycles: list[dict[str, Any]] = []
+    allocation_events: list[dict[str, Any]] = []
     as3_unknown_frees = 0
     unknown_frees = 0
     unknown_reallocs = 0
@@ -428,7 +1193,7 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     while off < event_end:
         if off + EVENT_HEADER_SIZE > event_end:
             raise ValueError(f"truncated event header at offset {off}")
-        typ, _flags, payload_size, timestamp_ns, thread_id, _reserved = struct.unpack_from(
+        typ, flags, payload_size, timestamp_ns, thread_id, _reserved = struct.unpack_from(
             "<HHIQII", raw, off
         )
         off += EVENT_HEADER_SIZE
@@ -505,6 +1270,16 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
             }
             alloc_by_method[method_id][0] += 1
             alloc_by_method[method_id][1] += size
+            allocation_events.append(
+                {
+                    "timestamp_ns": timestamp_ns,
+                    "thread_id": thread_id,
+                    "kind": "native",
+                    "bytes": size,
+                    "count": 1,
+                    "method_id": method_id,
+                }
+            )
         elif name == "free":
             if len(payload) < 40:
                 raise ValueError("truncated free payload")
@@ -529,6 +1304,16 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
                 }
                 alloc_by_method[method_id][0] += 1
                 alloc_by_method[method_id][1] += size
+                allocation_events.append(
+                    {
+                        "timestamp_ns": timestamp_ns,
+                        "thread_id": thread_id,
+                        "kind": "native_realloc",
+                        "bytes": size,
+                        "count": 1,
+                        "method_id": method_id,
+                    }
+                )
         elif name == "snapshot":
             if len(payload) >= 56:
                 values = struct.unpack_from("<QQQQQQII", payload, 0)
@@ -550,6 +1335,11 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
                 }
                 snapshots.append(snap)
                 current_snapshot = snap
+                for meta in as3_live.values():
+                    meta["snapshot_survival_count"] = int(meta.get("snapshot_survival_count", 0) or 0) + 1
+                    survived = meta.setdefault("survived_snapshots", [])
+                    if len(survived) < 50:
+                        survived.append(label or "<unnamed>")
                 as3_summary = summarize_as3_live_state(as3_live)
                 as3_summary.update(
                     {
@@ -573,22 +1363,106 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
                 sampled[1] += size
         elif name == "as3_alloc":
             sample_id, size, type_name, stack = parse_as3_payload(payload)
-            as3_live[sample_id] = {
+            meta = {
                 "size": size,
                 "type_name": type_name or "<unknown>",
                 "stack": stack,
                 "timestamp_ns": timestamp_ns,
                 "thread_id": thread_id,
+                "freed_timestamp_ns": None,
+                "snapshot_survival_count": 0,
+                "survived_snapshots": [],
             }
+            as3_live[sample_id] = meta
+            as3_objects[sample_id] = meta.copy()
             as3_alloc_by_type[type_name or "<unknown>"][0] += 1
             as3_alloc_by_type[type_name or "<unknown>"][1] += size
+            allocation_events.append(
+                {
+                    "timestamp_ns": timestamp_ns,
+                    "thread_id": thread_id,
+                    "kind": "as3",
+                    "bytes": size,
+                    "count": 1,
+                    "type_name": type_name or "<unknown>",
+                    "site": allocation_site(stack),
+                }
+            )
+            payload_kind = pseudo_payload_kind(type_name or "")
+            if payload_kind:
+                as3_payloads.append(
+                    {
+                        "owner_id": 0,
+                        "payload_id": sample_id,
+                        "logical_bytes": size,
+                        "native_bytes": size,
+                        "known_bytes": size,
+                        "bytes_unknown": size == 0,
+                        "kind": payload_kind,
+                        "kind_id": 0,
+                        "label": type_name or payload_kind,
+                        "inferred": True,
+                        "timestamp_ns": timestamp_ns,
+                        "thread_id": thread_id,
+                    }
+                )
         elif name == "as3_free":
             sample_id, _size, _type_name, _stack = parse_as3_payload(payload)
-            if as3_live.pop(sample_id, None) is None:
+            meta = as3_live.pop(sample_id, None)
+            if meta is None:
                 as3_unknown_frees += 1
+            else:
+                meta["freed_timestamp_ns"] = timestamp_ns
+                meta["freed_thread_id"] = thread_id
+                if sample_id in as3_objects:
+                    as3_objects[sample_id].update(
+                        {
+                            "freed_timestamp_ns": timestamp_ns,
+                            "freed_thread_id": thread_id,
+                            "snapshot_survival_count": meta.get("snapshot_survival_count", 0),
+                            "survived_snapshots": meta.get("survived_snapshots", []),
+                        }
+                    )
         elif name == "as3_reference":
             owner_id, dependent_id = parse_as3_reference_payload(payload)
             as3_references.append((owner_id, dependent_id))
+        elif name == "as3_reference_ex":
+            parsed = parse_as3_reference_ex_payload(payload, flags)
+            parsed["timestamp_ns"] = timestamp_ns
+            parsed["thread_id"] = thread_id
+            as3_reference_ex.append(parsed)
+        elif name == "as3_root":
+            parsed = parse_as3_root_payload(payload, flags)
+            parsed["timestamp_ns"] = timestamp_ns
+            parsed["thread_id"] = thread_id
+            as3_roots.append(parsed)
+        elif name == "as3_payload":
+            parsed = parse_as3_payload_payload(payload, flags)
+            parsed["timestamp_ns"] = timestamp_ns
+            parsed["thread_id"] = thread_id
+            as3_payloads.append(parsed)
+            known = payload_known_bytes(parsed)
+            if known:
+                allocation_events.append(
+                    {
+                        "timestamp_ns": timestamp_ns,
+                        "thread_id": thread_id,
+                        "kind": f"payload:{parsed['kind']}",
+                        "bytes": known,
+                        "count": 1,
+                        "owner_id": parsed.get("owner_id") or 0,
+                    }
+                )
+        elif name == "frame":
+            parsed = parse_frame_payload(payload)
+            parsed["timestamp_ns"] = timestamp_ns
+            parsed["thread_id"] = thread_id
+            frames.append(parsed)
+        elif name == "gc_cycle":
+            parsed = parse_gc_cycle_payload(payload, flags)
+            parsed["timestamp_ns"] = timestamp_ns
+            parsed["thread_id"] = thread_id
+            gc_cycles.append(parsed)
 
     if off != event_end:
         raise ValueError("event walk ended at wrong offset")
@@ -630,6 +1504,18 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     for sample_id, meta in as3_live.items():
         sample_site[sample_id] = allocation_site(meta["stack"])
 
+    reference_infos: list[dict[str, Any]] = [
+        {
+            "owner_id": owner_id,
+            "dependent_id": dependent_id,
+            "kind": "unknown",
+            "label": "",
+            "inferred": False,
+        }
+        for owner_id, dependent_id in as3_references
+    ]
+    reference_infos.extend(as3_reference_ex)
+
     live_reference_edges: list[tuple[int, int]] = []
     live_edges_by_owner: dict[int, list[int]] = defaultdict(list)
     retainer_hints_by_site: dict[str, dict[str, Any]] = {}
@@ -638,7 +1524,10 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     reference_owner_edges: dict[tuple[str, str], int] = defaultdict(int)
     direct_retained_by_owner: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     as3_reference_edges_with_live_owner = 0
-    for owner_id, dependent_id in as3_references:
+    seen_live_edges: set[tuple[int, int]] = set()
+    for ref in reference_infos:
+        owner_id = int(ref.get("owner_id") or 0)
+        dependent_id = int(ref.get("dependent_id") or 0)
         owner = as3_live.get(owner_id)
         dependent = as3_live.get(dependent_id)
         if owner:
@@ -658,6 +1547,9 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
 
         if not owner or not dependent:
             continue
+        if (owner_id, dependent_id) in seen_live_edges:
+            continue
+        seen_live_edges.add((owner_id, dependent_id))
         live_reference_edges.append((owner_id, dependent_id))
         live_edges_by_owner[owner_id].append(dependent_id)
         dependent_site = sample_site.get(dependent_id, "<no stack>")
@@ -723,6 +1615,13 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
                     }
                 )
 
+    for sample_id, meta in as3_live.items():
+        as3_objects[sample_id] = meta.copy()
+
+    retention = build_retention_analysis(as3_live, reference_infos, as3_roots, as3_payloads)
+    retained_by_owner = retention["retained_by_owner"]
+    payload_bytes_by_owner = retention["payload_bytes_by_owner"]
+
     capture_duration_ns = max(0, (last_event_ns or 0) - (first_event_ns or 0))
     capture_duration_sec = capture_duration_ns / 1_000_000_000.0 if capture_duration_ns else 0.0
     event_region_bytes = event_count * EVENT_HEADER_SIZE + payload_bytes
@@ -754,14 +1653,22 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
     for (owner_type, _owner_site), vals in retained_by_owner.items():
         retained_by_type[owner_type][0] += vals[0]
         retained_by_type[owner_type][1] += vals[1]
+    payload_by_type: dict[str, int] = defaultdict(int)
+    for owner_id, payload_size in payload_bytes_by_owner.items():
+        owner = as3_live.get(owner_id)
+        if owner:
+            payload_by_type[owner["type_name"]] += payload_size
     top_as3_memory_by_type = []
     for type_name, vals in as3_live_by_type.items():
         retained_vals = retained_by_type.get(type_name, [0, 0])
+        payload_size = payload_by_type.get(type_name, 0)
         top_as3_memory_by_type.append(
             {
                 "type_name": type_name,
                 "count": vals[0],
                 "shallow_bytes": vals[1],
+                "payload_bytes": payload_size,
+                "owned_bytes": vals[1] + payload_size,
                 "runtime_dependent_refs": dependent_refs_by_type.get(type_name, 0),
                 "retained_count": retained_vals[0],
                 "retained_bytes": retained_vals[1],
@@ -828,6 +1735,31 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
 
     as3_snap_diffs = as3_snapshot_diffs(as3_snapshot_summaries)
     post_native_gc_as3 = snapshot_by_label(as3_snapshot_summaries, "post-native-gc-pre-stop")
+    payload_by_owner = build_payload_by_owner(as3_objects, as3_payloads)
+    allocation_rate = build_allocation_rate(
+        allocation_events,
+        marker_spans,
+        frames,
+        first_event_ns,
+        last_event_ns,
+    )
+    frame_summary = build_frame_summary(frames, allocation_rate)
+    gc_summary = build_gc_summary(gc_cycles, snapshots, as3_snapshot_summaries)
+    lifetime_summary = build_lifetime_summary(
+        as3_objects,
+        as3_live,
+        first_event_ns,
+        last_event_ns,
+        snapshots,
+        gc_cycles,
+        payload_bytes_by_owner,
+    )
+    performance_suspects = build_performance_suspects(
+        top_method_timing,
+        allocation_rate["by_marker"],
+        frame_summary,
+        top_as3_allocation_sites,
+    )
 
     result: dict[str, Any] = {
         "path": str(path),
@@ -862,8 +1794,13 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
         "as3_live_bytes": as3_live_bytes,
         "as3_unknown_frees": as3_unknown_frees,
         "as3_reference_edges": len(as3_references),
+        "as3_reference_ex_edges": len(as3_reference_ex),
         "as3_reference_edges_with_live_owner": as3_reference_edges_with_live_owner,
         "live_as3_reference_edges": len(live_reference_edges),
+        "as3_roots": retention["roots"],
+        "retainer_paths": retention["retainer_paths"],
+        "payload_by_owner": payload_by_owner,
+        "as3_payloads": as3_payloads[:500],
         "top_as3_reference_edges": [
             {"owner_type": key[0], "dependent_type": key[1], "count": count}
             for key, count in sorted(reference_type_edges.items(), key=lambda kv: kv[1], reverse=True)
@@ -878,12 +1815,21 @@ def analyze(path: Path) -> tuple[dict[str, Any], list[str]]:
             "live_as3_nodes": len(as3_live),
             "live_as3_edges": len(live_reference_edges),
             "transitive_retained_available": bool(retained_by_owner),
+            "mode": retention["dominator_summary"]["mode"],
+            "partial": retention["dominator_summary"]["partial"],
         },
+        "dominator_summary": retention["dominator_summary"],
         "snapshots": snapshots,
         "snapshot_diffs": snapshot_diffs(snapshots),
         "as3_snapshot_summaries": as3_snapshot_summaries,
         "as3_snapshot_diffs": as3_snap_diffs,
         "post_native_gc_as3": post_native_gc_as3,
+        "gc_summary": gc_summary,
+        "lifetime_summary": lifetime_summary,
+        "allocation_rate": allocation_rate,
+        "frames": frames,
+        "frame_summary": frame_summary,
+        "performance_suspects": performance_suspects,
         "top_live_methods": [
             {"method_id": mid, "count": vals[0], "bytes": vals[1]}
             for mid, vals in sorted(live_by_method.items(), key=lambda kv: kv[1][1], reverse=True)
@@ -942,6 +1888,10 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
     print(f"  AS3 ref edges   : {result['live_as3_reference_edges']:>6} live AS3-AS3 / "
           f"{result['as3_reference_edges_with_live_owner']:>6} live-owner / "
           f"{result['as3_reference_edges']:>6} total")
+    if result.get("as3_reference_ex_edges") or result.get("as3_roots") or result.get("payload_by_owner"):
+        print(f"  AS3 roots/payload: {len(result.get('as3_roots', [])):>6} roots / "
+              f"{len(result.get('payload_by_owner', [])):>6} payload owner(s) / "
+              f"{result.get('as3_reference_ex_edges', 0):>6} typed edges")
     overhead = result["overhead"]
     print(f"  event rate      : {overhead['events_per_sec']:>12.2f} events/s")
     print(f"  payload rate    : {overhead['payload_bytes_per_sec']:>12.2f} B/s")
@@ -1073,8 +2023,18 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
         for item in as3_memory:
             print(
                 f"  type={item['type_name']:<48} count={item['count']:<8} "
-                f"shallow={item['shallow_bytes']:<10} retained={item['retained_bytes']:<10} "
+                f"shallow={item['shallow_bytes']:<10} payload={item.get('payload_bytes', 0):<10} "
+                f"retained={item['retained_bytes']:<10} "
                 f"runtimeRefs={item['runtime_dependent_refs']}"
+            )
+
+    payload_owners = result.get("payload_by_owner", [])[:top]
+    if payload_owners:
+        print("\nTop AS3 payload owners:")
+        for item in payload_owners:
+            print(
+                f"  owner={item['owner_type']:<48} payloads={item['payload_count']:<6} "
+                f"bytes={item['known_bytes']:<10} site={item['owner_site']}"
             )
 
     as3_sites = result["top_as3_allocation_sites"][:top]
@@ -1123,6 +2083,26 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
                 f"  type={item['type_name']:<48} retainedCount={item['count']:<8} "
                 f"retainedBytes={item['bytes']:<10} site={item['site']}"
             )
+
+    retainer_paths = result.get("retainer_paths", [])[:top]
+    if retainer_paths:
+        print("\nRetainer paths:")
+        for item in retainer_paths:
+            path_text = " -> ".join(
+                node.get("root_kind", "root") if node.get("kind") == "root"
+                else node.get("type_name", "<unknown>")
+                for node in item.get("path", [])[:6]
+            )
+            print(
+                f"  type={item['type_name']:<40} bytes={item['bytes']:<10} path={path_text}"
+            )
+
+    perf = result.get("performance_suspects", [])[:top]
+    if perf:
+        print("\nPerformance suspects:")
+        for item in perf:
+            reasons = ", ".join(item.get("reasons", [])[:2])
+            print(f"  [{item['kind']}] {item['name']} score={item.get('score', 0)} {reasons}")
 
     direct_retained = result["top_as3_direct_retained_owners"][:top]
     if direct_retained and not retained:
@@ -1342,7 +2322,11 @@ th{background:#eef3f7}.warn{color:#9a4b00}
                                     result["post_native_gc_as3"].get("top_types", []),
                                     ["type_name", "count", "bytes"], top))
         parts.append(html_table("Top AS3 Memory By Type", result["top_as3_memory_by_type"],
-                                ["type_name", "count", "shallow_bytes", "retained_bytes", "runtime_dependent_refs"], top))
+                                ["type_name", "count", "shallow_bytes", "payload_bytes", "retained_bytes", "runtime_dependent_refs"], top))
+        parts.append(html_table("Top AS3 Payload Owners", result.get("payload_by_owner", []),
+                                ["owner_type", "payload_count", "known_bytes", "owner_site"], top))
+        parts.append(html_table("Performance Suspects", result.get("performance_suspects", []),
+                                ["kind", "name", "score", "reasons"], top))
         parts.append(html_table("Top AS3 Allocation Sites", result["top_as3_allocation_sites"],
                                 ["site", "count", "bytes", "owned_dependent_refs"], top))
         parts.append(html_table("Top Method Timing", result["top_method_timing"],

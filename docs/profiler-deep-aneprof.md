@@ -49,9 +49,26 @@ It then stores fixed event headers plus typed payloads:
 - method table
 - AS3 alloc/free entries with runtime type name and AS3 stack
 - AS3 reference/dependent edges from the runtime memory sampler
+- optional AS3 typed references, roots and native payload ownership
+- optional frame summaries and requested/observed GC cycle summaries
 
 The footer uses `ANEPEND\0` and records event counts, payload bytes, dropped
 events, final live allocations and final live bytes.
+
+Event IDs are append-only. Current captures still use format version `1`; older
+files that stop at `as3_reference` remain valid, and readers must treat the
+new graph/payload/frame/GC events as optional enrichment.
+
+Append-only event IDs currently reserved by the `.aneprof` backend:
+
+| ID | Event | Required | Purpose |
+| ---: | --- | --- | --- |
+| 1-14 | existing base events | yes | start/stop, markers, snapshots, native allocations, AS3 alloc/free/reference |
+| 15 | `as3_reference_ex` | no | reference edge with edge kind, label and inferred flag |
+| 16 | `as3_root` | no | known or inferred AS3 root such as stage, static, timer, dispatcher or native |
+| 17 | `as3_payload` | no | native/logical payload bytes owned by an AS3 object |
+| 18 | `frame` | no | frame or interval duration plus allocation count/bytes |
+| 19 | `gc_cycle` | no | requested or observed GC cycle counters before/after collection |
 
 ## Probe Surface
 
@@ -94,6 +111,13 @@ from raw events. The JSON output includes:
 - `post_native_gc_as3` for objects still live after `profilerRequestGc()`
 - `top_as3_memory_by_type`, `top_as3_allocation_sites`,
   `top_as3_live_stacks`, reference-owner tables and leak suspects
+- `retainer_paths` with the shortest known path from a root to live AS3 objects
+- `dominator_summary`, exact for small graphs and marked partial for large
+  fan-in approximations
+- `payload_by_owner` for BitmapData/ByteArray/native payload bytes attached to
+  AS3 owners, plus inferred unowned pseudo-payloads such as `.mem.bitmap.data`
+- `lifetime_summary`, `allocation_rate`, `frame_summary`, `gc_summary` and
+  `performance_suspects`
 
 The inline detours are guarded by byte signatures from `Adobe AIR.dll`
 `51.1.3.10`, and the IAT patches verify the expected slot RVAs. Broad IAT
@@ -121,15 +145,37 @@ python tools\profiler-cli\aneprof_validate.py path\to\capture.aneprof
 python tools\profiler-cli\aneprof_analyze.py path\to\capture.aneprof --require-free-events
 ```
 
-The E2E harness runs scenarios A/B/C/E/L for both architectures:
+The E2E harness runs scenarios A/B/C/E/T/M/S/L for both architectures:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x64
 powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x86
 ```
 
+Current standard coverage is A/B/C/E/T/M/S/L. Scenario D is an optional
+kill-test and only runs with `-WithKillTest`.
+
 Scenario C validates timing + memory with real runtime allocation/free pairing.
 Scenario E simulates a hidden listener leak and validates AS3 type, stack,
-suspect and runtime dependent-ref reporting. Scenario L adds deterministic
-retained allocation records so the analyzer can assert that the leak path
-reports a larger final live set than the baseline.
+suspect and runtime dependent-ref reporting. Scenario T covers timer/closure
+retention, M covers explicit closure capture, S covers static display cache
+retention with BitmapData/ByteArray payloads, and L adds deterministic retained
+allocation records so the analyzer can assert that the leak path reports a
+larger final live set than the baseline.
+
+Validation commands used for the deep graph/payload analyzer change:
+
+```powershell
+python -m unittest discover tests\profiler-cli -v
+cmd /c shared\profiler\build.bat
+python build-all.py windows-native
+python build-all.py package
+powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x64 -SkipBuild -KeepOutputs
+powershell -ExecutionPolicy Bypass -File tests\profiler-e2e\run_test.ps1 -Arch x86 -SkipBuild -KeepOutputs
+```
+
+After packaging, verify the Windows DLL signatures with:
+
+```powershell
+Get-AuthenticodeSignature AneBuild\windows-32\AneAwesomeUtilsWindows.dll,AneBuild\windows-64\AneAwesomeUtilsWindows.dll,AneBuild\windows-32\AwesomeAneUtils.dll,AneBuild\windows-64\AwesomeAneUtils.dll
+```
