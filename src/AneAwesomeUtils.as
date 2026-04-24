@@ -830,6 +830,8 @@ public class AneAwesomeUtils {
     //   profilerGetStatus():            Object
     //       memoryLeakDiagnosticsReady is true only while memory + free/realloc
     //       hooks are installed for a live capture.
+    //       as3LeakDiagnosticsReady is false when AIR/Scout/flash.sampler already
+    //       owns the single IMemorySampler slot; native capture still continues.
     //
     // State enum: 0=Idle 1=Starting 2=Recording 3=Stopping 4=Error.
     // Windows x86/x64 are supported today. Android/Mac/iOS return false.

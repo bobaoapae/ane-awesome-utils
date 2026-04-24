@@ -171,9 +171,10 @@ FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv)
             return make_bool(false);
         }
         if (!g_as3_object_hook->install(g_ctrl.get())) {
-            g_memory_hook->uninstall();
-            g_ctrl->stop();
-            return make_bool(false);
+            // AS3 object sampling is useful but not required for a valid capture.
+            // AIR/Scout advanced telemetry or flash.sampler can already own the
+            // single IMemorySampler slot; keep the native allocation stream and
+            // expose the AS3 hook failure through profilerGetStatus().
         }
     }
     return make_bool(true);

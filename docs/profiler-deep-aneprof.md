@@ -136,6 +136,18 @@ both:
 - live AS3-to-AS3 reference edges when both sides are sampled AS3 objects;
 - live-owner dependent refs grouped by AS3 type and allocation site.
 
+The AS3 object hook needs exclusive access to AIR's single `IMemorySampler`
+slot. If the SWF/runtime already owns that slot, for example through
+`flash.sampler.startSampling()`, `setSamplerCallback()`, or Scout/advanced
+telemetry creating Adobe's `MemoryTelemetrySampler`, the `.aneprof` capture now
+continues in native-only memory mode instead of aborting. In that fallback,
+markers, snapshots and native alloc/free/realloc events are still recorded, but
+AS3 type/stack/reference fields are absent. Check `profilerGetStatus()`:
+`memoryLeakDiagnosticsReady=true` with `as3LeakDiagnosticsReady=false` means
+native memory capture is active but AS3 sampling was skipped. For full AS3
+type/stack leak diagnostics, run the test SWF without a competing sampler and,
+when possible, without `-advanced-telemetry=true`.
+
 ## Validation
 
 Use:
