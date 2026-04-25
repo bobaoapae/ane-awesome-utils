@@ -811,6 +811,7 @@ public class AneAwesomeUtils {
 
     // ------------------------------------------------------------------
     // Deep profiler capture — Windows-first .aneprof backend.
+    // Full usage guide: docs/profiler-usage.md
     //
     //   profilerStart(outputPath, options): Boolean
     //       Opens a native .aneprof event log. This path does not force
@@ -819,12 +820,25 @@ public class AneAwesomeUtils {
     //       options.timing                       default true
     //       options.memory                       default false
     //       options.render                       default false, D3D/DXGI render summaries
+    //       options.as3ObjectSampling           default true, native IMemorySampler AS3
+    //                                            alloc/free/reference callbacks
+    //       options.as3SamplerForwarding        default false, forwards sampler callbacks
+    //                                            to any sampler already installed
+    //       options.as3RealEdges                default true, master switch for
+    //                                            real display/event AS3 edge hooks
+    //       options.as3RealDisplayEdges         defaults to as3RealEdges
+    //       options.as3RealEventEdges           defaults to as3RealEdges
     //       options.snapshots                    default true
     //       options.frameEvents                  AS3 test bridge option;
     //                                            ignored by native start
     //       options.snapshotIntervalMs           default 0 (manual only)
     //       options.maxLiveAllocationsPerSnapshot default 4096
     //       options.headerJson                   optional full header JSON
+    //
+    //       There is no AS3 stack sampling option. Every AS3 allocation event
+    //       gets a non-empty stack payload. If AIR exposes no AS3 frame for a
+    //       specific allocation, the profiler writes an explicit native
+    //       <as3-stack-unavailable:...> fallback instead of a fake AS3 method.
     //
     //   profilerStop():                 Boolean
     //   profilerSnapshot(label=null):   Boolean
@@ -839,6 +853,10 @@ public class AneAwesomeUtils {
     //       installed directly or chained in front of AIR/Scout/flash.sampler.
     //       Chained/direct-slot diagnostics are exposed as as3ObjectHook* and
     //       as3Sampler* fields.
+    //       writerOverflow* fields report writer saturation handled by the
+    //       in-memory overflow path. dropped should remain 0 in valid runs.
+    //       as3ObjectStackUnavailableCalls counts honest native stack fallbacks,
+    //       not omitted stacks.
     //
     // State enum: 0=Idle 1=Starting 2=Recording 3=Stopping 4=Error.
     // Windows x86/x64 are supported today. Android/Mac/iOS return false.
@@ -860,6 +878,16 @@ public class AneAwesomeUtils {
                 ? Boolean(options.memory) : false;
         var render:Boolean = options != null && options.render !== undefined
                 ? Boolean(options.render) : false;
+        var as3ObjectSampling:Boolean = options != null && options.as3ObjectSampling !== undefined
+                ? Boolean(options.as3ObjectSampling) : true;
+        var as3SamplerForwarding:Boolean = options != null && options.as3SamplerForwarding !== undefined
+                ? Boolean(options.as3SamplerForwarding) : false;
+        var as3RealEdges:Boolean = options != null && options.as3RealEdges !== undefined
+                ? Boolean(options.as3RealEdges) : true;
+        var as3RealDisplayEdges:Boolean = options != null && options.as3RealDisplayEdges !== undefined
+                ? Boolean(options.as3RealDisplayEdges) : as3RealEdges;
+        var as3RealEventEdges:Boolean = options != null && options.as3RealEventEdges !== undefined
+                ? Boolean(options.as3RealEventEdges) : as3RealEdges;
         var snapshots:Boolean = options != null && options.snapshots !== undefined
                 ? Boolean(options.snapshots) : true;
         var snapshotIntervalMs:uint = options != null && options.snapshotIntervalMs !== undefined
@@ -869,7 +897,9 @@ public class AneAwesomeUtils {
         var headerJson:String = options != null && options.headerJson !== undefined
                 ? String(options.headerJson)
                 : buildProfilerHeaderJson(options, timing, memory, render, snapshots,
-                                          snapshotIntervalMs, maxLive);
+                                          snapshotIntervalMs, maxLive,
+                                          as3ObjectSampling, as3SamplerForwarding,
+                                          as3RealDisplayEdges, as3RealEventEdges);
 
         var ok:Boolean = _extContext.call("awesomeUtils_profilerStart",
                                           outputPath,
@@ -879,7 +909,11 @@ public class AneAwesomeUtils {
                                           snapshots,
                                           maxLive,
                                           snapshotIntervalMs,
-                                          render) as Boolean;
+                                          render,
+                                          as3ObjectSampling,
+                                          as3SamplerForwarding,
+                                          as3RealDisplayEdges,
+                                          as3RealEventEdges) as Boolean;
         if (!ok) return false;
         return true;
     }
@@ -966,7 +1000,11 @@ public class AneAwesomeUtils {
                                              render:Boolean,
                                              snapshots:Boolean,
                                              snapshotIntervalMs:uint,
-                                             maxLive:uint):String {
+                                             maxLive:uint,
+                                             as3ObjectSampling:Boolean,
+                                             as3SamplerForwarding:Boolean,
+                                             as3RealDisplayEdges:Boolean,
+                                             as3RealEventEdges:Boolean):String {
         var header:Object = {
             format: "aneprof",
             formatVersion: 1,
@@ -976,6 +1014,10 @@ public class AneAwesomeUtils {
             timing: timing,
             memory: memory,
             render: render,
+            as3ObjectSampling: as3ObjectSampling,
+            as3SamplerForwarding: as3SamplerForwarding,
+            as3RealDisplayEdges: as3RealDisplayEdges,
+            as3RealEventEdges: as3RealEventEdges,
             snapshots: snapshots,
             snapshotIntervalMs: snapshotIntervalMs,
             maxLiveAllocationsPerSnapshot: maxLive

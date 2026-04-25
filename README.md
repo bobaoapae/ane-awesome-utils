@@ -23,6 +23,7 @@ AneAwesomeUtils is an Adobe AIR Native Extension (ANE) that provides advanced ne
 | [Input Filtering (anti-cheat)](docs/platform-windows.md#input-filtering) | x | | | |
 | [Speed Hack Detection](docs/platform-windows.md#speed-hack-detection) | x | | | |
 | [Audio Safety Hook](docs/platform-windows.md#audio-safety-hook) | x | | | |
+| [Deep Profiler `.aneprof`](docs/profiler-usage.md) | x | | | |
 | [Battery Optimization](docs/platform-android.md#battery-optimization) | | x | | |
 | [Connection Configuration](docs/platform-android.md#connection-configuration) | | x | | |
 
@@ -63,6 +64,7 @@ See [Getting Started](docs/getting-started.md) for full installation and setup i
 - [Static DNS / Host Resolution](docs/dns.md) - Custom DNS mapping
 - [Utilities](docs/utilities.md) - Compression, file I/O, XML parsing, device ID, emulator detection
 - [Windows Features](docs/platform-windows.md) - Screen capture, input filtering, speed hack detection, audio hook
+- [Deep Profiler `.aneprof`](docs/profiler-usage.md) - Windows memory/performance profiler usage, AS3 API flags and CLI tools
 - [Android Features](docs/platform-android.md) - Battery optimization, connection config, network monitoring
 - [Logging](docs/logging.md) - Native file logging, crash detection, cross-ANE shared logging
 

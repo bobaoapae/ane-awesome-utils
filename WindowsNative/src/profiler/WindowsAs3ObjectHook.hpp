@@ -19,7 +19,10 @@ public:
     WindowsAs3ObjectHook() = default;
     ~WindowsAs3ObjectHook();
 
-    bool install(DeepProfilerController* controller);
+    bool install(DeepProfilerController* controller,
+                 bool install_display_edge_hooks = true,
+                 bool install_event_edge_hooks = true,
+                 bool forward_previous_sampler = false);
     void uninstall();
     bool installed() const noexcept { return installed_; }
 
@@ -32,6 +35,10 @@ public:
     std::uint64_t directSlotFailures() const;
     std::uint64_t forwardedCalls() const;
     std::uint64_t forwardFailures() const;
+    std::uint64_t stackCacheHits() const;
+    std::uint64_t stackCacheMisses() const;
+    std::uint64_t stackUnavailableCalls() const;
+    std::uint64_t stackNativeFallbackCalls() const;
     std::uint64_t realEdgeHookInstalls() const;
     std::uint64_t realEdgeHookFailures() const;
     std::uint64_t realDisplayChildEdges() const;

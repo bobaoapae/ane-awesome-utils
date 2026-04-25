@@ -50,22 +50,28 @@ inline int run_all() {
     int pass = 0, fail = 0;
     for (const auto& c : cases()) {
         std::fprintf(stdout, "RUN   %s\n", c.name.c_str());
+        std::fflush(stdout);
         try {
             c.fn();
             std::fprintf(stdout, "  OK  %s\n", c.name.c_str());
+            std::fflush(stdout);
             ++pass;
         } catch (const AssertionFailed& e) {
             std::fprintf(stdout, "FAIL  %s: %s\n", c.name.c_str(), e.what());
+            std::fflush(stdout);
             ++fail;
         } catch (const std::exception& e) {
             std::fprintf(stdout, "FAIL  %s: unexpected exception: %s\n", c.name.c_str(), e.what());
+            std::fflush(stdout);
             ++fail;
         } catch (...) {
             std::fprintf(stdout, "FAIL  %s: unknown exception\n", c.name.c_str());
+            std::fflush(stdout);
             ++fail;
         }
     }
     std::fprintf(stdout, "\n==== %d passed, %d failed ====\n", pass, fail);
+    std::fflush(stdout);
     return fail;
 }
 

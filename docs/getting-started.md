@@ -83,4 +83,5 @@ The ANE supports Windows, Android, macOS, and iOS. The `isSupported` property ch
 - [WebSocket](websocket.md) - Real-time binary communication
 - [Utilities](utilities.md) - Compression, file I/O, device ID
 - [Windows Features](platform-windows.md) - Windows-specific functionality
+- [Deep Profiler `.aneprof`](profiler-usage.md) - Windows memory/performance profiling
 - [Android Features](platform-android.md) - Android-specific functionality

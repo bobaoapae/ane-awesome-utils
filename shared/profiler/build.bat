@@ -23,5 +23,8 @@ if errorlevel 1 exit /b 1
 echo.
 echo Running tests:
 "%CMAKE%" --build . --target test
-"%NINJA%" test || ctest --output-on-failure
+if errorlevel 1 (
+    ctest --output-on-failure
+    exit /b 1
+)
 endlocal

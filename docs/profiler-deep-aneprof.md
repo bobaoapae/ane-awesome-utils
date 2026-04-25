@@ -6,6 +6,8 @@ Current profiler direction:
 - Windows x86 and x64 are supported on AIR SDK `51.1.3.10`.
 - Existing Scout/telemetry docs, scripts and RVA research remain in the repo as legacy analysis material.
 - The SDK DLLs should remain original; `fix_telemetry_mode_b` is not required by this backend.
+- For day-to-day capture commands, AS3 examples and CLI usage, start with
+  `docs/profiler-usage.md`.
 
 ## Public API
 
@@ -25,16 +27,28 @@ extension is `.aneprof`.
 native `needsCollection` flag. It replaces the old E2E reliance on `System.gc()`;
 see `docs/profiler-native-gc.md`.
 
-Supported options:
+Supported `profilerStart` options:
 
-- `timing:Boolean` default `true`
-- `memory:Boolean` default `false`
-- `render:Boolean` default `false`
-- `snapshots:Boolean` default `true`
-- `snapshotIntervalMs:uint` default `0`
-- `maxLiveAllocationsPerSnapshot:uint` default `4096`
-- `metadata:Object` copied into the file header JSON
-- `headerJson:String` full header JSON override
+| Option | Default | Notes |
+| --- | ---: | --- |
+| `timing:Boolean` | `true` | Markers, method enter/exit and timing summaries. |
+| `memory:Boolean` | `false` | Native memory hooks. AS3 object diagnostics require `memory=true`. |
+| `render:Boolean` | `false` | Optional D3D/DXGI render frame summaries. |
+| `snapshots:Boolean` | `true` | Initial/final/manual snapshots. |
+| `snapshotIntervalMs:uint` | `0` | `0` means manual snapshots only. |
+| `maxLiveAllocationsPerSnapshot:uint` | `4096` | Caps native `live_allocation` rows per snapshot. |
+| `metadata:Object` | none | Copied into the generated header JSON. |
+| `headerJson:String` | generated | Full header JSON override. |
+| `as3ObjectSampling:Boolean` | `true` | Native `IMemorySampler` AS3 alloc/free/reference callbacks. |
+| `as3SamplerForwarding:Boolean` | `false` | Forwards callbacks to a sampler that was already installed before the ANE proxy. |
+| `as3RealEdges:Boolean` | `true` | Master switch for factual display/listener edge hooks. |
+| `as3RealDisplayEdges:Boolean` | `as3RealEdges` | Factual display-list add/remove edges. |
+| `as3RealEventEdges:Boolean` | `as3RealEdges` | Factual non-weak listener/timer add/remove edges. |
+
+There is no stack sampling option. Every `as3_alloc` event has a non-empty
+stack payload. If AIR exposes no AS3 frame for an allocation, the profiler
+writes an explicit native fallback marker such as
+`#0 <as3-stack-unavailable:no-as3-frame>` instead of inventing an AS3 method.
 
 ## Event Model
 

@@ -14,6 +14,7 @@
 #include <array>
 #include <cstdint>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -61,6 +62,9 @@ public:
         std::uint64_t writer_queue_capacity = 0;
         std::uint64_t writer_events_written = 0;
         std::uint64_t writer_bytes_written = 0;
+        std::uint64_t writer_overflow_depth = 0;
+        std::uint64_t writer_overflow_peak = 0;
+        std::uint64_t writer_overflow_events = 0;
         bool timing_enabled = false;
         bool memory_enabled = false;
         bool render_enabled = false;
@@ -175,6 +179,7 @@ private:
     };
 
     struct PendingEvent {
+        std::uint64_t sequence = 0;
         std::uint32_t record_size = 0;
         std::uint32_t payload_size = 0;
         bool heap_backed = false;
@@ -218,6 +223,10 @@ private:
     bool write_snapshot_events(const std::string& label, bool include_live_entries);
     bool enqueue_event(PendingEvent&& event);
     bool dequeue_event(PendingEvent& event);
+    bool dequeue_next_event(PendingEvent& event);
+    bool peek_ring_event_sequence(std::uint64_t& sequence) const;
+    bool enqueue_overflow_event(PendingEvent&& event);
+    bool dequeue_overflow_event(PendingEvent& event, std::uint64_t before_sequence);
     bool prepare_event_for_write(PendingEvent& event);
     bool update_allocation_tracking(aneprof::EventType type,
                                     PendingWritePolicy policy,
@@ -245,9 +254,15 @@ private:
     std::condition_variable writer_cv_;
     std::unique_ptr<WriterQueueSlot[]> writer_queue_;
     std::thread writer_thread_;
+    std::mutex writer_overflow_mu_;
+    std::map<std::uint64_t, PendingEvent> writer_overflow_;
+    std::atomic<std::uint64_t> writer_event_sequence_{0};
     std::atomic<std::size_t> writer_enqueue_pos_{0};
     std::atomic<std::size_t> writer_dequeue_pos_{0};
     std::atomic<std::size_t> writer_count_{0};
+    std::atomic<std::uint64_t> writer_overflow_count_{0};
+    std::atomic<std::uint64_t> writer_overflow_peak_{0};
+    std::atomic<std::uint64_t> writer_overflow_events_{0};
     std::atomic<bool> writer_stop_{false};
     std::mutex snapshot_thread_mu_;
     std::condition_variable snapshot_thread_cv_;

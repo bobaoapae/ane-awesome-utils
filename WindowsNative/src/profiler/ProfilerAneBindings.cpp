@@ -137,7 +137,11 @@ WindowsAirRuntime* ensure_air_runtime() {
 //               snapshots:Boolean,
 //               maxLive:uint,
 //               snapshotIntervalMs:uint,
-//               render:Boolean): Boolean
+//               render:Boolean,
+//               as3ObjectSampling:Boolean,
+//               as3SamplerForwarding:Boolean,
+//               as3RealDisplayEdges:Boolean,
+//               as3RealEventEdges:Boolean): Boolean
 FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv) {
     std::lock_guard<std::mutex> g(g_mu);
     if (argc < 1) return make_bool(false);
@@ -155,6 +159,10 @@ FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv)
     bool timing = true;
     bool memory = false;
     bool render = false;
+    bool as3_object_sampling = true;
+    bool as3_sampler_forwarding = false;
+    bool as3_real_display_edges = true;
+    bool as3_real_event_edges = true;
     bool snapshots = true;
     std::uint32_t max_live = 4096;
     std::uint32_t snapshot_interval_ms = 0;
@@ -165,6 +173,10 @@ FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv)
     if (argc >= 6) read_u32(argv[5], max_live);
     if (argc >= 7) read_u32(argv[6], snapshot_interval_ms);
     if (argc >= 8) read_bool(argv[7], render);
+    if (argc >= 9) read_bool(argv[8], as3_object_sampling);
+    if (argc >= 10) read_bool(argv[9], as3_sampler_forwarding);
+    if (argc >= 11) read_bool(argv[10], as3_real_display_edges);
+    if (argc >= 12) read_bool(argv[11], as3_real_event_edges);
 
     if (g_disk) {
         constexpr std::uint64_t kMinFree = 200ull * 1024ull * 1024ull;
@@ -188,7 +200,11 @@ FREObject profiler_start(FREContext, void*, std::uint32_t argc, FREObject* argv)
             g_ctrl->stop();
             return make_bool(false);
         }
-        if (!g_as3_object_hook->install(g_ctrl.get())) {
+        if (as3_object_sampling &&
+            !g_as3_object_hook->install(g_ctrl.get(),
+                                        as3_real_display_edges,
+                                        as3_real_event_edges,
+                                        as3_sampler_forwarding)) {
             // AS3 object sampling is useful but not required for a valid capture.
             // AIR/Scout advanced telemetry or flash.sampler can already own the
             // single IMemorySampler slot; keep the native allocation stream and
@@ -281,6 +297,9 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
     set_prop_f64(obj, "writerQueueCapacity", static_cast<double>(s.writer_queue_capacity));
     set_prop_f64(obj, "writerEventsWritten", static_cast<double>(s.writer_events_written));
     set_prop_f64(obj, "writerBytesWritten", static_cast<double>(s.writer_bytes_written));
+    set_prop_f64(obj, "writerOverflowDepth", static_cast<double>(s.writer_overflow_depth));
+    set_prop_f64(obj, "writerOverflowPeak", static_cast<double>(s.writer_overflow_peak));
+    set_prop_f64(obj, "writerOverflowEvents", static_cast<double>(s.writer_overflow_events));
     set_prop_bool(obj, "timingEnabled", s.timing_enabled);
     set_prop_bool(obj, "memoryEnabled", s.memory_enabled);
     set_prop_bool(obj, "renderEnabled", s.render_enabled);
@@ -379,6 +398,14 @@ FREObject profiler_get_status(FREContext, void*, std::uint32_t, FREObject*) {
                      static_cast<double>(g_as3_object_hook->forwardedCalls()));
         set_prop_f64(obj, "as3ObjectHookForwardFailures",
                      static_cast<double>(g_as3_object_hook->forwardFailures()));
+        set_prop_f64(obj, "as3ObjectStackCacheHits",
+                     static_cast<double>(g_as3_object_hook->stackCacheHits()));
+        set_prop_f64(obj, "as3ObjectStackCacheMisses",
+                     static_cast<double>(g_as3_object_hook->stackCacheMisses()));
+        set_prop_f64(obj, "as3ObjectStackUnavailableCalls",
+                     static_cast<double>(g_as3_object_hook->stackUnavailableCalls()));
+        set_prop_f64(obj, "as3ObjectStackNativeFallbackCalls",
+                     static_cast<double>(g_as3_object_hook->stackNativeFallbackCalls()));
         set_prop_f64(obj, "as3RealEdgeHookInstalls",
                      static_cast<double>(g_as3_object_hook->realEdgeHookInstalls()));
         set_prop_f64(obj, "as3RealEdgeHookFailures",

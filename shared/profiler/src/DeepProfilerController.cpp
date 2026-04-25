@@ -117,6 +117,14 @@ bool DeepProfilerController::start(const Config& cfg) {
     writer_enqueue_pos_.store(0, std::memory_order_relaxed);
     writer_dequeue_pos_.store(0, std::memory_order_relaxed);
     writer_count_.store(0, std::memory_order_relaxed);
+    writer_event_sequence_.store(0, std::memory_order_relaxed);
+    writer_overflow_count_.store(0, std::memory_order_relaxed);
+    writer_overflow_peak_.store(0, std::memory_order_relaxed);
+    writer_overflow_events_.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> overflow_lock(writer_overflow_mu_);
+        writer_overflow_.clear();
+    }
     writer_stop_.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> snapshot_lock(snapshot_thread_mu_);
@@ -203,6 +211,12 @@ bool DeepProfilerController::stop() {
     writer_enqueue_pos_.store(0, std::memory_order_relaxed);
     writer_dequeue_pos_.store(0, std::memory_order_relaxed);
     writer_count_.store(0, std::memory_order_relaxed);
+    writer_event_sequence_.store(0, std::memory_order_relaxed);
+    writer_overflow_count_.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> overflow_lock(writer_overflow_mu_);
+        writer_overflow_.clear();
+    }
     file_buffer_.clear();
 
     state_.store(State::Idle, std::memory_order_release);
@@ -634,7 +648,11 @@ DeepProfilerController::Status DeepProfilerController::status() const {
     s.total_reallocations = total_reallocations_.load(std::memory_order_relaxed);
     s.unknown_frees = unknown_frees_.load(std::memory_order_relaxed);
     s.writer_queue_capacity = kWriterQueueCapacity;
-    s.writer_queue_depth = writer_count_.load(std::memory_order_relaxed);
+    s.writer_overflow_depth = writer_overflow_count_.load(std::memory_order_relaxed);
+    s.writer_overflow_peak = writer_overflow_peak_.load(std::memory_order_relaxed);
+    s.writer_overflow_events = writer_overflow_events_.load(std::memory_order_relaxed);
+    s.writer_queue_depth = writer_count_.load(std::memory_order_relaxed) +
+                           s.writer_overflow_depth;
     s.writer_events_written = writer_events_written_.load(std::memory_order_relaxed);
     s.writer_bytes_written = writer_bytes_written_.load(std::memory_order_relaxed);
     s.timing_enabled = cfg_.timing_enabled;
@@ -726,6 +744,8 @@ bool DeepProfilerController::enqueue_event(PendingEvent&& event) {
         return false;
     }
 
+    event.sequence = writer_event_sequence_.fetch_add(1, std::memory_order_relaxed);
+
     WriterQueueSlot* slot = nullptr;
     std::size_t pos = writer_enqueue_pos_.load(std::memory_order_relaxed);
     for (;;) {
@@ -742,9 +762,7 @@ bool DeepProfilerController::enqueue_event(PendingEvent&& event) {
             continue;
         }
         if (diff < 0) {
-            std::this_thread::yield();
-            pos = writer_enqueue_pos_.load(std::memory_order_relaxed);
-            continue;
+            return enqueue_overflow_event(std::move(event));
         }
         pos = writer_enqueue_pos_.load(std::memory_order_relaxed);
     }
@@ -756,6 +774,73 @@ bool DeepProfilerController::enqueue_event(PendingEvent&& event) {
         writer_cv_.notify_one();
     }
     return true;
+}
+
+bool DeepProfilerController::enqueue_overflow_event(PendingEvent&& event) {
+    try {
+        {
+            std::lock_guard<std::mutex> overflow_lock(writer_overflow_mu_);
+            writer_overflow_.emplace(event.sequence, std::move(event));
+        }
+        const auto depth = writer_overflow_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        writer_overflow_events_.fetch_add(1, std::memory_order_relaxed);
+        auto peak = writer_overflow_peak_.load(std::memory_order_relaxed);
+        while (depth > peak &&
+               !writer_overflow_peak_.compare_exchange_weak(peak,
+                                                            depth,
+                                                            std::memory_order_relaxed,
+                                                            std::memory_order_relaxed)) {
+        }
+        writer_cv_.notify_one();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool DeepProfilerController::peek_ring_event_sequence(std::uint64_t& sequence) const {
+    if (writer_queue_ == nullptr) return false;
+
+    const std::size_t pos = writer_dequeue_pos_.load(std::memory_order_relaxed);
+    const WriterQueueSlot* slot = &writer_queue_[pos % kWriterQueueCapacity];
+    const std::size_t seq = slot->sequence.load(std::memory_order_acquire);
+    const auto diff = static_cast<std::intptr_t>(seq) - static_cast<std::intptr_t>(pos + 1);
+    if (diff != 0) return false;
+    sequence = slot->event.sequence;
+    return true;
+}
+
+bool DeepProfilerController::dequeue_overflow_event(PendingEvent& event,
+                                                    std::uint64_t before_sequence) {
+    std::lock_guard<std::mutex> overflow_lock(writer_overflow_mu_);
+    if (writer_overflow_.empty()) return false;
+    auto it = writer_overflow_.begin();
+    if (it->first >= before_sequence) return false;
+    event = std::move(it->second);
+    writer_overflow_.erase(it);
+    writer_overflow_count_.fetch_sub(1, std::memory_order_relaxed);
+    return true;
+}
+
+bool DeepProfilerController::dequeue_next_event(PendingEvent& event) {
+    std::uint64_t ring_sequence = UINT64_MAX;
+    const bool ring_ready = peek_ring_event_sequence(ring_sequence);
+
+    if (dequeue_overflow_event(event, ring_sequence)) {
+        return true;
+    }
+    if (ring_ready) {
+        return dequeue_event(event);
+    }
+
+    // A producer may have reserved the next ring slot but not published it yet.
+    // Preserve event order instead of writing newer overflow records first.
+    const auto enqueue_pos = writer_enqueue_pos_.load(std::memory_order_acquire);
+    const auto dequeue_pos = writer_dequeue_pos_.load(std::memory_order_acquire);
+    if (dequeue_pos < enqueue_pos) {
+        return false;
+    }
+    return dequeue_overflow_event(event, UINT64_MAX);
 }
 
 bool DeepProfilerController::dequeue_event(PendingEvent& event) {
@@ -882,6 +967,7 @@ bool DeepProfilerController::update_allocation_tracking(aneprof::EventType type,
 
 void DeepProfilerController::wait_for_writer_idle() const {
     while (writer_count_.load(std::memory_order_acquire) != 0 ||
+           writer_overflow_count_.load(std::memory_order_acquire) != 0 ||
            writer_dequeue_pos_.load(std::memory_order_acquire) <
                writer_enqueue_pos_.load(std::memory_order_acquire)) {
         std::this_thread::yield();
@@ -891,18 +977,20 @@ void DeepProfilerController::wait_for_writer_idle() const {
 void DeepProfilerController::writer_thread_main() {
     for (;;) {
         PendingEvent event{};
-        if (!dequeue_event(event)) {
+        if (!dequeue_next_event(event)) {
             const auto enqueue_pos = writer_enqueue_pos_.load(std::memory_order_acquire);
             const auto dequeue_pos = writer_dequeue_pos_.load(std::memory_order_acquire);
             if (writer_stop_.load(std::memory_order_acquire) &&
                 writer_count_.load(std::memory_order_acquire) == 0 &&
+                writer_overflow_count_.load(std::memory_order_acquire) == 0 &&
                 dequeue_pos >= enqueue_pos) {
                 break;
             }
             std::unique_lock<std::mutex> writer_wait(writer_wait_mu_);
             writer_cv_.wait_for(writer_wait, std::chrono::milliseconds(1), [&] {
                 return writer_stop_.load(std::memory_order_acquire) ||
-                       writer_count_.load(std::memory_order_acquire) != 0;
+                       writer_count_.load(std::memory_order_acquire) != 0 ||
+                       writer_overflow_count_.load(std::memory_order_acquire) != 0;
             });
             continue;
         }

@@ -37,6 +37,11 @@ std::atomic<std::uint64_t> g_direct_slot_installs{0};
 std::atomic<std::uint64_t> g_direct_slot_failures{0};
 std::atomic<std::uint64_t> g_forwarded_calls{0};
 std::atomic<std::uint64_t> g_forward_failures{0};
+std::atomic<std::uint64_t> g_stack_cache_hits{0};
+std::atomic<std::uint64_t> g_stack_cache_misses{0};
+std::atomic<std::uint64_t> g_stack_unavailable_calls{0};
+std::atomic<std::uint64_t> g_stack_native_fallback_calls{0};
+std::atomic<std::uint64_t> g_stack_cache_epoch{0};
 std::atomic<std::uint64_t> g_real_edge_hook_installs{0};
 std::atomic<std::uint64_t> g_real_edge_hook_failures{0};
 std::atomic<std::uint64_t> g_real_display_child_edges{0};
@@ -51,8 +56,31 @@ std::atomic<std::uintptr_t> g_sampler_at_install{0};
 std::atomic<std::uintptr_t> g_sampler_vtable_at_install{0};
 std::atomic<std::uintptr_t> g_previous_sampler_vtable{0};
 std::atomic<std::uintptr_t> g_sampler_slot{0};
+std::atomic<bool> g_forward_previous_sampler{false};
 thread_local bool g_inside_hook = false;
 thread_local bool g_inside_forward = false;
+
+struct StackCacheKey {
+    std::uintptr_t core = 0;
+    std::uint64_t hash = 0;
+    std::uint32_t depth = 0;
+    std::uint8_t source = 0;
+
+    bool operator==(const StackCacheKey& other) const noexcept {
+        return core == other.core &&
+               hash == other.hash &&
+               depth == other.depth &&
+               source == other.source;
+    }
+};
+
+struct StackCache {
+    bool valid = false;
+    StackCacheKey key{};
+    std::string value;
+};
+
+thread_local StackCache t_stack_cache;
 
 struct LiveAs3Object {
     std::string type_name;
@@ -549,6 +577,34 @@ std::string module_name_for_address(std::uintptr_t address) {
     return std::string(path, path + std::min<DWORD>(len, MAX_PATH));
 }
 
+std::string module_frame_for_address(std::uintptr_t address) {
+    if (address == 0) return {};
+    HMODULE module = nullptr;
+    std::string module_name;
+    std::uintptr_t offset = 0;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(address),
+                           &module) &&
+        module != nullptr) {
+        char path[MAX_PATH] = {};
+        const DWORD len = GetModuleFileNameA(module, path, static_cast<DWORD>(sizeof(path)));
+        if (len != 0) {
+            module_name.assign(path, path + std::min<DWORD>(len, MAX_PATH));
+            const auto sep = module_name.find_last_of("\\/");
+            if (sep != std::string::npos) module_name.erase(0, sep + 1);
+        }
+        offset = address - reinterpret_cast<std::uintptr_t>(module);
+    }
+
+    std::string out = module_name.empty() ? "<unknown-module>" : module_name;
+    out.push_back('+');
+    out += hex_ptr(offset);
+    out.push_back(' ');
+    out += hex_ptr(address);
+    return out;
+}
+
 std::string vtable_head_for_sampler(std::uintptr_t sampler, std::size_t count = 8) {
     const std::uintptr_t vtable = vtable_from_object(sampler);
     if (vtable == 0) return {};
@@ -850,6 +906,160 @@ std::string stack_from_core(std::uintptr_t core) {
     return method_frame_stack_from_core(core);
 }
 
+void mix_stack_hash(std::uint64_t& h, std::uint64_t value) {
+    h ^= value + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+}
+
+bool stack_cache_key_from_core(std::uintptr_t core, StackCacheKey& key) {
+    if (core == 0) return false;
+
+    std::uintptr_t node = 0;
+    if (read_ptr(reinterpret_cast<const void*>(core), air_rvas::kAvmCoreOffsetCallStack, node) &&
+        node != 0) {
+        std::uint64_t h = 0x43616c6c53746163ull;
+        mix_stack_hash(h, g_stack_cache_epoch.load(std::memory_order_acquire));
+        std::uint32_t depth = 0;
+        for (std::uint32_t i = 0; i < 32 && node != 0; ++i) {
+            std::uint64_t function_id = 0;
+            std::uintptr_t info = 0;
+            std::uintptr_t fake_name_ptr = 0;
+            std::uintptr_t filename_ptr = 0;
+            std::uintptr_t next = 0;
+            std::int32_t line = 0;
+            safe_read(reinterpret_cast<const std::uint8_t*>(node) + kCallStackOffFunctionId,
+                      function_id);
+            read_ptr(reinterpret_cast<const void*>(node), kCallStackOffInfo, info);
+            read_ptr(reinterpret_cast<const void*>(node), kCallStackOffFakeName, fake_name_ptr);
+            read_ptr(reinterpret_cast<const void*>(node), kCallStackOffFilename, filename_ptr);
+            safe_read(reinterpret_cast<const std::uint8_t*>(node) + kCallStackOffLine, line);
+            read_ptr(reinterpret_cast<const void*>(node), kCallStackOffNext, next);
+
+            mix_stack_hash(h, static_cast<std::uint64_t>(node));
+            mix_stack_hash(h, function_id);
+            mix_stack_hash(h, static_cast<std::uint64_t>(info));
+            mix_stack_hash(h, static_cast<std::uint64_t>(fake_name_ptr));
+            mix_stack_hash(h, static_cast<std::uint64_t>(filename_ptr));
+            mix_stack_hash(h, static_cast<std::uint32_t>(line));
+            mix_stack_hash(h, static_cast<std::uint64_t>(next));
+            ++depth;
+            if (next == node) break;
+            node = next;
+        }
+        if (depth == 0) return false;
+        key = StackCacheKey{core, h, depth, 1};
+        return true;
+    }
+
+    std::uintptr_t frame = 0;
+    if (!read_ptr(reinterpret_cast<const void*>(core),
+                  air_rvas::kAvmCoreOffsetCurrentMethodFrame,
+                  frame) ||
+        frame == 0) {
+        return false;
+    }
+
+    std::uint64_t h = 0x4d6574686f644672ull;
+    mix_stack_hash(h, g_stack_cache_epoch.load(std::memory_order_acquire));
+    mix_stack_hash(h, reinterpret_cast<std::uintptr_t>(g_method_name_with_traits));
+    std::uint32_t depth = 0;
+    for (std::uint32_t i = 0; i < 32 && is_aligned_ptr(frame); ++i) {
+        std::uintptr_t next = 0;
+        std::uintptr_t env_or_cc = 0;
+        read_ptr(reinterpret_cast<const void*>(frame), kMethodFrameOffNext, next);
+        if (!read_ptr(reinterpret_cast<const void*>(frame),
+                      kMethodFrameOffEnvOrCodeContext,
+                      env_or_cc)) {
+            break;
+        }
+
+        mix_stack_hash(h, static_cast<std::uint64_t>(frame));
+        mix_stack_hash(h, static_cast<std::uint64_t>(next));
+        mix_stack_hash(h, static_cast<std::uint64_t>(env_or_cc));
+        if ((env_or_cc & 1u) == 0) {
+            const std::uintptr_t env = env_or_cc & ~static_cast<std::uintptr_t>(3);
+            std::uintptr_t method = 0;
+            if (read_ptr(reinterpret_cast<const void*>(env), kMethodEnvOffMethod, method) &&
+                is_aligned_ptr(method)) {
+                std::int32_t method_id = -1;
+                std::uintptr_t pool = 0;
+                std::uintptr_t pool_core = 0;
+                std::uintptr_t declarer = 0;
+                safe_read(reinterpret_cast<const std::uint8_t*>(method) +
+                              kMethodInfoOffMethodId,
+                          method_id);
+                read_ptr(reinterpret_cast<const void*>(method), kMethodInfoOffPool, pool);
+                if (is_aligned_ptr(pool)) {
+                    read_ptr(reinterpret_cast<const void*>(pool),
+                             kPoolObjectOffCore,
+                             pool_core);
+                }
+                read_ptr(reinterpret_cast<const void*>(method),
+                         kMethodInfoOffDeclarer,
+                         declarer);
+                mix_stack_hash(h, static_cast<std::uint64_t>(method));
+                mix_stack_hash(h, static_cast<std::uint32_t>(method_id));
+                mix_stack_hash(h, static_cast<std::uint64_t>(pool));
+                mix_stack_hash(h, static_cast<std::uint64_t>(pool_core));
+                mix_stack_hash(h, static_cast<std::uint64_t>(declarer));
+            }
+        }
+
+        ++depth;
+        if (next == 0 || next == frame) break;
+        frame = next;
+    }
+    if (depth == 0) return false;
+    key = StackCacheKey{core, h, depth, 2};
+    return true;
+}
+
+std::string stack_from_core_cached(std::uintptr_t core) {
+    StackCacheKey key{};
+    if (stack_cache_key_from_core(core, key) &&
+        t_stack_cache.valid &&
+        t_stack_cache.key == key) {
+        g_stack_cache_hits.fetch_add(1, std::memory_order_relaxed);
+        return t_stack_cache.value;
+    }
+
+    std::string stack = stack_from_core(core);
+    if (key.core != 0) {
+        t_stack_cache.valid = true;
+        t_stack_cache.key = key;
+        t_stack_cache.value = stack;
+    } else {
+        t_stack_cache.valid = false;
+        t_stack_cache.value.clear();
+    }
+    g_stack_cache_misses.fetch_add(1, std::memory_order_relaxed);
+    return stack;
+}
+
+std::string native_stack_fallback(const char* reason) {
+    void* frames[18] = {};
+    const USHORT count = CaptureStackBackTrace(
+        2,
+        static_cast<ULONG>(sizeof(frames) / sizeof(frames[0])),
+        frames,
+        nullptr);
+    std::string out = "#0 <as3-stack-unavailable";
+    if (reason != nullptr && reason[0] != '\0') {
+        out.push_back(':');
+        out += reason;
+    }
+    out.push_back('>');
+    for (USHORT i = 0; i < count; ++i) {
+        const auto address = reinterpret_cast<std::uintptr_t>(frames[i]);
+        if (address == 0) continue;
+        out.push_back('\n');
+        out.push_back('#');
+        out += std::to_string(static_cast<unsigned>(i) + 1);
+        out += " native ";
+        out += module_frame_for_address(address);
+    }
+    return out;
+}
+
 void erase_as3_reference_locked(const As3ReferenceKey& edge) {
     if (g_as3_refs.erase(edge) == 0) return;
 
@@ -996,7 +1206,12 @@ void record_as3_alloc(void* obj,
     }
 
     std::string type_name = type_from_sot(obj, sot, generic_type);
-    std::string stack = stack_from_core(core);
+    std::string stack = stack_from_core_cached(core);
+    if (stack.empty()) {
+        g_stack_unavailable_calls.fetch_add(1, std::memory_order_relaxed);
+        stack = native_stack_fallback(core == 0 ? "no-avm-core" : "no-as3-frame");
+        g_stack_native_fallback_calls.fetch_add(1, std::memory_order_relaxed);
+    }
     std::uint64_t size = explicit_size != 0
         ? explicit_size
         : tracked_as3_object_size(ctrl, key);
@@ -1430,6 +1645,7 @@ struct IMemorySamplerCompat {
 };
 
 IMemorySamplerCompat* previous_sampler_for(const void* self) {
+    if (!g_forward_previous_sampler.load(std::memory_order_acquire)) return nullptr;
     void* previous = g_previous_sampler.load(std::memory_order_acquire);
     if (previous == nullptr || previous == self) return nullptr;
     return reinterpret_cast<IMemorySamplerCompat*>(previous);
@@ -1756,10 +1972,13 @@ bool install_real_edge_detour(Detour& detour,
     return true;
 }
 
-void install_real_edge_hooks(HMODULE air) {
+void install_real_edge_hooks(HMODULE air,
+                             bool install_display_edge_hooks,
+                             bool install_event_edge_hooks) {
     g_real_edge_last_failure_stage.store(0, std::memory_order_relaxed);
 
 #if defined(_M_X64) || defined(__x86_64__)
+    if (install_display_edge_hooks) {
     if (install_real_edge_detour(g_display_add_child,
                                  air,
                                  air_rvas::kRvaDisplayObjectContainerAddChild,
@@ -1807,6 +2026,8 @@ void install_real_edge_hooks(HMODULE air) {
         g_original_display_remove_child_at =
             reinterpret_cast<DisplayRemoveChildAtFn>(g_display_remove_child_at.trampoline);
     }
+    }
+    if (install_event_edge_hooks) {
     if (install_real_edge_detour(g_event_add_listener,
                                  air,
                                  air_rvas::kRvaEventDispatcherAddEventListener,
@@ -1831,7 +2052,9 @@ void install_real_edge_hooks(HMODULE air) {
         g_original_event_remove_listener =
             reinterpret_cast<EventRemoveListenerFn>(g_event_remove_listener.trampoline);
     }
+    }
 #else
+    if (install_display_edge_hooks) {
     if (install_real_edge_detour(g_display_add_child,
                                  air,
                                  air_rvas::kRvaDisplayObjectContainerAddChild,
@@ -1879,6 +2102,8 @@ void install_real_edge_hooks(HMODULE air) {
         g_original_display_remove_child_at =
             reinterpret_cast<DisplayRemoveChildAtFn>(g_display_remove_child_at.trampoline);
     }
+    }
+    if (install_event_edge_hooks) {
     if (install_real_edge_detour(g_event_add_listener,
                                  air,
                                  air_rvas::kRvaEventDispatcherAddEventListener,
@@ -1902,6 +2127,7 @@ void install_real_edge_hooks(HMODULE air) {
                                  26)) {
         g_original_event_remove_listener =
             reinterpret_cast<EventRemoveListenerFn>(g_event_remove_listener.trampoline);
+    }
     }
 #endif
 }
@@ -1928,7 +2154,10 @@ WindowsAs3ObjectHook::~WindowsAs3ObjectHook() {
     uninstall();
 }
 
-bool WindowsAs3ObjectHook::install(DeepProfilerController* controller) {
+bool WindowsAs3ObjectHook::install(DeepProfilerController* controller,
+                                   bool install_display_edge_hooks,
+                                   bool install_event_edge_hooks,
+                                   bool forward_previous_sampler) {
     if (controller == nullptr) return false;
     if (installed_) {
         g_controller.store(controller, std::memory_order_release);
@@ -1942,6 +2171,7 @@ bool WindowsAs3ObjectHook::install(DeepProfilerController* controller) {
     g_sampler_vtable_at_install.store(0, std::memory_order_release);
     g_previous_sampler_vtable.store(0, std::memory_order_release);
     g_sampler_slot.store(0, std::memory_order_release);
+    g_stack_cache_epoch.fetch_add(1, std::memory_order_acq_rel);
     HMODULE air = GetModuleHandleA(air_rvas::kDllName);
     if (air == nullptr) {
         g_last_failure_stage.store(1, std::memory_order_relaxed);
@@ -1986,6 +2216,7 @@ bool WindowsAs3ObjectHook::install(DeepProfilerController* controller) {
     }
 
     g_controller.store(controller, std::memory_order_release);
+    g_forward_previous_sampler.store(forward_previous_sampler, std::memory_order_release);
     if (current != &g_sampler) {
         const bool attached = call_attach_sampler(&g_sampler) && call_get_sampler() == &g_sampler;
         if (!attached && !install_sampler_via_slot(&g_sampler)) {
@@ -2026,7 +2257,7 @@ bool WindowsAs3ObjectHook::install(DeepProfilerController* controller) {
         g_as3_refs_by_dependent.clear();
         g_as3_real_refs.clear();
     }
-    install_real_edge_hooks(air);
+    install_real_edge_hooks(air, install_display_edge_hooks, install_event_edge_hooks);
     installed_ = true;
     g_last_failure_stage.store(0, std::memory_order_relaxed);
     return true;
@@ -2052,9 +2283,11 @@ void WindowsAs3ObjectHook::uninstall() {
     g_previous_sampler.store(nullptr, std::memory_order_release);
     g_previous_sampler_vtable.store(0, std::memory_order_release);
     g_sampler_slot.store(0, std::memory_order_release);
+    g_forward_previous_sampler.store(false, std::memory_order_release);
     g_attach_sampler = nullptr;
     g_get_sampler = nullptr;
     g_method_name_with_traits = nullptr;
+    g_stack_cache_epoch.fetch_add(1, std::memory_order_acq_rel);
     {
         std::lock_guard<std::mutex> lock(g_live_mu);
         g_live_as3.clear();
@@ -2109,6 +2342,22 @@ std::uint64_t WindowsAs3ObjectHook::forwardedCalls() const {
 
 std::uint64_t WindowsAs3ObjectHook::forwardFailures() const {
     return g_forward_failures.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::stackCacheHits() const {
+    return g_stack_cache_hits.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::stackCacheMisses() const {
+    return g_stack_cache_misses.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::stackUnavailableCalls() const {
+    return g_stack_unavailable_calls.load(std::memory_order_relaxed);
+}
+
+std::uint64_t WindowsAs3ObjectHook::stackNativeFallbackCalls() const {
+    return g_stack_native_fallback_calls.load(std::memory_order_relaxed);
 }
 
 std::uint64_t WindowsAs3ObjectHook::realEdgeHookInstalls() const {
