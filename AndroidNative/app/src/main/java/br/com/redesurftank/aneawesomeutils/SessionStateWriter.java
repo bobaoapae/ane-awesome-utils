@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@code .session_state.previous.json} and merged into the crash bundle's
  * metadata as {@code quality_hints} — giving each crash report a "what was the
  * session like up to the moment of death" summary (uptime, error/warn counts,
- * last-log timestamp, milestones reached).
+ * last-log timestamp).
  *
  * <p>Mirrors the lifecycle of {@link RuntimeStatsCollector}: idempotent
  * {@code start()}, fixed cadence on the main looper, never throws on the tick
