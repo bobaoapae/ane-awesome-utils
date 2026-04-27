@@ -52,6 +52,10 @@ public class NativeLogManager {
     // fires. Presence on next launch = real crash; absence + SESSION_MARKER =
     // OS kill / user swipe-from-recents (don't report).
     private static final String CRASH_MARKER = ".crash_marker";
+    // AS3 error marker written every time AS3 dispatches an UncaughtError.
+    // Presence = sessão teve erros AS3 não tratados (provavelmente bug que levou
+    // user a fechar via swipe). Marker contém timestamp do último erro.
+    private static final String AS3_ERROR_MARKER = ".as3_error_marker";
     // 15 min covers typical multitasking (responder mensagem, atender ligação, etc.)
     // sem perder LMK kills longos. Antes era 2 min, gerava muitos falsos positivos.
     private static final long BACKGROUND_GRACE_PERIOD_MS = 15 * 60 * 1000; // 15 minutes
@@ -113,27 +117,35 @@ public class NativeLogManager {
             }
             logDirPath = baseDir.getAbsolutePath();
 
-            // Detection algorithm for "real crash" vs "OS kill / user swipe":
-            //   SESSION_MARKER existe?  N → fechou limpo, não reporta.
-            //                            S → continuar:
-            //   CRASH_MARKER existe?    S → signal handler disparou = crash real, REPORTA.
-            //                            N → continuar (sem signal, pode ser kill normal):
-            //   BACKGROUND_MARKER + grace > 15min → kill por OS em bg longo, não reporta.
-            //   BACKGROUND_MARKER + grace < 15min → kill recente, dúvida — não reporta
-            //     (antes reportava mas gera muitos falsos positivos com swipe-from-recents).
-            //   Sem BG marker, sem CRASH marker → process killed em foreground sem signal
-            //     (LMK extremo, OS reboot). Raro. Não reporta — sem signal não temos info útil.
+            // Detection algorithm for "real bug" vs "OS kill / user swipe":
+            //   SESSION_MARKER NÃO existe → fechou limpo, não reporta
+            //   CRASH_MARKER existe       → signal handler disparou = REAL crash nativo
+            //   AS3_ERROR_MARKER existe   → sessão teve UncaughtError AS3 = REAL bug
+            //                                (cobre o caso "AS3 quebrou + user fechou
+            //                                via swipe sem ter signal nativo")
+            //   BG_MARKER + grace > 15min → OS kill em bg longo, não reporta
+            //   BG_MARKER + grace < 15min → kill recente sem crash/error markers,
+            //                                provavelmente swipe ou ANR — não reporta
+            //   Sem markers, sem BG       → swipe em foreground sem erro logado.
+            //                                Sem dados úteis pra reportar.
             File sessionMarker = new File(baseDir, SESSION_MARKER);
             File bgMarker = new File(baseDir, BACKGROUND_MARKER);
             File crashMarker = new File(baseDir, CRASH_MARKER);
+            File as3ErrorMarker = new File(baseDir, AS3_ERROR_MARKER);
             if (sessionMarker.exists()) {
+                String reason = null;
                 if (crashMarker.exists()) {
-                    // Real native crash: signal handler fired and wrote the marker.
+                    reason = "native-crash";
+                } else if (as3ErrorMarker.exists()) {
+                    reason = "as3-error";
+                }
+
+                if (reason != null) {
+                    // Real bug session: signal nativo OR AS3 UncaughtError logged.
                     unexpectedShutdown = true;
                     String crashedFilename = readMarkerContent(sessionMarker);
                     unexpectedShutdownInfo = collectUnexpectedShutdownInfo(baseDir, crashedFilename);
-                    Log.i(TAG, "Previous session crashed (native signal), reporting");
-                    crashMarker.delete();
+                    Log.i(TAG, "Previous session ended with errors (" + reason + "), reporting");
                 } else if (bgMarker.exists()) {
                     long bgSince = readTimestamp(bgMarker);
                     long elapsed = System.currentTimeMillis() - bgSince;
@@ -142,25 +154,26 @@ public class NativeLogManager {
                     if (bgSince > 0 && elapsed > BACKGROUND_GRACE_PERIOD_MS) {
                         Log.i(TAG, "Previous session killed by OS after " + (elapsed / 1000) + "s in background, not reporting");
                     } else {
-                        Log.i(TAG, "Previous session killed in background (" + (elapsed / 1000) + "s) without crash signal, not reporting");
+                        Log.i(TAG, "Previous session ended in background (" + (elapsed / 1000) + "s) without crash/error markers, not reporting");
                     }
                 } else {
-                    // No bg marker, no crash marker. Either:
-                    //  - User swipe-from-recents while app in foreground (Android may not deliver onPause/DEACTIVATE in time)
-                    //  - Extreme LMK in foreground (rare on modern devices)
-                    //  - OS reboot
-                    // Without a signal we have no diagnostic info anyway. Skip to reduce noise.
+                    // No bg marker, no crash marker, no as3 marker. Likely swipe-
+                    // from-recents in foreground without errors logged, or extreme
+                    // LMK foreground (rare). No diagnostic data worth uploading.
                     unexpectedShutdown = false;
                     unexpectedShutdownInfo = null;
-                    Log.i(TAG, "Previous session ended in foreground without crash signal, not reporting (likely swipe-from-recents or LMK)");
+                    Log.i(TAG, "Previous session ended in foreground without crash/error markers, not reporting (likely swipe-from-recents)");
                 }
                 sessionMarker.delete();
                 bgMarker.delete();
+                crashMarker.delete();
+                as3ErrorMarker.delete();
             } else {
                 unexpectedShutdown = false;
                 unexpectedShutdownInfo = null;
-                bgMarker.delete(); // clean up stale bg marker if any
-                crashMarker.delete(); // clean up stale crash marker if any
+                bgMarker.delete();
+                crashMarker.delete();
+                as3ErrorMarker.delete();
             }
 
             // Rotate old log files
@@ -493,6 +506,29 @@ public class NativeLogManager {
             bgMarker.delete();
         } catch (Exception e) {
             Log.e(TAG, "Error deleting background marker", e);
+        }
+    }
+
+    /**
+     * Marca que houve um UncaughtError AS3 nesta sessão. Chamado pelo
+     * uncaughtErrorHandler do AS3 (Loading.as) via FREFunction
+     * awesomeUtils_markAS3Error. Permite distinguir "user fechou via swipe
+     * porque AS3 quebrou" de "user fechou via swipe normalmente" — apenas
+     * o primeiro caso vira upload.
+     *
+     * Marker contém timestamp do último erro (sobrescreve a cada chamada
+     * pra evitar overhead com sessões que erram muito).
+     */
+    public static void markAS3Error() {
+        if (logDirPath == null) return;
+        try {
+            File marker = new File(logDirPath, AS3_ERROR_MARKER);
+            FileOutputStream out = new FileOutputStream(marker);
+            out.write(String.valueOf(System.currentTimeMillis()).getBytes());
+            out.getFD().sync();
+            out.close();
+        } catch (Exception e) {
+            Log.e(TAG, "Error writing AS3 error marker", e);
         }
     }
 

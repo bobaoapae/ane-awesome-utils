@@ -17,6 +17,10 @@ public class AneAwesomeUtilsExtension implements FREExtension {
         // later RegisterNatives is effectively ignored for that call chain.
         // Installing here closes that window. Idempotent — safe if already done.
         try { AirIMEGuard.install(); } catch (Throwable ignored) {}
+        // Install main-thread layout exception guard. Recovers from vendor-ROM
+        // framework NPEs inside FrameLayout.layoutChildren. The bad layout pass
+        // is dropped; the next frame re-lays-out normally.
+        try { LayoutExceptionGuard.install(); } catch (Throwable ignored) {}
         // Start periodic runtime-pressure sampling (30s tick on main looper).
         // Logs JSON snapshots into the upload pipeline AND pushes values into
         // the crash signal handler's breadcrumb slots, so future crash reports

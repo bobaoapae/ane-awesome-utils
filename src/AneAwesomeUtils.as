@@ -482,6 +482,20 @@ public class AneAwesomeUtils {
         _extContext.call("awesomeUtils_notifyForeground");
     }
 
+    /**
+     * Mark that an unhandled AS3 error occurred in the current session.
+     * Call from the global UncaughtErrorEvent handler. The native side
+     * writes a marker file so that on next launch we can distinguish
+     * "user swiped away after fatal AS3 error" from a benign close.
+     * Only relevant on Android (no native crash signal fires when AIR
+     * itself surfaces an AS3 error and the user then kills the app).
+     */
+    public function markAS3Error():void {
+        if (!_successInit) return;
+        if (!IsAndroid()) return;
+        _extContext.call("awesomeUtils_markAS3Error");
+    }
+
     // --- Windows-specific methods ---
 
     public function preventCaptureScreen():Boolean {

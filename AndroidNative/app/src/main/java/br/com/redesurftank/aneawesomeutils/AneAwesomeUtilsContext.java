@@ -169,6 +169,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(DeleteCrashBundle.KEY, new DeleteCrashBundle());
         functionMap.put(NotifyBackground.KEY, new NotifyBackground());
         functionMap.put(NotifyForeground.KEY, new NotifyForeground());
+        functionMap.put(MarkAS3Error.KEY, new MarkAS3Error());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -1907,6 +1908,16 @@ public class AneAwesomeUtilsContext extends FREContext {
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
             NativeLogManager.onForeground();
+            return null;
+        }
+    }
+
+    public static class MarkAS3Error implements FREFunction {
+        public static final String KEY = "awesomeUtils_markAS3Error";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            NativeLogManager.markAS3Error();
             return null;
         }
     }
