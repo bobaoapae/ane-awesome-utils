@@ -169,6 +169,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(DeleteCrashBundle.KEY, new DeleteCrashBundle());
         functionMap.put(NotifyBackground.KEY, new NotifyBackground());
         functionMap.put(NotifyForeground.KEY, new NotifyForeground());
+        functionMap.put(MarkMilestone.KEY, new MarkMilestone());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -1907,6 +1908,22 @@ public class AneAwesomeUtilsContext extends FREContext {
         @Override
         public FREObject call(FREContext context, FREObject[] args) {
             NativeLogManager.onForeground();
+            return null;
+        }
+    }
+
+    public static class MarkMilestone implements FREFunction {
+        public static final String KEY = "awesomeUtils_markMilestone";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                if (args == null || args.length == 0) return null;
+                String name = args[0].getAsString();
+                if (name != null && !name.isEmpty()) {
+                    NativeLogManager.markMilestone(name);
+                }
+            } catch (Throwable ignored) {}
             return null;
         }
     }

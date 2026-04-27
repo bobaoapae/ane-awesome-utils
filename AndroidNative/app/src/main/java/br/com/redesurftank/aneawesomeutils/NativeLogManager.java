@@ -32,8 +32,32 @@ public class NativeLogManager {
     private static native void nativeInstallSignalHandler(String logFilePath, byte[] xorKey);
     private static final String LOG_DIR_NAME = "ane-awesome-utils-logs";
     private static final String SESSION_MARKER = ".session_active";
+    private static final String SESSION_STATE_ACTIVE = ".session_state.json";
+    private static final String SESSION_STATE_PREVIOUS = ".session_state.previous.json";
     private static final int ROTATION_DAYS = 7;
     private static final int MAX_LOG_FILES = 30;
+
+    // Session-quality counters/state — refreshed every 10s by SessionStateWriter.
+    // All access is either inside synchronized(lock) (write/persist) or simple
+    // volatile reads (markers/flush). volatile is fine for the single-writer
+    // counters because the writer is always inside the lock.
+    private static volatile long sessionStartedMs;
+    private static volatile long firstLogMs;
+    private static volatile long lastLogMs;
+    private static volatile int errorCount;
+    private static volatile int warnCount;
+    private static volatile int warnSuppressedCount;
+    private static volatile int totalLogLines;
+    private static final java.util.concurrent.CopyOnWriteArraySet<String> milestones = new java.util.concurrent.CopyOnWriteArraySet<>();
+    private static volatile long lastBackgroundMs;
+    private static volatile String currentLogFileName;
+
+    // Marker state captured at init() so CrashBundleBuilder can attribute the
+    // bundle to the previous session's death mode (crash signal vs OS kill vs
+    // clean exit). Set BEFORE we delete the markers in init().
+    private static volatile boolean lastSessionHadCrashMarker;
+    private static volatile boolean lastSessionHadSessionMarker;
+    private static volatile long lastSessionBgMs;
 
     private static final byte[] LOG_XOR_KEY = {
         0x4A, 0x7B, 0x2C, 0x5D, 0x1E, 0x6F, 0x3A, (byte)0x8B,
@@ -126,6 +150,28 @@ public class NativeLogManager {
             File sessionMarker = new File(baseDir, SESSION_MARKER);
             File bgMarker = new File(baseDir, BACKGROUND_MARKER);
             File crashMarker = new File(baseDir, CRASH_MARKER);
+
+            // Snapshot previous-session marker state for CrashBundleBuilder.
+            lastSessionHadSessionMarker = sessionMarker.exists();
+            lastSessionHadCrashMarker = crashMarker.exists();
+            lastSessionBgMs = bgMarker.exists() ? readTimestamp(bgMarker) : 0L;
+
+            // Rotate .session_state.json BEFORE clearing markers, so the file we
+            // hand to CrashBundleBuilder corresponds 1:1 with the markers above.
+            File sessionStateActive = new File(baseDir, SESSION_STATE_ACTIVE);
+            File sessionStatePrevious = new File(baseDir, SESSION_STATE_PREVIOUS);
+            if (sessionStateActive.exists()) {
+                if (sessionStatePrevious.exists()) sessionStatePrevious.delete();
+                if (!sessionStateActive.renameTo(sessionStatePrevious)) {
+                    Log.w(TAG, "Failed to rotate session_state");
+                    sessionStateActive.delete();
+                }
+            } else if (!sessionMarker.exists()) {
+                // No active state and previous session closed cleanly (no session
+                // marker on disk) → drop any orphan previous file from earlier runs.
+                if (sessionStatePrevious.exists()) sessionStatePrevious.delete();
+            }
+
             if (sessionMarker.exists()) {
                 if (crashMarker.exists()) {
                     // Real native crash: signal handler fired and wrote the marker.
@@ -163,6 +209,17 @@ public class NativeLogManager {
                 crashMarker.delete(); // clean up stale crash marker if any
             }
 
+            // Reset in-memory session quality counters for the new session.
+            sessionStartedMs = System.currentTimeMillis();
+            firstLogMs = 0L;
+            lastLogMs = 0L;
+            errorCount = 0;
+            warnCount = 0;
+            warnSuppressedCount = 0;
+            totalLogLines = 0;
+            milestones.clear();
+            lastBackgroundMs = 0L;
+
             // Rotate old log files
             rotateOldFiles(baseDir);
 
@@ -170,7 +227,9 @@ public class NativeLogManager {
             Date now = new Date();
             currentDate = dateFormat.format(now);
             String sessionTs = sessionFormat.format(now);
-            currentLogFile = new File(baseDir, "ane-log-" + sessionTs + ".txt");
+            String logFileName = "ane-log-" + sessionTs + ".txt";
+            currentLogFile = new File(baseDir, logFileName);
+            currentLogFileName = logFileName;
             rawLogOutputStream = new FileOutputStream(currentLogFile, false);
             logOutputStream = new XorOutputStream(rawLogOutputStream, LOG_XOR_KEY);
 
@@ -310,13 +369,33 @@ public class NativeLogManager {
                         synchronized (sessionFormat) {
                             sessionTs = sessionFormat.format(now);
                         }
-                        currentLogFile = new File(logDirPath, "ane-log-" + sessionTs + ".txt");
+                        String rolloverName = "ane-log-" + sessionTs + ".txt";
+                        currentLogFile = new File(logDirPath, rolloverName);
+                        currentLogFileName = rolloverName;
                         rawLogOutputStream = new FileOutputStream(currentLogFile, false);
                         logOutputStream = new XorOutputStream(rawLogOutputStream, LOG_XOR_KEY);
                         try { nativeInstallSignalHandler(currentLogFile.getAbsolutePath(), LOG_XOR_KEY); } catch (Throwable ignored) {}
                     }
                     logOutputStream.write(line.getBytes());
                     logOutputStream.flush();
+
+                    // Update session-quality counters (inside lock so persistSessionState
+                    // sees a consistent snapshot when it acquires the same lock).
+                    long nowMs = now.getTime();
+                    totalLogLines++;
+                    if (firstLogMs == 0L) firstLogMs = nowMs;
+                    lastLogMs = nowMs;
+                    String upper = level == null ? "" : level.toUpperCase(Locale.US);
+                    if ("ERROR".equals(upper)) {
+                        errorCount++;
+                    } else if ("WARN".equals(upper) || "WARNING".equals(upper)) {
+                        if (tag != null && "AndroidLoggingProvider".equals(tag)
+                                && message != null && message.startsWith("[AndroidLoggingProvider] suppressed")) {
+                            warnSuppressedCount++;
+                        } else {
+                            warnCount++;
+                        }
+                    }
                 } catch (IOException e) {
                     Log.e(TAG, "Error writing log", e);
                 }
@@ -480,6 +559,8 @@ public class NativeLogManager {
         } catch (Exception e) {
             Log.e(TAG, "Error writing background marker", e);
         }
+        lastBackgroundMs = System.currentTimeMillis();
+        try { SessionStateWriter.flushNow(); } catch (Throwable ignored) {}
     }
 
     /**
@@ -494,6 +575,125 @@ public class NativeLogManager {
         } catch (Exception e) {
             Log.e(TAG, "Error deleting background marker", e);
         }
+        try { SessionStateWriter.flushNow(); } catch (Throwable ignored) {}
+    }
+
+    /**
+     * Record a named milestone for the current session and emit a log line.
+     * The milestone set is persisted by SessionStateWriter on its next tick.
+     */
+    public static void markMilestone(String name) {
+        if (name == null || name.isEmpty()) return;
+        milestones.add(name);
+        try { write("INFO", "Milestone", name); } catch (Throwable ignored) {}
+    }
+
+    /**
+     * Persist the current session-quality snapshot to {@code .session_state.json}
+     * via atomic rename. Called every 10s by SessionStateWriter and on
+     * fg/bg transitions. Best-effort: never throws.
+     */
+    public static void persistSessionState() {
+        if (logDirPath == null) return;
+        synchronized (lock) {
+            try {
+                long now = System.currentTimeMillis();
+                long sessionDurationMs = sessionStartedMs == 0L ? 0L : (now - sessionStartedMs);
+                long silenceMs = lastLogMs == 0L ? 0L : (now - lastLogMs);
+
+                StringBuilder sb = new StringBuilder(512);
+                sb.append("{");
+                sb.append("\"ts\":").append(now);
+                sb.append(",\"session_started_ms\":").append(sessionStartedMs);
+                sb.append(",\"session_duration_ms\":").append(sessionDurationMs);
+                sb.append(",\"first_log_ms\":").append(firstLogMs);
+                sb.append(",\"last_log_ms\":").append(lastLogMs);
+                sb.append(",\"silence_before_state_save_ms\":").append(silenceMs);
+                sb.append(",\"error_count\":").append(errorCount);
+                sb.append(",\"warn_count\":").append(warnCount);
+                sb.append(",\"warn_suppressed_count\":").append(warnSuppressedCount);
+                sb.append(",\"total_log_lines\":").append(totalLogLines);
+                sb.append(",\"last_background_ms\":").append(lastBackgroundMs);
+                sb.append(",\"current_log_file\":").append(quoteString(currentLogFileName));
+                sb.append(",\"milestones\":").append(milestonesJson());
+                sb.append("}");
+                byte[] payload = sb.toString().getBytes("UTF-8");
+
+                File baseDir = new File(logDirPath);
+                File tmp = new File(baseDir, SESSION_STATE_ACTIVE + ".tmp");
+                File dst = new File(baseDir, SESSION_STATE_ACTIVE);
+                FileOutputStream fos = new FileOutputStream(tmp, false);
+                try {
+                    fos.write(payload);
+                    fos.getFD().sync();
+                } finally {
+                    try { fos.close(); } catch (Throwable ignored) {}
+                }
+                if (dst.exists() && !dst.delete()) {
+                    // Some Android FS cannot replace via rename if dst exists.
+                    Log.w(TAG, "Failed to remove old session_state before rename");
+                }
+                if (!tmp.renameTo(dst)) {
+                    Log.w(TAG, "Failed to rename session_state tmp");
+                    tmp.delete();
+                }
+            } catch (Throwable t) {
+                // swallow — session-state persistence must never break the app
+            }
+        }
+    }
+
+    /** Marker info captured at init() — consumed by CrashBundleBuilder.metadata. */
+    public static boolean lastSessionHadCrashMarker() {
+        return lastSessionHadCrashMarker;
+    }
+
+    public static boolean lastSessionHadSessionMarker() {
+        return lastSessionHadSessionMarker;
+    }
+
+    public static long lastSessionBgMs() {
+        return lastSessionBgMs;
+    }
+
+    /** Path to the previous-session state file (may not exist). */
+    public static String previousSessionStatePath() {
+        if (logDirPath == null) return null;
+        return new File(logDirPath, SESSION_STATE_PREVIOUS).getAbsolutePath();
+    }
+
+    private static String milestonesJson() {
+        StringBuilder sb = new StringBuilder(64);
+        sb.append("[");
+        boolean first = true;
+        for (String m : milestones) {
+            if (!first) sb.append(",");
+            first = false;
+            sb.append(quoteString(m));
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private static String quoteString(String s) {
+        if (s == null) return "null";
+        StringBuilder sb = new StringBuilder(s.length() + 2);
+        sb.append('"');
+        for (int i = 0, n = s.length(); i < n; i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\': sb.append("\\\\"); break;
+                case '"':  sb.append("\\\""); break;
+                case '\n': sb.append("\\n");  break;
+                case '\r': sb.append("\\r");  break;
+                case '\t': sb.append("\\t");  break;
+                default:
+                    if (c < 0x20) sb.append('?');
+                    else sb.append(c);
+            }
+        }
+        sb.append('"');
+        return sb.toString();
     }
 
     private static long readTimestamp(File file) {

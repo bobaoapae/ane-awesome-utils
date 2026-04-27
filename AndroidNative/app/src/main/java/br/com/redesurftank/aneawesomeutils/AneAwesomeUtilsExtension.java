@@ -22,6 +22,11 @@ public class AneAwesomeUtilsExtension implements FREExtension {
         // the crash signal handler's breadcrumb slots, so future crash reports
         // carry "thread count + heap state at moment of death" for OOM triage.
         try { RuntimeStatsCollector.start(); } catch (Throwable ignored) {}
+        // Persist a session-quality snapshot every 10s into .session_state.json,
+        // rotated on next launch and merged into the crash bundle metadata as
+        // quality_hints — gives each crash report a "what did the session look
+        // like seconds before death" summary.
+        try { SessionStateWriter.start(); } catch (Throwable ignored) {}
     }
 
     @Override

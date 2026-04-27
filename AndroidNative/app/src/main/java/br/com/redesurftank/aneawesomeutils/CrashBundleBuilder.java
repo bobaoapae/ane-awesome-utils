@@ -3,6 +3,7 @@ package br.com.redesurftank.aneawesomeutils;
 import android.os.Build;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.util.Arrays;
 import java.util.zip.ZipEntry;
@@ -61,6 +62,11 @@ public final class CrashBundleBuilder {
         String fname = "crash-bundle-" + dateKey + "-" + System.currentTimeMillis() + ".zip";
         File zipFile = new File(bundleDir, fname);
 
+        // Read previous-session quality-hints JSON (raw bytes -> string).
+        // The file is already a valid JSON object emitted by SessionStateWriter,
+        // so we can splice it into metadata.json verbatim.
+        String qualityHintsJson = readPreviousSessionState();
+
         try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
             zos.setLevel(9); // max compression — logs are very compressible, worth the ms
 
@@ -69,7 +75,7 @@ public final class CrashBundleBuilder {
             zos.write(logBytes);
             zos.closeEntry();
 
-            String meta = buildMetadataJson(date, appVersion, sessionId, logBytes.length);
+            String meta = buildMetadataJson(date, appVersion, sessionId, logBytes.length, qualityHintsJson);
             ZipEntry metaEntry = new ZipEntry("metadata.json");
             zos.putNextEntry(metaEntry);
             zos.write(meta.getBytes("UTF-8"));
@@ -115,10 +121,11 @@ public final class CrashBundleBuilder {
         return f.exists() && f.delete();
     }
 
-    private static String buildMetadataJson(String date, String appVersion, String sessionId, int logSize) {
-        StringBuilder sb = new StringBuilder(512);
+    private static String buildMetadataJson(String date, String appVersion, String sessionId, int logSize,
+                                            String qualityHintsJson) {
+        StringBuilder sb = new StringBuilder(1024);
         sb.append("{\n");
-        sb.append("  \"schema\": 1,\n");
+        sb.append("  \"schema\": 2,\n");
         sb.append("  \"app_version\": ").append(quote(appVersion)).append(",\n");
         sb.append("  \"session_id\": ").append(quote(sessionId)).append(",\n");
         sb.append("  \"date\": ").append(quote(date)).append(",\n");
@@ -136,9 +143,43 @@ public final class CrashBundleBuilder {
         sb.append("  \"device_board\": ").append(quote(Build.BOARD)).append(",\n");
         sb.append("  \"device_hardware\": ").append(quote(Build.HARDWARE)).append(",\n");
         sb.append("  \"build_fingerprint\": ").append(quote(Build.FINGERPRINT)).append(",\n");
-        sb.append("  \"log_size_bytes\": ").append(logSize).append("\n");
+        sb.append("  \"log_size_bytes\": ").append(logSize).append(",\n");
+        sb.append("  \"had_crash_marker\": ").append(NativeLogManager.lastSessionHadCrashMarker()).append(",\n");
+        sb.append("  \"had_session_marker\": ").append(NativeLogManager.lastSessionHadSessionMarker()).append(",\n");
+        sb.append("  \"bg_marker_ms\": ").append(NativeLogManager.lastSessionBgMs());
+        if (qualityHintsJson != null && !qualityHintsJson.isEmpty()) {
+            sb.append(",\n");
+            sb.append("  \"quality_hints\": ").append(qualityHintsJson).append("\n");
+        } else {
+            sb.append("\n");
+        }
         sb.append("}\n");
         return sb.toString();
+    }
+
+    private static String readPreviousSessionState() {
+        try {
+            String path = NativeLogManager.previousSessionStatePath();
+            if (path == null) return null;
+            File f = new File(path);
+            if (!f.exists() || f.length() == 0) return null;
+            FileInputStream fis = new FileInputStream(f);
+            try {
+                byte[] buf = new byte[(int) f.length()];
+                int read = 0;
+                while (read < buf.length) {
+                    int n = fis.read(buf, read, buf.length - read);
+                    if (n < 0) break;
+                    read += n;
+                }
+                return new String(buf, 0, read, "UTF-8").trim();
+            } finally {
+                try { fis.close(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            AneAwesomeUtilsLogging.w(TAG, "readPreviousSessionState failed: " + t);
+            return null;
+        }
     }
 
     private static String primaryAbi() {
