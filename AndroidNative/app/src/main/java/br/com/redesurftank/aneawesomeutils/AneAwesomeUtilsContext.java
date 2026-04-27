@@ -477,12 +477,12 @@ public class AneAwesomeUtilsContext extends FREContext {
             return false;
         }
         try {
-            AneAwesomeUtilsLogging.i(TAG, "Registering client certificate for domain: " + domain.toLowerCase());
+            AneAwesomeUtilsLogging.d(TAG, "Registering client certificate for domain: " + domain.toLowerCase());
             ClientCertificateEntry entry = buildClientCertificate(domain, pem);
             synchronized (_clientCertificateLock) {
                 _clientCertificates.put(domain.toLowerCase(), entry);
             }
-            AneAwesomeUtilsLogging.i(TAG, "Successfully registered client certificate for domain: " + domain.toLowerCase());
+            AneAwesomeUtilsLogging.d(TAG, "Successfully registered client certificate for domain: " + domain.toLowerCase());
             return true;
         } catch (Exception e) {
             AneAwesomeUtilsLogging.e(TAG, "Error registering client certificate for domain: " + domain, e);
