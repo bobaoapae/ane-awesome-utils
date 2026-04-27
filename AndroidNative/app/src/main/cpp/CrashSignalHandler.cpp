@@ -43,6 +43,12 @@ static _Unwind_Reason_Code unwindCallback(struct _Unwind_Context* context, void*
 }
 
 static char g_logFilePath[512] = {0};
+// Marker file written ONLY by the signal handler when a real crash signal fires.
+// Next session checks for this marker to disambiguate "process killed by OS / user
+// swipe-from-recents" (no marker → don't report) from "real native crash" (marker
+// present → report). Path is derived from g_logFilePath at install time:
+// "<logDir>/.crash_marker"
+static char g_crashMarkerPath[576] = {0};
 static struct sigaction g_oldActions[32]; // big enough for any signal number we use
 static const int g_signals[] = {SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSYS};
 static const int g_signalCount = sizeof(g_signals) / sizeof(g_signals[0]);
@@ -476,6 +482,20 @@ static void signalHandler(int sig, siginfo_t* info, void* ctx) {
         close(fd);
     }
 
+    // Write the crash marker file. Async-signal-safe: only open/write/close on a
+    // pre-computed path. Marks this session as a real native crash for the next
+    // boot to find — distinguishes from OS kills / swipe-from-recents which leave
+    // SESSION_MARKER but never invoke this handler.
+    if (g_crashMarkerPath[0]) {
+        int mfd = open(g_crashMarkerPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (mfd >= 0) {
+            const char ch = '1';
+            write(mfd, &ch, 1);
+            fsync(mfd);
+            close(mfd);
+        }
+    }
+
     // Also log to logcat
     __android_log_print(ANDROID_LOG_FATAL, TAG, "Native crash: %s at %p", signalName(sig), info ? info->si_addr : 0);
 
@@ -525,6 +545,17 @@ Java_br_com_redesurftank_aneawesomeutils_NativeLogManager_nativeInstallSignalHan
         strncpy(g_logFilePath, path, sizeof(g_logFilePath) - 1);
         g_logFilePath[sizeof(g_logFilePath) - 1] = 0;
         env->ReleaseStringUTFChars(logPath, path);
+
+        // Derive crash marker path: <logDir>/.crash_marker
+        // Done once at install time so the signal handler only does open/write/close.
+        int len = (int)strlen(g_logFilePath);
+        int slashPos = len;
+        while (slashPos > 0 && g_logFilePath[slashPos - 1] != '/') slashPos--;
+        if (slashPos > 0 && slashPos < (int)sizeof(g_crashMarkerPath) - 16) {
+            memcpy(g_crashMarkerPath, g_logFilePath, (size_t)slashPos);
+            const char* marker = ".crash_marker";
+            memcpy(g_crashMarkerPath + slashPos, marker, strlen(marker) + 1);
+        }
     }
 
     if (xorKey) {

@@ -48,7 +48,13 @@ public class NativeLogManager {
     private static XorOutputStream logOutputStream;
     private static AsyncLogHandler asyncHandler;
     private static final String BACKGROUND_MARKER = ".background_since";
-    private static final long BACKGROUND_GRACE_PERIOD_MS = 2 * 60 * 1000; // 2 minutes
+    // Crash marker written by CrashSignalHandler.cpp when a native signal handler
+    // fires. Presence on next launch = real crash; absence + SESSION_MARKER =
+    // OS kill / user swipe-from-recents (don't report).
+    private static final String CRASH_MARKER = ".crash_marker";
+    // 15 min covers typical multitasking (responder mensagem, atender ligação, etc.)
+    // sem perder LMK kills longos. Antes era 2 min, gerava muitos falsos positivos.
+    private static final long BACKGROUND_GRACE_PERIOD_MS = 15 * 60 * 1000; // 15 minutes
     private static boolean unexpectedShutdown;
     private static String unexpectedShutdownInfo;
     private static final Object lock = new Object();
@@ -107,37 +113,54 @@ public class NativeLogManager {
             }
             logDirPath = baseDir.getAbsolutePath();
 
-            // Check for unexpected shutdown (marker contains crashed session's filename)
+            // Detection algorithm for "real crash" vs "OS kill / user swipe":
+            //   SESSION_MARKER existe?  N → fechou limpo, não reporta.
+            //                            S → continuar:
+            //   CRASH_MARKER existe?    S → signal handler disparou = crash real, REPORTA.
+            //                            N → continuar (sem signal, pode ser kill normal):
+            //   BACKGROUND_MARKER + grace > 15min → kill por OS em bg longo, não reporta.
+            //   BACKGROUND_MARKER + grace < 15min → kill recente, dúvida — não reporta
+            //     (antes reportava mas gera muitos falsos positivos com swipe-from-recents).
+            //   Sem BG marker, sem CRASH marker → process killed em foreground sem signal
+            //     (LMK extremo, OS reboot). Raro. Não reporta — sem signal não temos info útil.
             File sessionMarker = new File(baseDir, SESSION_MARKER);
             File bgMarker = new File(baseDir, BACKGROUND_MARKER);
+            File crashMarker = new File(baseDir, CRASH_MARKER);
             if (sessionMarker.exists()) {
-                // Session wasn't closed cleanly - but was it an OS background kill?
-                if (bgMarker.exists()) {
-                    long bgSince = readTimestamp(bgMarker);
-                    long elapsed = System.currentTimeMillis() - bgSince;
-                    if (bgSince > 0 && elapsed > BACKGROUND_GRACE_PERIOD_MS) {
-                        // App was in background for a long time - OS killed it, not a real crash
-                        unexpectedShutdown = false;
-                        unexpectedShutdownInfo = null;
-                        Log.i(TAG, "Previous session killed by OS after " + (elapsed / 1000) + "s in background, not reporting as crash");
-                    } else {
-                        // App was in background briefly - user likely force-closed it
-                        unexpectedShutdown = true;
-                        String crashedFilename = readMarkerContent(sessionMarker);
-                        unexpectedShutdownInfo = collectUnexpectedShutdownInfo(baseDir, crashedFilename);
-                    }
-                    bgMarker.delete();
-                } else {
-                    // No background marker - crashed while in foreground
+                if (crashMarker.exists()) {
+                    // Real native crash: signal handler fired and wrote the marker.
                     unexpectedShutdown = true;
                     String crashedFilename = readMarkerContent(sessionMarker);
                     unexpectedShutdownInfo = collectUnexpectedShutdownInfo(baseDir, crashedFilename);
+                    Log.i(TAG, "Previous session crashed (native signal), reporting");
+                    crashMarker.delete();
+                } else if (bgMarker.exists()) {
+                    long bgSince = readTimestamp(bgMarker);
+                    long elapsed = System.currentTimeMillis() - bgSince;
+                    unexpectedShutdown = false;
+                    unexpectedShutdownInfo = null;
+                    if (bgSince > 0 && elapsed > BACKGROUND_GRACE_PERIOD_MS) {
+                        Log.i(TAG, "Previous session killed by OS after " + (elapsed / 1000) + "s in background, not reporting");
+                    } else {
+                        Log.i(TAG, "Previous session killed in background (" + (elapsed / 1000) + "s) without crash signal, not reporting");
+                    }
+                } else {
+                    // No bg marker, no crash marker. Either:
+                    //  - User swipe-from-recents while app in foreground (Android may not deliver onPause/DEACTIVATE in time)
+                    //  - Extreme LMK in foreground (rare on modern devices)
+                    //  - OS reboot
+                    // Without a signal we have no diagnostic info anyway. Skip to reduce noise.
+                    unexpectedShutdown = false;
+                    unexpectedShutdownInfo = null;
+                    Log.i(TAG, "Previous session ended in foreground without crash signal, not reporting (likely swipe-from-recents or LMK)");
                 }
                 sessionMarker.delete();
+                bgMarker.delete();
             } else {
                 unexpectedShutdown = false;
                 unexpectedShutdownInfo = null;
                 bgMarker.delete(); // clean up stale bg marker if any
+                crashMarker.delete(); // clean up stale crash marker if any
             }
 
             // Rotate old log files
