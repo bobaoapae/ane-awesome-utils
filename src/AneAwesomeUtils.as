@@ -482,21 +482,6 @@ public class AneAwesomeUtils {
         _extContext.call("awesomeUtils_notifyForeground");
     }
 
-    /**
-     * Record a named milestone in the session-quality state. Persisted to
-     * .session_state.json by the next 10s heartbeat tick and merged into the
-     * crash bundle's metadata.json on subsequent launches as
-     * quality_hints.milestones — useful to know "did the user reach login /
-     * lobby / battle before the crash".
-     * No-op outside Android.
-     */
-    public function markMilestone(name:String):void {
-        if (!_successInit) return;
-        if (!IsAndroid()) return;
-        if (!name || name.length == 0) return;
-        _extContext.call("awesomeUtils_markMilestone", name);
-    }
-
     // --- Windows-specific methods ---
 
     public function preventCaptureScreen():Boolean {

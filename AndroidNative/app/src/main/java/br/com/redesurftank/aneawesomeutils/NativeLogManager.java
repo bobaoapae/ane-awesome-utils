@@ -48,7 +48,6 @@ public class NativeLogManager {
     private static volatile int warnCount;
     private static volatile int warnSuppressedCount;
     private static volatile int totalLogLines;
-    private static final java.util.concurrent.CopyOnWriteArraySet<String> milestones = new java.util.concurrent.CopyOnWriteArraySet<>();
     private static volatile long lastBackgroundMs;
     private static volatile String currentLogFileName;
 
@@ -217,7 +216,6 @@ public class NativeLogManager {
             warnCount = 0;
             warnSuppressedCount = 0;
             totalLogLines = 0;
-            milestones.clear();
             lastBackgroundMs = 0L;
 
             // Rotate old log files
@@ -579,16 +577,6 @@ public class NativeLogManager {
     }
 
     /**
-     * Record a named milestone for the current session and emit a log line.
-     * The milestone set is persisted by SessionStateWriter on its next tick.
-     */
-    public static void markMilestone(String name) {
-        if (name == null || name.isEmpty()) return;
-        milestones.add(name);
-        try { write("INFO", "Milestone", name); } catch (Throwable ignored) {}
-    }
-
-    /**
      * Persist the current session-quality snapshot to {@code .session_state.json}
      * via atomic rename. Called every 10s by SessionStateWriter and on
      * fg/bg transitions. Best-effort: never throws.
@@ -615,7 +603,6 @@ public class NativeLogManager {
                 sb.append(",\"total_log_lines\":").append(totalLogLines);
                 sb.append(",\"last_background_ms\":").append(lastBackgroundMs);
                 sb.append(",\"current_log_file\":").append(quoteString(currentLogFileName));
-                sb.append(",\"milestones\":").append(milestonesJson());
                 sb.append("}");
                 byte[] payload = sb.toString().getBytes("UTF-8");
 
@@ -660,19 +647,6 @@ public class NativeLogManager {
     public static String previousSessionStatePath() {
         if (logDirPath == null) return null;
         return new File(logDirPath, SESSION_STATE_PREVIOUS).getAbsolutePath();
-    }
-
-    private static String milestonesJson() {
-        StringBuilder sb = new StringBuilder(64);
-        sb.append("[");
-        boolean first = true;
-        for (String m : milestones) {
-            if (!first) sb.append(",");
-            first = false;
-            sb.append(quoteString(m));
-        }
-        sb.append("]");
-        return sb.toString();
     }
 
     private static String quoteString(String s) {
