@@ -482,6 +482,197 @@ public class AneAwesomeUtils {
         _extContext.call("awesomeUtils_notifyForeground");
     }
 
+    // --- Memory probe (Android-only) ---
+
+    /**
+     * Returns one consolidated JSON snapshot for diagnostic test scenarios.
+     * Bits in {@code flags}:
+     * <ul>
+     *   <li>{@code 0x1} (mem) — threads + jvm/native heap + VmRSS/VmSize</li>
+     *   <li>{@code 0x2} (maps) — {@code /proc/self/maps} aggregate counts</li>
+     *   <li>{@code 0x4} (internal) — sizes of the ANE's own queues/maps</li>
+     * </ul>
+     * Defaults to {@code 0x7} (all). Returns {@code null} on non-Android or
+     * if the .ane build doesn't expose the FREFunction yet (graceful
+     * degradation for older binaries deployed in {@code sharedAne/}).
+     */
+    public function probeTick(flags:int = 7):String {
+        if (!_successInit) return null;
+        if (!IsAndroid()) return null;
+        try {
+            return _extContext.call("awesomeUtils_probeTick", flags) as String;
+        } catch (e:Error) {
+            return null;
+        }
+        return null;
+    }
+
+    /**
+     * Forces bionic {@code mallopt(M_PURGE_ALL, 0)} to ask scudo to munmap
+     * idle :secondary regions. Returns delta JSON (rc, durationUs, native +
+     * vma + secondary before/after). Used by the diagnostic test scenario
+     * to separate fragmentation-induced VMA accumulation from live retainers.
+     * Null on non-Android.
+     */
+    public function triggerMemoryPurge():String {
+        if (!_successInit) return null;
+        if (!IsAndroid()) return null;
+        try {
+            return _extContext.call("awesomeUtils_triggerMemoryPurge") as String;
+        } catch (e:Error) {
+            return null;
+        }
+        return null;
+    }
+
+    /**
+     * Start native allocation tracing — PLT-hooks libCore.so's malloc/free/
+     * mmap/munmap. Allocations >= 64 KB get their full stack captured.
+     * Returns 1=ok, 0=already active, -1=failure. Null on non-Android.
+     */
+    public function allocTracerStart():int {
+        if (!_successInit) return -1;
+        if (!IsAndroid()) return -1;
+        try {
+            return _extContext.call("awesomeUtils_allocTracerStart") as int;
+        } catch (e:Error) { return -1; }
+        return -1;
+    }
+
+    /** Stop native allocation tracing. Returns 1=ok, 0=not active, -1=err. */
+    public function allocTracerStop():int {
+        if (!_successInit) return -1;
+        if (!IsAndroid()) return -1;
+        try {
+            return _extContext.call("awesomeUtils_allocTracerStop") as int;
+        } catch (e:Error) { return -1; }
+        return -1;
+    }
+
+    /**
+     * Dump JSON of currently-live allocations, sorted by size desc, top-N.
+     * Each entry: {addr, size, kind (0=malloc,1=calloc,2=realloc,3=mmap),
+     * tsMs, stack:[symbolized PC strings]}.
+     */
+    public function allocTracerDump(topN:int = -1):String {
+        if (!_successInit) return null;
+        if (!IsAndroid()) return null;
+        try {
+            return _extContext.call("awesomeUtils_allocTracerDump", topN) as String;
+        } catch (e:Error) { return null; }
+        return null;
+    }
+
+    /**
+     * Tag the current capture phase. Subsequent alloc records are stamped
+     * with this name until the next mark. Returns the assigned phase id
+     * (>= 1 on success, -1 on failure / non-Android).
+     */
+    public function allocTracerMark(name:String):int {
+        if (!_successInit) return -1;
+        if (!IsAndroid()) return -1;
+        try {
+            return _extContext.call("awesomeUtils_allocTracerMark", name == null ? "" : name) as int;
+        } catch (e:Error) { return -1; }
+        return -1;
+    }
+
+    /**
+     * Walk live alloc table; free pointers whose phase name contains
+     * <code>phaseSubstring</code> AND were alloc'd more than
+     * <code>minAgeMs</code> ago. Returns JSON {scanned,matched,freed,...}.
+     *
+     * <p>Caller contract — must run BEFORE invoking:
+     * <ol>
+     *   <li>flash.system.System.gc() at least twice</li>
+     *   <li>awesomeUtils_triggerMemoryPurge() (mallopt M_PURGE_ALL)</li>
+     *   <li>The matching phases must be logically dead (room exited etc).</li>
+     * </ol>
+     */
+    public function allocTracerPurgeStalePhase(phaseSubstring:String, minAgeMs:int = 2000, maxFree:int = 100000):String {
+        if (!_successInit) return null;
+        if (!IsAndroid()) return null;
+        try {
+            return _extContext.call("awesomeUtils_allocTracerPurgeStalePhase",
+                                     phaseSubstring == null ? "" : phaseSubstring,
+                                     minAgeMs, maxFree) as String;
+        } catch (e:Error) { return null; }
+        return null;
+    }
+
+    /**
+     * Install the libCore.so deferred-destruction force-drain workaround.
+     * Background thread periodically calls Adobe's own deferred-completion
+     * function on pending owner structs, reclaiming the leaked BitmapData/
+     * Texture pixel buffers that accumulate during render-idle phases (e.g.
+     * matchroom_match_wait). Returns 1 on success, -1 on failure / non-Android.
+     * Idempotent.
+     */
+    public function deferDrainInstall():int {
+        if (!_successInit) return -1;
+        if (!IsAndroid()) return -1;
+        try {
+            return _extContext.call("awesomeUtils_deferDrainInstall") as int;
+        } catch (e:Error) { return -1; }
+        return -1;
+    }
+
+    public function deferDrainUninstall():int {
+        if (!_successInit) return -1;
+        if (!IsAndroid()) return -1;
+        try {
+            return _extContext.call("awesomeUtils_deferDrainUninstall") as int;
+        } catch (e:Error) { return -1; }
+        return -1;
+    }
+
+    public function deferDrainStatus():Object {
+        if (!_successInit) return null;
+        if (!IsAndroid()) return null;
+        try {
+            var json:String = _extContext.call("awesomeUtils_deferDrainStatus") as String;
+            if (json == null || json.length == 0) return null;
+            return JSON.parse(json);
+        } catch (e:Error) { return null; }
+        return null;
+    }
+
+    /**
+     * Calls bionic {@code mallopt(M_DECAY_TIME, seconds)}. Setting to 0
+     * makes scudo release freed slabs back to the kernel immediately
+     * (reduces steady-state RSS at marginal alloc cost). Default value
+     * on Android is typically 1 second. Returns the mallopt rc (1 = ok,
+     * 0 = failure). Null on non-Android.
+     */
+    public function setAllocatorDecayTime(seconds:int = 0):int {
+        if (!_successInit) return -1;
+        if (!IsAndroid()) return -1;
+        try {
+            return _extContext.call("awesomeUtils_setAllocatorDecayTime", seconds) as int;
+        } catch (e:Error) {
+            return -1;
+        }
+        return -1;
+    }
+
+    /**
+     * Returns one snapshot of {@code /proc/self/maps} aggregated per
+     * trailing-name field, as JSON:
+     * <pre>{"ts":N,"totalCount":N,"totalSizeKb":N,"byPath":{"path":{"count":N,"sizeKb":N},...}}</pre>
+     * Diff two snapshots (baseline vs post-battle) to identify which lib
+     * or anon cookie grew. Null on non-Android or older .ane builds.
+     */
+    public function probeMapsByPath():String {
+        if (!_successInit) return null;
+        if (!IsAndroid()) return null;
+        try {
+            return _extContext.call("awesomeUtils_probeMapsByPath") as String;
+        } catch (e:Error) {
+            return null;
+        }
+        return null;
+    }
+
     // --- Windows-specific methods ---
 
     public function preventCaptureScreen():Boolean {
@@ -870,6 +1061,25 @@ public class AneAwesomeUtils {
 
     public function profilerStart(outputPath:String, options:Object = null):Boolean {
         if (!_successInit) return false;
+
+        // Android subset: only the Scout TCP byte tap is available currently.
+        // Memory/render/AS3-object hooks require additional reverse-engineering
+        // of libCore.so symbols (Phase B work — not in this delivery). The
+        // .flmc file produced is parser-compatible with the Windows output.
+        if (IsAndroid()) {
+            var port:int = options != null && options.telemetryPort !== undefined
+                    ? int(options.telemetryPort) : 0;
+            var hdr:String = options != null && options.headerJson !== undefined
+                    ? String(options.headerJson)
+                    : "{\"compression\":\"deflate\",\"wire_protocol\":\"scout-amf3\",\"platform\":\"android\"}";
+            try {
+                var rc:int = int(_extContext.call("awesomeUtils_profilerStart",
+                                                  outputPath, hdr, port));
+                return rc > 0;
+            } catch (eA:Error) { return false; }
+            return false;
+        }
+
         if (!IsWindows()) return false;
 
         var timing:Boolean = options != null && options.timing !== undefined
@@ -920,6 +1130,13 @@ public class AneAwesomeUtils {
 
     public function profilerStop():Boolean {
         if (!_successInit) return false;
+        if (IsAndroid()) {
+            try {
+                var rc:int = int(_extContext.call("awesomeUtils_profilerStop"));
+                return rc > 0;
+            } catch (e:Error) { return false; }
+            return false;
+        }
         if (!IsWindows()) return false;
         var ok:Boolean = _extContext.call("awesomeUtils_profilerStop") as Boolean;
         return ok;
@@ -933,6 +1150,15 @@ public class AneAwesomeUtils {
 
     public function profilerGetStatus():Object {
         if (!_successInit) return null;
+        if (IsAndroid()) {
+            try {
+                // Android impl returns a JSON string via the FREFunction.
+                var json:String = _extContext.call("awesomeUtils_profilerGetStatus") as String;
+                if (json == null || json.length == 0) return null;
+                return JSON.parse(json);
+            } catch (e:Error) { return null; }
+            return null;
+        }
         if (!IsWindows()) return null;
         return _extContext.call("awesomeUtils_profilerGetStatus") as Object;
     }

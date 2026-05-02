@@ -12,6 +12,13 @@ android {
         minSdk = 21
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // shadowhook only ships arm64-v8a + armeabi-v7a prefab libs.
+        // Android Adobe AIR PVP target is ARM-only anyway (no x86 phones in
+        // production for this game), so restricting ABIs is safe.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     buildTypes {
@@ -30,6 +37,9 @@ android {
             version = "4.0.2"
         }
     }
+    buildFeatures {
+        prefab = true
+    }
 }
 
 dependencies {
@@ -39,6 +49,9 @@ dependencies {
     api(libs.dnsjava)
     api(libs.fastXml)
     api(libs.staxApi)
+    // shadowhook — ByteDance inline hook library, used to instrument
+    // libCore.so malloc/free/mmap/munmap for native allocation tracing.
+    implementation("com.bytedance.android:shadowhook:2.0.0")
     compileOnly(files("C:/AIRSdks/AIRSDK_51.1.3.10/lib/android/FlashRuntimeExtensions.jar"))
     compileOnly(files("C:/AIRSdks/AIRSDK_51.1.3.10/lib/android/lib/runtimeClasses.jar"))
 }

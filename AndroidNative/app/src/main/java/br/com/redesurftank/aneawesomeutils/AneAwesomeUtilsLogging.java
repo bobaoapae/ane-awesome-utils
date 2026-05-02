@@ -36,6 +36,10 @@ public class AneAwesomeUtilsLogging {
     }
 
     public static void i(String tag, String msg) {
+        // Also mirror to logcat so test instrumentation can grep `adb logcat`
+        // without having to decrypt the rolling XOR log file. Negligible cost
+        // (one extra Log.i syscall per INFO-level message).
+        Log.i(tag, msg);
         log(Log.INFO, tag, msg);
     }
 

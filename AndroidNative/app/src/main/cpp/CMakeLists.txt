@@ -12,25 +12,49 @@ cmake_minimum_required(VERSION 4.0.2)
 # build script scope).
 project("emulatordetector")
 
-# Creates and names a library, sets it as either STATIC
-# or SHARED, and provides the relative paths to its source code.
-# You can define multiple libraries, and CMake builds them for you.
-# Gradle automatically packages shared libraries with your APK.
-#
-# In this top level CMakeLists.txt, ${CMAKE_PROJECT_NAME} is used to define
-# the target library name; in the sub-module's CMakeLists.txt, ${PROJECT_NAME}
-# is preferred for the same purpose.
-#
-# In order to load a library into your app from Java/Kotlin, you must call
-# System.loadLibrary() and pass the name of the library defined here;
-# for GameActivity/NativeActivity derived applications, the same library name must be
-# used in the AndroidManifest.xml file.
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# shared/profiler — cross-platform profiler core (CaptureController,
+# DeepProfilerController, sinks, miniz). Path resolves up from the Android
+# Gradle module to the repo's shared dir.
+set(SHARED_PROFILER ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../shared/profiler)
+
+# Compile miniz (zlib-compatible deflate, single C file) directly into our
+# library — avoids a separate static lib step and keeps the .so self-contained.
+set_source_files_properties(${SHARED_PROFILER}/third_party/miniz/miniz.c PROPERTIES
+    COMPILE_FLAGS "-w")  # silence miniz's intentional sign-comparison warnings
+
 add_library(${CMAKE_PROJECT_NAME} SHARED
-        # List C/C++ source files with relative paths to this CMakeLists.txt.
+        # ANE existing sources
         Main.cpp
         EmulatorDetection.cpp
         CrashSignalHandler.cpp
-        AirIMEGuard.cpp)
+        AirIMEGuard.cpp
+        probe_native.cpp
+        alloc_tracer.cpp
+        defer_drain.cpp
+
+        # Profiler core (shared with Windows / iOS / macOS)
+        ${SHARED_PROFILER}/src/RawFileSink.cpp
+        ${SHARED_PROFILER}/src/ZlibFileSink.cpp
+        ${SHARED_PROFILER}/src/CaptureController.cpp
+        ${SHARED_PROFILER}/src/DeepProfilerController.cpp
+        ${SHARED_PROFILER}/third_party/miniz/miniz.c
+
+        # Android-specific runtime hook
+        profiler/AndroidRuntimeHook.cpp
+
+        # JNI bridge for AS3 → native profiler
+        profiler/AndroidProfilerBridge.cpp)
+
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+        ${SHARED_PROFILER}/include
+        ${SHARED_PROFILER}/third_party/miniz
+        ${CMAKE_CURRENT_SOURCE_DIR}/profiler)
+
+# shadowhook — prebuilt shared library for inline hooking, distributed via prefab AAR.
+find_package(shadowhook REQUIRED CONFIG)
 
 # Specifies libraries CMake should link to your target library. You
 # can link libraries from various origins, such as libraries defined in this
@@ -38,4 +62,5 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
 target_link_libraries(${CMAKE_PROJECT_NAME}
         # List libraries link to the target library
         android
-        log)
+        log
+        shadowhook::shadowhook)

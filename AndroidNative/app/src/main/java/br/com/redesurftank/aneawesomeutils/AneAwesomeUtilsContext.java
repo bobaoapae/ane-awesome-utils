@@ -169,6 +169,21 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(DeleteCrashBundle.KEY, new DeleteCrashBundle());
         functionMap.put(NotifyBackground.KEY, new NotifyBackground());
         functionMap.put(NotifyForeground.KEY, new NotifyForeground());
+        functionMap.put(ProbeTick.KEY, new ProbeTick());
+        functionMap.put(TriggerMemoryPurge.KEY, new TriggerMemoryPurge());
+        functionMap.put(SetAllocatorDecayTime.KEY, new SetAllocatorDecayTime());
+        functionMap.put(ProbeMapsByPath.KEY, new ProbeMapsByPath());
+        functionMap.put(AllocTracerStart.KEY, new AllocTracerStart());
+        functionMap.put(AllocTracerStop.KEY, new AllocTracerStop());
+        functionMap.put(AllocTracerDump.KEY, new AllocTracerDump());
+        functionMap.put(AllocTracerMark.KEY, new AllocTracerMark());
+        functionMap.put(AllocTracerPurgeStalePhase.KEY, new AllocTracerPurgeStalePhase());
+        functionMap.put(DeferDrainInstall.KEY, new DeferDrainInstall());
+        functionMap.put(DeferDrainUninstall.KEY, new DeferDrainUninstall());
+        functionMap.put(DeferDrainStatus.KEY, new DeferDrainStatus());
+        functionMap.put(ProfilerStart.KEY, new ProfilerStart());
+        functionMap.put(ProfilerStop.KEY, new ProfilerStop());
+        functionMap.put(ProfilerGetStatus.KEY, new ProfilerGetStatus());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -1735,6 +1750,15 @@ public class AneAwesomeUtilsContext extends FREContext {
                 String level = args[0].getAsString();
                 String tag = args[1].getAsString();
                 String message = args[2].getAsString();
+                // Mirror to Android logcat so test/CI scripts can grep `adb logcat`
+                // without having to pull + decrypt the XOR-encoded rolling log
+                // file. The level string is one of "DEBUG"/"INFO"/"WARN"/"ERROR".
+                try {
+                    if ("ERROR".equalsIgnoreCase(level))      android.util.Log.e(tag, message);
+                    else if ("WARN".equalsIgnoreCase(level))  android.util.Log.w(tag, message);
+                    else if ("DEBUG".equalsIgnoreCase(level)) android.util.Log.d(tag, message);
+                    else                                       android.util.Log.i(tag, message);
+                } catch (Throwable ignored) {}
                 NativeLogManager.write(level, tag, message);
             } catch (Exception e) {
                 // ignore
@@ -1909,5 +1933,498 @@ public class AneAwesomeUtilsContext extends FREContext {
             NativeLogManager.onForeground();
             return null;
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Memory probe surface — used by AS3 test scenarios to correlate the
+    // VMA/scudo:secondary curve with AS3 manager / ANE queue sizes during
+    // long-burn diagnostic runs. See plans/quero-que-crie-um-replicated-milner.md
+    // -------------------------------------------------------------------
+
+    /**
+     * {@code awesomeUtils_probeTick(flags:int):String}
+     *
+     * <p>Returns one consolidated JSON snapshot covering:
+     *   bit 0 ({@code mem})       — threads, jvm/native heap, VmRSS/VmSize
+     *   bit 1 ({@code maps})      — {@code /proc/self/maps} aggregate counts
+     *   bit 2 ({@code internal})  — sizes of the ANE's own queues/maps
+     *
+     * <p>Caller passes {@code flags=0x7} for everything, or just the bits it
+     * needs (mem is cheap, maps is ~20–80 ms on a 60k-mapping process,
+     * internal is cheap). All sub-objects are always emitted (with default
+     * values when their bit is off) so the JSON shape is stable for parsers.
+     */
+    public static class ProbeTick implements FREFunction {
+        public static final String KEY = "awesomeUtils_probeTick";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            AneAwesomeUtilsContext ctx = (AneAwesomeUtilsContext) context;
+            int flags;
+            try {
+                flags = (args != null && args.length > 0 && args[0] != null) ? args[0].getAsInt() : 0x7;
+            } catch (Exception e) {
+                flags = 0x7;
+            }
+            try {
+                StringBuilder sb = new StringBuilder(512);
+                sb.append("{\"ts\":").append(System.currentTimeMillis());
+
+                // -- mem ------------------------------------------------------
+                sb.append(",\"mem\":");
+                if ((flags & 0x1) != 0) {
+                    int threads = countThreads();
+                    Runtime rt = Runtime.getRuntime();
+                    long jvmUsedKb = (rt.totalMemory() - rt.freeMemory()) / 1024L;
+                    long jvmMaxKb  = rt.maxMemory() / 1024L;
+                    long nativeKb  = android.os.Debug.getNativeHeapAllocatedSize() / 1024L;
+                    long[] proc = readProcStatusKb();  // [vmRss, vmSize]
+                    sb.append("{\"threads\":").append(threads)
+                      .append(",\"jvmUsedKb\":").append(jvmUsedKb)
+                      .append(",\"jvmMaxKb\":").append(jvmMaxKb)
+                      .append(",\"nativeKb\":").append(nativeKb)
+                      .append(",\"vmRssKb\":").append(proc[0])
+                      .append(",\"vmSizeKb\":").append(proc[1]).append('}');
+                } else {
+                    sb.append("null");
+                }
+
+                // -- maps -----------------------------------------------------
+                sb.append(",\"maps\":");
+                if ((flags & 0x2) != 0) {
+                    long[] m = ProbeNative.nativeProbeMaps();
+                    if (m != null && m.length >= ProbeNative.SLOT_COUNT) {
+                        sb.append("{\"total\":").append(m[ProbeNative.SLOT_TOTAL])
+                          .append(",\"scudoSecondary\":").append(m[ProbeNative.SLOT_SCUDO_SECONDARY])
+                          .append(",\"scudoPrimary\":").append(m[ProbeNative.SLOT_SCUDO_PRIMARY])
+                          .append(",\"stacks\":").append(m[ProbeNative.SLOT_STACKS])
+                          .append(",\"dalvik\":").append(m[ProbeNative.SLOT_DALVIK])
+                          .append(",\"other\":").append(m[ProbeNative.SLOT_OTHER])
+                          .append(",\"totalKb\":").append(m[ProbeNative.SLOT_TOTAL_KB])
+                          .append(",\"scudoSecondaryKb\":").append(m[ProbeNative.SLOT_SCUDO_SECONDARY_KB])
+                          .append('}');
+                    } else {
+                        sb.append("null");
+                    }
+                } else {
+                    sb.append("null");
+                }
+
+                // -- internal -------------------------------------------------
+                sb.append(",\"internal\":");
+                if ((flags & 0x4) != 0) {
+                    int webSockets             = ctx._webSockets.size();
+                    int urlLoaderResults       = ctx._urlLoaderResults.size();
+                    int byteBufferQueue        = ctx._byteBufferQueue.size();
+                    int wsMessageQueues        = ctx._webSocketMessageQueues.size();
+                    int wsSenderThreads        = ctx._webSocketSenderThreads.size();
+                    sb.append("{\"webSockets\":").append(webSockets)
+                      .append(",\"urlLoaderResults\":").append(urlLoaderResults)
+                      .append(",\"byteBufferQueue\":").append(byteBufferQueue)
+                      .append(",\"wsMessageQueues\":").append(wsMessageQueues)
+                      .append(",\"wsSenderThreads\":").append(wsSenderThreads).append('}');
+                } else {
+                    sb.append("null");
+                }
+
+                sb.append('}');
+                return FREObject.newObject(sb.toString());
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "probeTick failed", e);
+                try { return FREObject.newObject("{\"error\":\"probeTick threw\"}"); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_triggerMemoryPurge():String}
+     *
+     * <p>Calls bionic {@code mallopt(M_PURGE_ALL, 0)} to force scudo to
+     * {@code munmap} idle :secondary regions. Captures native heap +
+     * {@code /proc/self/maps} VMA count before/after; returns delta JSON.
+     *
+     * <p>Useful for the diagnostic scenario that separates "VMAs the
+     * allocator refuses to return" (purge zeros them, leak is fragmentation)
+     * from "VMAs holding live allocations" (purge no-ops, leak is a
+     * retainer — chase via dumpManagerKeys diff).
+     */
+    /**
+     * {@code awesomeUtils_profilerStart(outputPath:String, headerJson:String, telemetryPort:int):int}
+     *
+     * <p>Starts the Scout TCP byte tap. Output written to a .flmc file at
+     * {@code outputPath}, header JSON populated with {@code headerJson}.
+     * Sockets peered to {@code 127.0.0.1:telemetryPort} are captured;
+     * 0 = no filter (capture all sends).
+     */
+    public static class ProfilerStart implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerStart";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String outputPath = (args != null && args.length > 0 && args[0] != null) ? args[0].getAsString() : "";
+                String headerJson = (args != null && args.length > 1 && args[1] != null) ? args[1].getAsString() : "{}";
+                int port = 0;
+                if (args != null && args.length > 2 && args[2] != null) {
+                    port = args[2].getAsInt();
+                }
+                int rc = Profiler.start(outputPath, headerJson, port);
+                AneAwesomeUtilsLogging.i(TAG, "profilerStart rc=" + rc + " path=" + outputPath + " port=" + port);
+                return FREObject.newObject(rc);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerStart failed", e);
+                try { return FREObject.newObject(-99); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerStop implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerStop";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                int rc = Profiler.stop();
+                AneAwesomeUtilsLogging.i(TAG, "profilerStop rc=" + rc);
+                return FREObject.newObject(rc);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerStop failed", e);
+                try { return FREObject.newObject(-1); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerGetStatus implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerGetStatus";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String json = Profiler.getStatus();
+                return FREObject.newObject(json);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerGetStatus failed", e);
+                try { return FREObject.newObject("{\"error\":\"status threw\"}"); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_allocTracerStart():int}
+     *
+     * <p>Installs PLT/GOT hooks on libCore.so for malloc/calloc/realloc/free/
+     * mmap/munmap. Allocations >= 64 KB are recorded with full stack traces.
+     * Returns 1=ok, 0=already active, -1=failure.
+     */
+    public static class AllocTracerStart implements FREFunction {
+        public static final String KEY = "awesomeUtils_allocTracerStart";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                int rc = AllocTracer.start();
+                AneAwesomeUtilsLogging.i(TAG, "allocTracerStart rc=" + rc);
+                return FREObject.newObject(rc);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "allocTracerStart failed", e);
+                try { return FREObject.newObject(-1); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_allocTracerStop():int}
+     *
+     * <p>Uninstalls allocation hooks. Returns 1=ok, 0=was not active.
+     */
+    public static class AllocTracerStop implements FREFunction {
+        public static final String KEY = "awesomeUtils_allocTracerStop";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                int rc = AllocTracer.stop();
+                AneAwesomeUtilsLogging.i(TAG, "allocTracerStop rc=" + rc);
+                return FREObject.newObject(rc);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "allocTracerStop failed", e);
+                try { return FREObject.newObject(-1); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_allocTracerDump(topN:int):String}
+     *
+     * <p>Returns JSON of live (surviving) allocations sorted by size desc.
+     * Each entry has addr/size/kind/tsMs/stack[symbolized]. Caller can drain
+     * and call again later for incremental analysis.
+     */
+    public static class AllocTracerDump implements FREFunction {
+        public static final String KEY = "awesomeUtils_allocTracerDump";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                int topN = -1;
+                if (args != null && args.length > 0 && args[0] != null) {
+                    topN = args[0].getAsInt();
+                }
+                String json = AllocTracer.dumpAllocs(topN);
+                return FREObject.newObject(json);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "allocTracerDump failed", e);
+                try { return FREObject.newObject("{\"error\":\"dump threw\"}"); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_allocTracerMark(name:String):int}
+     *
+     * <p>Tag the current capture phase. Subsequent allocs are stamped with
+     * the given name until the next mark. Used to attribute leaked
+     * allocations to game phases (matchroom_enter, battle_start, etc.).
+     * Returns the assigned phase id.
+     */
+    public static class AllocTracerMark implements FREFunction {
+        public static final String KEY = "awesomeUtils_allocTracerMark";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String name = (args != null && args.length > 0 && args[0] != null)
+                        ? args[0].getAsString() : "";
+                int rc = AllocTracer.markPhase(name);
+                AneAwesomeUtilsLogging.i(TAG, "allocTracerMark name=" + name + " id=" + rc);
+                return FREObject.newObject(rc);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "allocTracerMark failed", e);
+                try { return FREObject.newObject(-1); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_allocTracerPurgeStalePhase(substr:String, minAgeMs:int, maxFree:int):String}
+     *
+     * <p>Walk the live alloc table, free pointers whose phase name contains
+     * {@code substr} AND were alloc'd more than {@code minAgeMs} ago.
+     * Returns JSON with scanned/matched/freed counts. AS3 caller MUST
+     * guarantee AS3 GC + mallopt(M_PURGE_ALL) ran before invoking this and
+     * that the matching phases are logically dead.
+     */
+    public static class AllocTracerPurgeStalePhase implements FREFunction {
+        public static final String KEY = "awesomeUtils_allocTracerPurgeStalePhase";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String substr = (args != null && args.length > 0 && args[0] != null)
+                        ? args[0].getAsString() : "";
+                int minAgeMs = (args != null && args.length > 1 && args[1] != null)
+                        ? args[1].getAsInt() : 1000;
+                int maxFree = (args != null && args.length > 2 && args[2] != null)
+                        ? args[2].getAsInt() : 100000;
+                String json = AllocTracer.purgeStalePhase(substr, minAgeMs, maxFree);
+                AneAwesomeUtilsLogging.i(TAG, "allocTracerPurgeStalePhase " + json);
+                return FREObject.newObject(json);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "allocTracerPurgeStalePhase failed", e);
+                try { return FREObject.newObject("{\"error\":\"purge threw\"}"); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_deferDrainInstall():int}
+     *
+     * <p>Installs the libCore.so deferred-destruction force-drain workaround.
+     * Hooks the BitmapData/Texture destructor and starts a background thread
+     * that periodically invokes Adobe's own deferred-completion function on
+     * pending owner structs. Returns 1 on success, -1 on failure.
+     */
+    public static class DeferDrainInstall implements FREFunction {
+        public static final String KEY = "awesomeUtils_deferDrainInstall";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                int rc = DeferDrain.install();
+                AneAwesomeUtilsLogging.i(TAG, "deferDrainInstall rc=" + rc);
+                return FREObject.newObject(rc);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "deferDrainInstall failed", e);
+                try { return FREObject.newObject(-1); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class DeferDrainUninstall implements FREFunction {
+        public static final String KEY = "awesomeUtils_deferDrainUninstall";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                int rc = DeferDrain.uninstall();
+                AneAwesomeUtilsLogging.i(TAG, "deferDrainUninstall rc=" + rc);
+                return FREObject.newObject(rc);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "deferDrainUninstall failed", e);
+                try { return FREObject.newObject(-1); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class DeferDrainStatus implements FREFunction {
+        public static final String KEY = "awesomeUtils_deferDrainStatus";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String json = DeferDrain.getStatus();
+                return FREObject.newObject(json);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "deferDrainStatus failed", e);
+                try { return FREObject.newObject("{\"error\":\"status threw\"}"); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_setAllocatorDecayTime(seconds:int):int}
+     *
+     * <p>Calls bionic {@code mallopt(M_DECAY_TIME, seconds)}. Default decay
+     * is ~1 s on most devices — meaning scudo holds freed slabs in cache for
+     * 1 s before returning them to the kernel via {@code madvise(MADV_DONTNEED)}.
+     * Setting to 0 makes free → immediate release (lower steady-state RSS,
+     * marginal alloc cost).
+     *
+     * <p>Returns the int rc from mallopt (1 on success, 0 on failure).
+     */
+    public static class SetAllocatorDecayTime implements FREFunction {
+        public static final String KEY = "awesomeUtils_setAllocatorDecayTime";
+
+        private static final int M_DECAY_TIME = -100;
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                int seconds = 0;
+                if (args != null && args.length > 0 && args[0] != null) {
+                    seconds = args[0].getAsInt();
+                }
+                int rc = ProbeNative.nativeMallopt(M_DECAY_TIME, seconds);
+                AneAwesomeUtilsLogging.i(TAG, "mallopt(M_DECAY_TIME, " + seconds + ") rc=" + rc);
+                return FREObject.newObject(rc);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "setAllocatorDecayTime failed", e);
+                try { return FREObject.newObject(-1); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class TriggerMemoryPurge implements FREFunction {
+        public static final String KEY = "awesomeUtils_triggerMemoryPurge";
+
+        // M_PURGE_ALL — bionic-specific aggressive purge including caches.
+        private static final int M_PURGE_ALL = -104;
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                long nativeBeforeKb = android.os.Debug.getNativeHeapAllocatedSize() / 1024L;
+                long[] mapsBefore = ProbeNative.nativeProbeMaps();
+                long vmaBefore       = mapsBefore != null ? mapsBefore[ProbeNative.SLOT_TOTAL] : -1L;
+                long secondaryBefore = mapsBefore != null ? mapsBefore[ProbeNative.SLOT_SCUDO_SECONDARY] : -1L;
+                long t0 = System.nanoTime();
+
+                int rc = ProbeNative.nativeMallopt(M_PURGE_ALL, 0);
+
+                long durationUs = (System.nanoTime() - t0) / 1000L;
+                long nativeAfterKb = android.os.Debug.getNativeHeapAllocatedSize() / 1024L;
+                long[] mapsAfter = ProbeNative.nativeProbeMaps();
+                long vmaAfter       = mapsAfter != null ? mapsAfter[ProbeNative.SLOT_TOTAL] : -1L;
+                long secondaryAfter = mapsAfter != null ? mapsAfter[ProbeNative.SLOT_SCUDO_SECONDARY] : -1L;
+
+                String json = new StringBuilder(256)
+                        .append("{\"rc\":").append(rc)
+                        .append(",\"durationUs\":").append(durationUs)
+                        .append(",\"nativeBeforeKb\":").append(nativeBeforeKb)
+                        .append(",\"nativeAfterKb\":").append(nativeAfterKb)
+                        .append(",\"nativeDeltaKb\":").append(nativeAfterKb - nativeBeforeKb)
+                        .append(",\"vmaBefore\":").append(vmaBefore)
+                        .append(",\"vmaAfter\":").append(vmaAfter)
+                        .append(",\"vmaDelta\":").append(vmaAfter - vmaBefore)
+                        .append(",\"secondaryBefore\":").append(secondaryBefore)
+                        .append(",\"secondaryAfter\":").append(secondaryAfter)
+                        .append(",\"secondaryDelta\":").append(secondaryAfter - secondaryBefore)
+                        .append('}').toString();
+                AneAwesomeUtilsLogging.i("ProbePurge", json);
+                return FREObject.newObject(json);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "triggerMemoryPurge failed", e);
+                try { return FREObject.newObject("{\"error\":\"purge threw\"}"); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_probeMapsByPath():String}
+     *
+     * <p>Returns one snapshot of {@code /proc/self/maps} aggregated per
+     * trailing-name field, as JSON:
+     * <pre>{"ts":N,"totalCount":N,"totalSizeKb":N,"byPath":{"path":{"count":N,"sizeKb":N},...}}</pre>
+     *
+     * <p>The diff between two snapshots (e.g., baseline vs post-battle) tells
+     * exactly which lib/cookie grew: {@code [anon:libc_malloc]} for native
+     * heap chunks, {@code /dev/kgsl-3d0} for GPU textures, file paths for
+     * mmap'd assets, etc.
+     *
+     * <p>Cheaper than a host-side {@code adb shell run-as cat /proc/<pid>/maps}
+     * poll because it stays in the AS3 thread tick (no adb round trip, no
+     * extra subprocess per cycle).
+     */
+    public static class ProbeMapsByPath implements FREFunction {
+        public static final String KEY = "awesomeUtils_probeMapsByPath";
+
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String json = ProbeNative.nativeProbeMapsByPath();
+                if (json == null) {
+                    return FREObject.newObject("{\"error\":\"probeMapsByPath read failed\"}");
+                }
+                // Splice the AS3-side timestamp at the head — Java has clean
+                // System.currentTimeMillis() while the C side avoided pulling
+                // <ctime> just for this.
+                long ts = System.currentTimeMillis();
+                String withTs = "{\"ts\":" + ts + "," + json.substring(1);
+                return FREObject.newObject(withTs);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "probeMapsByPath failed", e);
+                try { return FREObject.newObject("{\"error\":\"probeMapsByPath threw\"}"); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    // Helpers shared by ProbeTick — duplicated from RuntimeStatsCollector to
+    // avoid widening that class's API surface for a one-off caller.
+
+    private static int countThreads() {
+        String[] names = new java.io.File("/proc/self/task").list();
+        return names == null ? -1 : names.length;
+    }
+
+    /** Returns {@code [vmRssKb, vmSizeKb]}. Both are {@code 0} on read failure. */
+    private static long[] readProcStatusKb() {
+        long vmRssKb = 0L, vmSizeKb = 0L;
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.FileReader("/proc/self/status"))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                if      (line.startsWith("VmRSS:"))  vmRssKb  = parseKb(line);
+                else if (line.startsWith("VmSize:")) vmSizeKb = parseKb(line);
+            }
+        } catch (Throwable ignored) { /* best-effort */ }
+        return new long[]{vmRssKb, vmSizeKb};
+    }
+
+    private static long parseKb(String line) {
+        long v = 0L;
+        for (int i = 0, n = line.length(); i < n; i++) {
+            char c = line.charAt(i);
+            if (c >= '0' && c <= '9') v = v * 10L + (c - '0');
+        }
+        return v;
     }
 }
