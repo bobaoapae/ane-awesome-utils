@@ -33,9 +33,21 @@ struct BuildIdMatch {
 };
 
 // AArch64 build-id 7dde220f62c90358cfc2cb082f5ce63ab0cd3966 → 0x89c42c
-// ARMv7  build-id 582a8f65b8dcb741e5eb869ccf9526137270d99e → TBD (next iter)
+//   Located via leak-leaf return address +0x89c48c in production stack traces
+//   from alloc_tracer 3x scenario.
+//
+// ARMv7 build-id 582a8f65b8dcb741e5eb869ccf9526137270d99e → 0x5541cd (Thumb bit set)
+//   Located by same leak-leaf approach: ARMv7 leak leaf is +0x554204 (function
+//   body), entry at 0x5541cc (push {r4-r7, lr} + push.w {r8, r9, r11}).
+//   Structural match with ARM64 verified:
+//     - mov r4, r0 (save this/size)         ↔ mov x19, x0
+//     - mov r8, r1 (save flags arg)         ↔ mov w20, w1
+//     - PC-rel load + double-deref of global ↔ adrp+ldr+ldr of singleton
+//     - movs r1, #0x8; blx r2 (sampler call) ↔ orr w1, wzr, #0x8; blr x9
+//     - cmp r0, #1; bne (skip on false)     ↔ tbz w0, #0 (skip on false)
 static constexpr BuildIdMatch kKnownBuilds[] = {
     {"7dde220f62c90358cfc2cb082f5ce63ab0cd3966", 0x89c42c},
+    {"582a8f65b8dcb741e5eb869ccf9526137270d99e", 0x5541cd},  // +1 Thumb bit
 };
 
 // Function signature inferred from disassembly of libCore.so+0x89c42c (ARM64):
