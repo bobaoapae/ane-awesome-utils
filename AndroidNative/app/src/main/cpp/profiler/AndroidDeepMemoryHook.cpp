@@ -28,32 +28,37 @@ namespace {
 //   3. Add entry below.
 
 struct BuildIdMatch {
-    const char*   build_id_hex;     // hex string, no separators
-    std::uintptr_t alloc_offset;    // GCHeap::Alloc entry from libCore.so base
+    const char*   build_id_hex;          // hex string, no separators
+    std::uintptr_t gcheap_alloc_offset;  // GCHeap::Alloc entry (slow path, calls malloc)
+    std::uintptr_t fixed_alloc_offset;   // FixedMalloc::Alloc entry (fast path, free lists)
 };
 
-// AArch64 build-id 7dde220f62c90358cfc2cb082f5ce63ab0cd3966 → 0x89c42c
-//   Located via leak-leaf return address +0x89c48c in production stack traces
-//   from alloc_tracer 3x scenario.
+// AArch64 build-id 7dde220f62c90358cfc2cb082f5ce63ab0cd3966
+//   GCHeap::Alloc:        +0x89c42c
+//   FixedMalloc::Alloc:   +0x8a11d8 (size-class fast path; size <= 0x7e0 = 2016 bytes;
+//                                     each size class has a 104-byte allocator entry
+//                                     with free list + mutex; entry table indexed by
+//                                     `((size+7)>>3)` → byte at .rodata 0xf42982)
+//   Both functions call MMgc internals; together they cover ~all AS3 allocations.
+//   GCHeap path is for raw chunk allocs (>2KB or arena-grow); FixedMalloc fast path
+//   handles the typical small-object slicing within chunks invisible to libc.
 //
-// ARMv7 build-id 582a8f65b8dcb741e5eb869ccf9526137270d99e → 0x5541cd (Thumb bit set)
-//   Located by same leak-leaf approach: ARMv7 leak leaf is +0x554204 (function
-//   body), entry at 0x5541cc (push {r4-r7, lr} + push.w {r8, r9, r11}).
-//   Structural match with ARM64 verified:
-//     - mov r4, r0 (save this/size)         ↔ mov x19, x0
-//     - mov r8, r1 (save flags arg)         ↔ mov w20, w1
-//     - PC-rel load + double-deref of global ↔ adrp+ldr+ldr of singleton
-//     - movs r1, #0x8; blx r2 (sampler call) ↔ orr w1, wzr, #0x8; blr x9
-//     - cmp r0, #1; bne (skip on false)     ↔ tbz w0, #0 (skip on false)
+// ARMv7 build-id 582a8f65b8dcb741e5eb869ccf9526137270d99e
+//   GCHeap::Alloc:        +0x5541cd (Thumb)
+//   FixedMalloc::Alloc:   TBD (next iter)
+//   Structural match with ARM64 verified for GCHeap (see git log of this file).
 static constexpr BuildIdMatch kKnownBuilds[] = {
-    {"7dde220f62c90358cfc2cb082f5ce63ab0cd3966", 0x89c42c},
-    {"582a8f65b8dcb741e5eb869ccf9526137270d99e", 0x5541cd},  // +1 Thumb bit
+    {"7dde220f62c90358cfc2cb082f5ce63ab0cd3966", 0x89c42c, 0x8a11d8},
+    {"582a8f65b8dcb741e5eb869ccf9526137270d99e", 0x5541cd, 0},  // FixedMalloc TBD
 };
 
-// Function signature inferred from disassembly of libCore.so+0x89c42c (ARM64):
-//   void* GCHeap::Alloc(size_t size, int flags);
+// GCHeap::Alloc signature: void* GCHeap::Alloc(size_t size, int flags);
 // AAPCS64: x0 = size, x1 = flags, return in x0.
 typedef void* (*GCHeapAlloc_t)(std::size_t size, int flags);
+
+// FixedMalloc::Alloc signature: void* FixedMalloc::Alloc(this, size_t size, int flags);
+// AAPCS64: x0 = this, x1 = size, x2 = flags, return in x0.
+typedef void* (*FixedAlloc_t)(void* self, std::size_t size, int flags);
 
 // ----- State -----
 
@@ -69,8 +74,10 @@ static std::atomic<std::uint64_t>           g_diag_alloc_failures{0};
 // guard is the same pattern as alloc_tracer's t_in_tracer.
 static thread_local bool t_in_deep_hook = false;
 
-static void* g_stub_alloc                = nullptr;
-static GCHeapAlloc_t g_orig_alloc        = nullptr;
+static void* g_stub_gcheap_alloc      = nullptr;
+static void* g_stub_fixed_alloc       = nullptr;
+static GCHeapAlloc_t g_orig_gcheap_alloc = nullptr;
+static FixedAlloc_t  g_orig_fixed_alloc  = nullptr;
 
 // ----- libCore.so + build-id discovery -----
 
@@ -127,32 +134,61 @@ static void buildIdToHex(const std::uint8_t* bytes, std::size_t len,
     out_hex[len * 2] = '\0';
 }
 
-// Returns matching offset (non-zero) or 0 if no match.
-static std::uintptr_t findOffsetForBuildId(const std::uint8_t* bytes, std::size_t len) {
+// Returns matching entry or null. Caller checks both offsets independently
+// since FixedMalloc::Alloc may not be located for all archs yet.
+static const BuildIdMatch* findEntryForBuildId(const std::uint8_t* bytes, std::size_t len) {
     char hex[81];
-    if (len * 2 + 1 > sizeof(hex)) return 0;
+    if (len * 2 + 1 > sizeof(hex)) return nullptr;
     buildIdToHex(bytes, len, hex);
     for (const auto& m : kKnownBuilds) {
         if (std::strcmp(hex, m.build_id_hex) == 0) {
-            LOGI("build-id matched: %s → offset 0x%lx", hex, (unsigned long)m.alloc_offset);
-            return m.alloc_offset;
+            LOGI("build-id matched: %s → gcheap=0x%lx fixed=0x%lx", hex,
+                 (unsigned long)m.gcheap_alloc_offset, (unsigned long)m.fixed_alloc_offset);
+            return &m;
         }
     }
     LOGW("build-id %s: NOT in known list (%zu entries) — deep memory hook disabled",
          hex, sizeof(kKnownBuilds) / sizeof(kKnownBuilds[0]));
-    return 0;
+    return nullptr;
 }
 
 // ----- Proxy -----
 
 static void* proxy_GCHeapAlloc(std::size_t size, int flags) {
     if (t_in_deep_hook) {
-        return g_orig_alloc ? g_orig_alloc(size, flags) : nullptr;
+        return g_orig_gcheap_alloc ? g_orig_gcheap_alloc(size, flags) : nullptr;
     }
     t_in_deep_hook = true;
     g_diag_alloc_calls.fetch_add(1, std::memory_order_relaxed);
 
-    void* p = g_orig_alloc ? g_orig_alloc(size, flags) : nullptr;
+    void* p = g_orig_gcheap_alloc ? g_orig_gcheap_alloc(size, flags) : nullptr;
+
+    if (p == nullptr) {
+        g_diag_alloc_failures.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_diag_alloc_bytes.fetch_add(size, std::memory_order_relaxed);
+        if (g_active.load(std::memory_order_acquire)) {
+            DeepProfilerController* dpc = g_controller.load(std::memory_order_acquire);
+            if (dpc != nullptr) {
+                dpc->record_alloc_if_untracked(p, static_cast<std::uint64_t>(size));
+            }
+        }
+    }
+    t_in_deep_hook = false;
+    return p;
+}
+
+// FixedMalloc::Alloc proxy — fast path for small allocations via per-size-class
+// free lists. Captures the per-slice allocations within MMgc-managed chunks
+// that are invisible to libc shadowhook (no malloc call on the fast path).
+static void* proxy_FixedAlloc(void* self, std::size_t size, int flags) {
+    if (t_in_deep_hook) {
+        return g_orig_fixed_alloc ? g_orig_fixed_alloc(self, size, flags) : nullptr;
+    }
+    t_in_deep_hook = true;
+    g_diag_alloc_calls.fetch_add(1, std::memory_order_relaxed);
+
+    void* p = g_orig_fixed_alloc ? g_orig_fixed_alloc(self, size, flags) : nullptr;
 
     if (p == nullptr) {
         g_diag_alloc_failures.fetch_add(1, std::memory_order_relaxed);
@@ -193,49 +229,76 @@ bool AndroidDeepMemoryHook::install(DeepProfilerController* controller) {
         return false;
     }
 
-    std::uintptr_t offset = findOffsetForBuildId(info.buildId, info.buildIdLen);
-    if (offset == 0) {
+    const BuildIdMatch* m = findEntryForBuildId(info.buildId, info.buildIdLen);
+    if (m == nullptr || m->gcheap_alloc_offset == 0) {
         // Unknown build-id — refuse to install rather than blindly patch a
         // possibly-different function on a new SDK. RA must be re-done for
         // the new build-id (see header comment).
         return false;
     }
 
-    std::uintptr_t target_addr = info.base + offset;
-    LOGI("install: libCore.so base=0x%lx + offset=0x%lx → target=0x%lx",
-         (unsigned long)info.base, (unsigned long)offset, (unsigned long)target_addr);
-
     g_controller.store(controller, std::memory_order_release);
     g_diag_alloc_calls.store(0);
     g_diag_alloc_bytes.store(0);
     g_diag_alloc_failures.store(0);
 
-    g_stub_alloc = shadowhook_hook_func_addr(
-        reinterpret_cast<void*>(target_addr),
+    // Install GCHeap::Alloc hook (slow path / large alloc + chunk grow).
+    std::uintptr_t gcheap_addr = info.base + m->gcheap_alloc_offset;
+    g_stub_gcheap_alloc = shadowhook_hook_func_addr(
+        reinterpret_cast<void*>(gcheap_addr),
         reinterpret_cast<void*>(&proxy_GCHeapAlloc),
-        reinterpret_cast<void**>(&g_orig_alloc));
+        reinterpret_cast<void**>(&g_orig_gcheap_alloc));
 
-    if (g_stub_alloc == nullptr) {
+    if (g_stub_gcheap_alloc == nullptr) {
         int err = shadowhook_get_errno();
-        LOGE("install: hook failed at 0x%lx: errno=%d %s",
-             (unsigned long)target_addr, err, shadowhook_to_errmsg(err));
+        LOGE("install: GCHeap::Alloc hook failed at 0x%lx: errno=%d %s",
+             (unsigned long)gcheap_addr, err, shadowhook_to_errmsg(err));
         g_controller.store(nullptr, std::memory_order_release);
         return false;
+    }
+    LOGI("install: GCHeap::Alloc hook OK (target=0x%lx, stub=%p)",
+         (unsigned long)gcheap_addr, g_stub_gcheap_alloc);
+
+    // Install FixedMalloc::Alloc hook (fast path / per-size-class free lists)
+    // when offset known for this arch. Optional — GCHeap-only is still useful.
+    if (m->fixed_alloc_offset != 0) {
+        std::uintptr_t fixed_addr = info.base + m->fixed_alloc_offset;
+        g_stub_fixed_alloc = shadowhook_hook_func_addr(
+            reinterpret_cast<void*>(fixed_addr),
+            reinterpret_cast<void*>(&proxy_FixedAlloc),
+            reinterpret_cast<void**>(&g_orig_fixed_alloc));
+        if (g_stub_fixed_alloc == nullptr) {
+            int err = shadowhook_get_errno();
+            LOGW("install: FixedMalloc::Alloc hook FAILED at 0x%lx: errno=%d %s — "
+                 "continuing with GCHeap::Alloc only", (unsigned long)fixed_addr, err,
+                 shadowhook_to_errmsg(err));
+        } else {
+            LOGI("install: FixedMalloc::Alloc hook OK (target=0x%lx, stub=%p) — "
+                 "fast-path free-list allocs now visible",
+                 (unsigned long)fixed_addr, g_stub_fixed_alloc);
+        }
+    } else {
+        LOGI("install: FixedMalloc::Alloc offset not known for this arch — "
+             "GCHeap::Alloc only");
     }
 
     g_active.store(true, std::memory_order_release);
     installed_ = true;
-    LOGI("install: deep memory hook OK (stub=%p, orig=%p)", g_stub_alloc, g_orig_alloc);
     return true;
 }
 
 void AndroidDeepMemoryHook::uninstall() {
     g_active.store(false, std::memory_order_release);
-    if (g_stub_alloc) {
-        shadowhook_unhook(g_stub_alloc);
-        g_stub_alloc = nullptr;
+    if (g_stub_gcheap_alloc) {
+        shadowhook_unhook(g_stub_gcheap_alloc);
+        g_stub_gcheap_alloc = nullptr;
     }
-    g_orig_alloc = nullptr;
+    if (g_stub_fixed_alloc) {
+        shadowhook_unhook(g_stub_fixed_alloc);
+        g_stub_fixed_alloc = nullptr;
+    }
+    g_orig_gcheap_alloc = nullptr;
+    g_orig_fixed_alloc = nullptr;
     g_controller.store(nullptr, std::memory_order_release);
     installed_ = false;
 }
