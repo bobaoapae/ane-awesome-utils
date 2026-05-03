@@ -1,28 +1,35 @@
-// JNI bridge — exposes shared/profiler/CaptureController + AndroidRuntimeHook
-// to Java. Java side (`Profiler.java`) wraps this; FREFunctions in
-// AneAwesomeUtilsContext route AS3 calls to it.
+// JNI bridge — exposes shared/profiler/{CaptureController,DeepProfilerController}
+// + AndroidRuntimeHook to Java. Java side (`Profiler.java`) wraps this;
+// FREFunctions in AneAwesomeUtilsContext route AS3 calls to it.
 //
-// API surface mirrors the Windows ProfilerAneBindings (subset for now):
-//   nativeStart(outputPath, headerJson, telemetryPort) -> int
-//   nativeStop()                                       -> int
-//   nativeGetStatus()                                  -> String (JSON)
+// Two operating modes:
 //
-// State lifecycle:
-//   - One global CaptureController + one AndroidRuntimeHook instance.
-//   - nativeStart: creates controller (if first call), wires hook with
-//     telemetry_port filter, starts capture writer thread.
-//   - nativeStop: stops controller, uninstalls hook (so post-stop AIR
-//     telemetry sends are not classified — saves CPU).
-//   - nativeGetStatus: queries controller + hook diag counters; returns
-//     a JSON-compatible struct that the Java side can pass through to AS3.
+//   1) Legacy Scout-tap mode (CaptureController + AndroidRuntimeHook):
+//      - JNI: nativeStart / nativeStop / nativeGetStatus
+//      - Output: `.flmc` (Scout TCP byte tap, parser-compatible w/ Windows .flmc)
+//      - Active when only AS3 telemetry capture is needed
 //
-// Threading: each JNI call holds a global mutex. Hot path is the hook
-// proxies (no locks across the C++/JNI boundary), so this is fine.
+//   2) Deep .aneprof mode (DeepProfilerController + alloc_tracer wiring):
+//      - JNI: nativeStartDeep / nativeStopDeep / nativeSnapshot / nativeMarker /
+//             nativeRequestGc / nativeGetStatusDeep
+//      - Output: `.aneprof` (timing + native memory events + snapshots + markers)
+//      - Phase 1 implemented: native alloc/free events via alloc_tracer hooks
+//      - Phase 2 (this file): controller lifecycle + JNI surface
+//      - Phase 3 (TBD): AS3 method-frame walker (port from Windows AvmCore reader)
+//      - Phase 4 (TBD): IMemorySampler hook for AS3 alloc/free with ref graph
+//
+// The two modes are mutually exclusive at runtime — only one of g_capture_ctrl
+// vs g_deep_ctrl is active per session. Both share the global mutex.
+//
+// Threading: each JNI call holds g_mu. Hot paths (alloc_tracer hook proxies,
+// Scout send hook) call into the controller without holding g_mu — controllers
+// are internally synchronized.
 
 #include <jni.h>
 #include <android/log.h>
 #include "AndroidRuntimeHook.hpp"
 #include "CaptureController.hpp"
+#include "DeepProfilerController.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -33,13 +40,28 @@
 
 #define LOG_TAG "AneProfilerBridge"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+// Forward-decl to alloc_tracer wiring (defined in alloc_tracer.cpp). When deep
+// profiler is recording with memory enabled, native alloc/free events captured
+// by alloc_tracer's shadowhook proxies are mirrored into the .aneprof stream.
+namespace ane::alloc_tracer {
+    void setDeepProfilerController(ane::profiler::DeepProfilerController* dpc);
+    ane::profiler::DeepProfilerController* getDeepProfilerController();
+    bool isActive();
+}
 
 namespace {
 
-std::mutex                                    g_mu;
-std::unique_ptr<ane::profiler::CaptureController> g_ctrl;
-std::unique_ptr<ane::profiler::AndroidRuntimeHook> g_hook;
+std::mutex                                          g_mu;
+
+// Legacy Scout-tap mode
+std::unique_ptr<ane::profiler::CaptureController>   g_capture_ctrl;
+std::unique_ptr<ane::profiler::AndroidRuntimeHook>  g_hook;
+
+// Deep .aneprof mode
+std::unique_ptr<ane::profiler::DeepProfilerController> g_deep_ctrl;
 
 // Helper: fetch a Java String into a std::string. Returns empty on failure.
 std::string jstrToCpp(JNIEnv* env, jstring j) {
@@ -51,9 +73,25 @@ std::string jstrToCpp(JNIEnv* env, jstring j) {
     return out;
 }
 
+const char* deepStateStr(ane::profiler::DeepProfilerController::State s) {
+    using S = ane::profiler::DeepProfilerController::State;
+    switch (s) {
+        case S::Idle:      return "Idle";
+        case S::Starting:  return "Starting";
+        case S::Recording: return "Recording";
+        case S::Stopping:  return "Stopping";
+        case S::Error:     return "Error";
+    }
+    return "?";
+}
+
 } // namespace
 
 extern "C" {
+
+// ============================================================================
+// Mode 1: Legacy Scout-tap (.flmc)
+// ============================================================================
 
 JNIEXPORT jint JNICALL
 Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStart(
@@ -63,6 +101,11 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStart(
         jint    jTelemetryPort) {
     std::lock_guard<std::mutex> lk(g_mu);
 
+    if (g_deep_ctrl) {
+        LOGE("nativeStart: deep profiler is active — stop it first via nativeStopDeep");
+        return -10;
+    }
+
     std::string output_path = jstrToCpp(env, jOutputPath);
     std::string header_json = jstrToCpp(env, jHeaderJson);
     if (output_path.empty()) {
@@ -70,12 +113,12 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStart(
         return -1;
     }
 
-    if (!g_ctrl) g_ctrl = std::make_unique<ane::profiler::CaptureController>();
-    if (!g_hook) g_hook = std::make_unique<ane::profiler::AndroidRuntimeHook>();
+    if (!g_capture_ctrl) g_capture_ctrl = std::make_unique<ane::profiler::CaptureController>();
+    if (!g_hook)         g_hook         = std::make_unique<ane::profiler::AndroidRuntimeHook>();
 
-    if (g_ctrl->state() != ane::profiler::CaptureController::State::Idle) {
+    if (g_capture_ctrl->state() != ane::profiler::CaptureController::State::Idle) {
         LOGE("nativeStart: controller not Idle (state=%d)",
-             static_cast<int>(g_ctrl->state()));
+             static_cast<int>(g_capture_ctrl->state()));
         return -2;
     }
 
@@ -83,27 +126,28 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStart(
     cfg.output_path = output_path;
     cfg.header_json = header_json;
 
-    if (!g_ctrl->start(cfg)) {
+    if (!g_capture_ctrl->start(cfg)) {
         LOGE("nativeStart: controller.start failed");
         return -3;
     }
 
-    if (!g_hook->install(g_ctrl.get(),
+    if (!g_hook->install(g_capture_ctrl.get(),
                          static_cast<std::uint16_t>(jTelemetryPort))) {
         LOGE("nativeStart: hook.install failed");
-        g_ctrl->stop();
+        g_capture_ctrl->stop();
         return -4;
     }
-    LOGI("nativeStart: ok output=%s port=%d", output_path.c_str(), (int)jTelemetryPort);
+    LOGI("nativeStart: legacy/.flmc mode ok output=%s port=%d",
+         output_path.c_str(), (int)jTelemetryPort);
     return 1;
 }
 
 JNIEXPORT jint JNICALL
 Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStop(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> lk(g_mu);
-    if (!g_ctrl) return 0;
+    if (!g_capture_ctrl) return 0;
     if (g_hook) g_hook->uninstall();
-    g_ctrl->stop();
+    g_capture_ctrl->stop();
     LOGI("nativeStop: ok");
     return 1;
 }
@@ -112,12 +156,12 @@ JNIEXPORT jstring JNICALL
 Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeGetStatus(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> lk(g_mu);
     char buf[1024];
-    if (!g_ctrl) {
+    if (!g_capture_ctrl) {
         snprintf(buf, sizeof(buf),
                  "{\"state\":\"NotInitialized\",\"installed\":false}");
         return env->NewStringUTF(buf);
     }
-    auto status = g_ctrl->status();
+    auto status = g_capture_ctrl->status();
     auto state_str = [&]() -> const char* {
         using S = ane::profiler::CaptureController::State;
         switch (status.state) {
@@ -158,6 +202,236 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeGetStatus(JNIEnv* env, j
              (unsigned long long)connectMatched,
              (unsigned long long)closeCalls);
     return env->NewStringUTF(buf);
+}
+
+// ============================================================================
+// Mode 2: Deep .aneprof
+// ============================================================================
+//
+// Signature mirrors Windows ProfilerAneBindings::profiler_start positional args:
+//   jOutputPath        — path to write .aneprof
+//   jHeaderJson        — initial header JSON metadata
+//   jTiming            — emit MethodEnter/Exit + Frame events (Phase 3 will
+//                        gate this on AS3 walker availability)
+//   jMemory            — emit Alloc/Free/Realloc events (wired via alloc_tracer
+//                        on Android — alloc_tracer.cpp shadowhooks libc and
+//                        forwards to the controller when set)
+//   jSnapshots         — allow profilerSnapshot() event emission
+//   jMaxLive           — bound on per-snapshot live allocation tracking (4096
+//                        default; lower if device memory tight)
+//   jSnapshotIntervalMs — automatic snapshot cadence; 0 = manual only
+//   jAs3Sampling       — Phase 4 (TBD on Android); ignored for now
+
+JNIEXPORT jint JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStartDeep(
+        JNIEnv* env, jclass,
+        jstring  jOutputPath,
+        jstring  jHeaderJson,
+        jboolean jTiming,
+        jboolean jMemory,
+        jboolean jSnapshots,
+        jint     jMaxLive,
+        jint     jSnapshotIntervalMs,
+        jboolean jAs3Sampling) {
+    std::lock_guard<std::mutex> lk(g_mu);
+
+    if (g_capture_ctrl) {
+        LOGE("nativeStartDeep: legacy Scout-tap controller is active — stop "
+             "it first via nativeStop");
+        return -10;
+    }
+
+    std::string output_path = jstrToCpp(env, jOutputPath);
+    std::string header_json = jstrToCpp(env, jHeaderJson);
+    if (output_path.empty()) {
+        LOGE("nativeStartDeep: empty output_path");
+        return -1;
+    }
+
+    if (!g_deep_ctrl) g_deep_ctrl = std::make_unique<ane::profiler::DeepProfilerController>();
+
+    if (g_deep_ctrl->state() != ane::profiler::DeepProfilerController::State::Idle) {
+        LOGE("nativeStartDeep: controller not Idle (state=%d)",
+             static_cast<int>(g_deep_ctrl->state()));
+        return -2;
+    }
+
+    ane::profiler::DeepProfilerController::Config cfg;
+    cfg.output_path = output_path;
+    cfg.header_json = header_json;
+    cfg.timing_enabled    = (jTiming    != JNI_FALSE);
+    cfg.memory_enabled    = (jMemory    != JNI_FALSE);
+    cfg.render_enabled    = false;  // Stage3D render hook = no Android equiv yet
+    cfg.snapshots_enabled = (jSnapshots != JNI_FALSE);
+    cfg.max_live_allocations_per_snapshot =
+        jMaxLive > 0 ? static_cast<std::uint32_t>(jMaxLive) : 4096;
+    cfg.snapshot_interval_ms =
+        jSnapshotIntervalMs > 0 ? static_cast<std::uint32_t>(jSnapshotIntervalMs) : 0;
+
+    if (!g_deep_ctrl->start(cfg)) {
+        LOGE("nativeStartDeep: controller.start failed");
+        return -3;
+    }
+
+    // Wire alloc_tracer → DeepProfilerController so libc malloc/free/mmap
+    // events captured by shadowhook proxies (filtered to allocations whose
+    // CALLER is inside libCore.so) flow into the .aneprof stream.
+    //
+    // Note: the user must also call AllocTracer.start() separately to install
+    // the shadowhook proxies. This bridge wiring just sets the destination
+    // controller for events that ARE captured.
+    if (cfg.memory_enabled) {
+        ane::alloc_tracer::setDeepProfilerController(g_deep_ctrl.get());
+        LOGI("nativeStartDeep: alloc_tracer wired to deep controller "
+             "(call AllocTracer.start() separately to enable hooks)");
+    }
+
+    if (jAs3Sampling != JNI_FALSE) {
+        LOGW("nativeStartDeep: as3Sampling requested but Android AS3 method "
+             "walker / IMemorySampler hook is not yet implemented (Phase 3+4 "
+             "TBD). Continuing without AS3 stack annotation.");
+    }
+
+    LOGI("nativeStartDeep: ok output=%s timing=%d memory=%d snapshots=%d "
+         "maxLive=%d intervalMs=%d",
+         output_path.c_str(),
+         (int)cfg.timing_enabled, (int)cfg.memory_enabled,
+         (int)cfg.snapshots_enabled,
+         (int)cfg.max_live_allocations_per_snapshot,
+         (int)cfg.snapshot_interval_ms);
+    return 1;
+}
+
+JNIEXPORT jint JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStopDeep(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_deep_ctrl) return 0;
+    // Unwire alloc_tracer first so any in-flight events stop trying to call
+    // record_alloc/free on a stopped controller.
+    ane::alloc_tracer::setDeepProfilerController(nullptr);
+    bool ok = g_deep_ctrl->stop();
+    LOGI("nativeStopDeep: stopped (rc=%d)", ok ? 1 : 0);
+    return ok ? 1 : 0;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeSnapshot(
+        JNIEnv* env, jclass, jstring jLabel) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_deep_ctrl) return JNI_FALSE;
+    std::string label = jLabel ? jstrToCpp(env, jLabel) : std::string{};
+    return g_deep_ctrl->snapshot(label) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeMarker(
+        JNIEnv* env, jclass, jstring jName, jstring jValueJson) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_deep_ctrl) return JNI_FALSE;
+    std::string name = jName ? jstrToCpp(env, jName) : std::string{};
+    std::string value_json = jValueJson ? jstrToCpp(env, jValueJson) : std::string{};
+    return g_deep_ctrl->marker(name, value_json) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeGetStatusDeep(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    char buf[1536];
+    if (!g_deep_ctrl) {
+        snprintf(buf, sizeof(buf),
+                 "{\"state\":\"NotInitialized\",\"installed\":false}");
+        return env->NewStringUTF(buf);
+    }
+    auto status = g_deep_ctrl->status();
+    bool tracer_active = ane::alloc_tracer::isActive();
+    bool tracer_wired  = (ane::alloc_tracer::getDeepProfilerController() == g_deep_ctrl.get());
+
+    snprintf(buf, sizeof(buf),
+             "{\"state\":\"%s\","
+             "\"events\":%llu,\"dropped\":%llu,\"payloadBytes\":%llu,"
+             "\"elapsedMs\":%llu,"
+             "\"liveAllocations\":%llu,\"liveBytes\":%llu,"
+             "\"totalAllocations\":%llu,\"totalFrees\":%llu,"
+             "\"totalReallocations\":%llu,\"unknownFrees\":%llu,"
+             "\"writerQueueDepth\":%llu,\"writerQueueCapacity\":%llu,"
+             "\"writerEventsWritten\":%llu,\"writerBytesWritten\":%llu,"
+             "\"writerOverflowDepth\":%llu,\"writerOverflowPeak\":%llu,"
+             "\"writerOverflowEvents\":%llu,"
+             "\"timingEnabled\":%s,\"memoryEnabled\":%s,"
+             "\"snapshotsEnabled\":%s,"
+             "\"allocTracerActive\":%s,\"allocTracerWired\":%s}",
+             deepStateStr(status.state),
+             (unsigned long long)status.events,
+             (unsigned long long)status.dropped,
+             (unsigned long long)status.payload_bytes,
+             (unsigned long long)status.elapsed_ms,
+             (unsigned long long)status.live_allocations,
+             (unsigned long long)status.live_bytes,
+             (unsigned long long)status.total_allocations,
+             (unsigned long long)status.total_frees,
+             (unsigned long long)status.total_reallocations,
+             (unsigned long long)status.unknown_frees,
+             (unsigned long long)status.writer_queue_depth,
+             (unsigned long long)status.writer_queue_capacity,
+             (unsigned long long)status.writer_events_written,
+             (unsigned long long)status.writer_bytes_written,
+             (unsigned long long)status.writer_overflow_depth,
+             (unsigned long long)status.writer_overflow_peak,
+             (unsigned long long)status.writer_overflow_events,
+             status.timing_enabled    ? "true" : "false",
+             status.memory_enabled    ? "true" : "false",
+             status.snapshots_enabled ? "true" : "false",
+             tracer_active ? "true" : "false",
+             tracer_wired  ? "true" : "false");
+    return env->NewStringUTF(buf);
+}
+
+// ----- Phase 3+4 compiler-injected method probes -----
+//
+// These three FREFunctions mirror the Windows ProfilerAneBindings probe API
+// (`awesomeUtils_profilerProbeEnter/Exit/RegisterMethodTable`). Activated by
+// compiling AS3 with `--profile-probes`: the compiler injects calls to
+// `awesomeUtils_profilerProbeEnter(method_id)` at every method entry and
+// `awesomeUtils_profilerProbeExit(method_id)` at every exit. DPC maintains a
+// per-thread stack of method IDs; native alloc events tagged via the proxy
+// chain inherit `current_method_id()` automatically.
+//
+// The MethodTable is a packed binary table of (method_id → name) registered
+// once at app startup with all known method IDs. Used by `aneprof_analyze.py`
+// to render human-readable AS3 method names instead of opaque hashes.
+
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeProbeEnter(
+        JNIEnv* env, jclass, jint jMethodId) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_deep_ctrl) return JNI_FALSE;
+    return g_deep_ctrl->method_enter(static_cast<std::uint32_t>(jMethodId)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeProbeExit(
+        JNIEnv* env, jclass, jint jMethodId) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_deep_ctrl) return JNI_FALSE;
+    return g_deep_ctrl->method_exit(static_cast<std::uint32_t>(jMethodId)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeRegisterMethodTable(
+        JNIEnv* env, jclass, jbyteArray jBytes) {
+    if (jBytes == nullptr) return JNI_FALSE;
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_deep_ctrl) return JNI_FALSE;
+    jsize len = env->GetArrayLength(jBytes);
+    if (len <= 0) return JNI_FALSE;
+    jbyte* data = env->GetByteArrayElements(jBytes, nullptr);
+    if (data == nullptr) return JNI_FALSE;
+    bool ok = g_deep_ctrl->register_method_table(
+            reinterpret_cast<const void*>(data), static_cast<std::uint32_t>(len));
+    env->ReleaseByteArrayElements(jBytes, data, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 } // extern "C"

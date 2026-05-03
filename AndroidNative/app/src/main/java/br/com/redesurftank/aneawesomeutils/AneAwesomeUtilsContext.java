@@ -184,6 +184,14 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(ProfilerStart.KEY, new ProfilerStart());
         functionMap.put(ProfilerStop.KEY, new ProfilerStop());
         functionMap.put(ProfilerGetStatus.KEY, new ProfilerGetStatus());
+        functionMap.put(ProfilerStartDeep.KEY, new ProfilerStartDeep());
+        functionMap.put(ProfilerStopDeep.KEY, new ProfilerStopDeep());
+        functionMap.put(ProfilerSnapshot.KEY, new ProfilerSnapshot());
+        functionMap.put(ProfilerMarker.KEY, new ProfilerMarker());
+        functionMap.put(ProfilerGetStatusDeep.KEY, new ProfilerGetStatusDeep());
+        functionMap.put(ProfilerProbeEnter.KEY, new ProfilerProbeEnter());
+        functionMap.put(ProfilerProbeExit.KEY, new ProfilerProbeExit());
+        functionMap.put(ProfilerRegisterMethodTable.KEY, new ProfilerRegisterMethodTable());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -2102,6 +2110,186 @@ public class AneAwesomeUtilsContext extends FREContext {
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "profilerGetStatus failed", e);
                 try { return FREObject.newObject("{\"error\":\"status threw\"}"); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_profilerStartDeep(outputPath, headerJson, timing,
+     *                                       memory, snapshots, maxLive,
+     *                                       intervalMs, as3Sampling):int}
+     *
+     * <p>Starts the deep .aneprof profiler — full event stream with timing,
+     * native memory (via alloc_tracer wiring), snapshots, and markers.
+     * AS3 sampling is reserved (Phase 4 TBD).
+     */
+    public static class ProfilerStartDeep implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerStartDeep";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String outputPath  = (args != null && args.length > 0 && args[0] != null) ? args[0].getAsString() : "";
+                String headerJson  = (args != null && args.length > 1 && args[1] != null) ? args[1].getAsString() : "{}";
+                boolean timing     = (args != null && args.length > 2 && args[2] != null) && args[2].getAsBool();
+                boolean memory     = (args != null && args.length > 3 && args[3] != null) && args[3].getAsBool();
+                boolean snapshots  = (args != null && args.length > 4 && args[4] != null) && args[4].getAsBool();
+                int maxLive        = (args != null && args.length > 5 && args[5] != null) ? args[5].getAsInt() : 4096;
+                int intervalMs     = (args != null && args.length > 6 && args[6] != null) ? args[6].getAsInt() : 0;
+                boolean as3Sampling= (args != null && args.length > 7 && args[7] != null) && args[7].getAsBool();
+                int rc = Profiler.startDeep(outputPath, headerJson, timing, memory, snapshots,
+                                             maxLive, intervalMs, as3Sampling);
+                AneAwesomeUtilsLogging.i(TAG, "profilerStartDeep rc=" + rc + " path=" + outputPath);
+                return FREObject.newObject(rc);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerStartDeep failed", e);
+                try { return FREObject.newObject(-99); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerStopDeep implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerStopDeep";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                int rc = Profiler.stopDeep();
+                AneAwesomeUtilsLogging.i(TAG, "profilerStopDeep rc=" + rc);
+                return FREObject.newObject(rc);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerStopDeep failed", e);
+                try { return FREObject.newObject(-1); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerSnapshot implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerSnapshot";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String label = (args != null && args.length > 0 && args[0] != null) ? args[0].getAsString() : "";
+                boolean ok = Profiler.snapshot(label);
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerSnapshot failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerMarker implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerMarker";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String name      = (args != null && args.length > 0 && args[0] != null) ? args[0].getAsString() : "";
+                String valueJson = (args != null && args.length > 1 && args[1] != null) ? args[1].getAsString() : "{}";
+                boolean ok = Profiler.marker(name, valueJson);
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerMarker failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerGetStatusDeep implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerGetStatusDeep";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String json = Profiler.getStatusDeep();
+                return FREObject.newObject(json);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerGetStatusDeep failed", e);
+                try { return FREObject.newObject("{\"error\":\"status threw\"}"); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_profilerProbeEnter(methodId:int):Boolean}
+     *
+     * <p>Phase 3+4 method-entry probe injected by the AS3 compiler with
+     * {@code --profile-probes}. Pushes the {@code methodId} onto the
+     * per-thread method stack inside the DeepProfilerController. Native alloc
+     * events captured by alloc_tracer inherit the current top-of-stack as
+     * their {@code method_id} payload, enabling AS3 attribution of native
+     * heap growth without reverse-engineering libCore.so AvmCore internals.
+     */
+    public static class ProfilerProbeEnter implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerProbeEnter";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                if (args == null || args.length < 1 || args[0] == null) {
+                    return FREObject.newObject(false);
+                }
+                int methodId = args[0].getAsInt();
+                boolean ok = Profiler.probeEnter(methodId);
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                // Probes fire millions of times — silent failure on rare error.
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_profilerProbeExit(methodId:int):Boolean}
+     *
+     * <p>Companion to {@link ProfilerProbeEnter}. Pops the per-thread method
+     * stack at AS3 method exit. {@code methodId} is included for verification.
+     */
+    public static class ProfilerProbeExit implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerProbeExit";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                if (args == null || args.length < 1 || args[0] == null) {
+                    return FREObject.newObject(false);
+                }
+                int methodId = args[0].getAsInt();
+                boolean ok = Profiler.probeExit(methodId);
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_profilerRegisterMethodTable(table:ByteArray):Boolean}
+     *
+     * <p>Register the method-id → name mapping. Called once at app startup
+     * with a packed binary blob produced by the AS3 compiler's
+     * {@code --profile-probes} pass. Used by {@code aneprof_analyze.py} to
+     * render human-readable AS3 method names.
+     */
+    public static class ProfilerRegisterMethodTable implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerRegisterMethodTable";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                if (args == null || args.length < 1 || args[0] == null) {
+                    return FREObject.newObject(false);
+                }
+                FREByteArray ba = (FREByteArray) args[0];
+                ba.acquire();
+                byte[] bytes;
+                try {
+                    java.nio.ByteBuffer bb = ba.getBytes();
+                    bytes = new byte[bb.remaining()];
+                    bb.get(bytes);
+                } finally {
+                    ba.release();
+                }
+                boolean ok = Profiler.registerMethodTable(bytes);
+                AneAwesomeUtilsLogging.i(TAG, "profilerRegisterMethodTable size=" + bytes.length + " ok=" + ok);
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerRegisterMethodTable failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
             }
         }
     }
