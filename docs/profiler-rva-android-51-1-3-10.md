@@ -168,6 +168,26 @@ Tooling for SDK-bump verification:
 6. Append entry to `kKnownBuilds[]` in each hook
 7. Live PVP 30min on both devices to validate
 
+## Pulling captures off-device — binary safety
+
+When pulling `.aneprof` files via `adb`, **always use `adb exec-out`**, NOT
+`adb shell cat`. The shell variant routes through a TTY which performs
+LF→CRLF translation, corrupting binary records (1-byte gap inserted after
+every 0x0a byte in the stream). A 683 KB capture had 1152 such corruptions,
+making the validator reject the file as malformed.
+
+```bash
+# CORRECT — binary-safe
+adb -s <serial> exec-out 'run-as br.com.redesurftank.android cat "<path>"' > local.aneprof
+
+# WRONG — TTY translation corrupts binary
+adb -s <serial> shell 'run-as br.com.redesurftank.android cat "<path>"' > local.aneprof
+```
+
+The validator output `unknown event type 1792 at offset N` (1792 = 0x0700,
+i.e. `EventType::Alloc << 8`) is the canonical symptom of CRLF-corrupted
+pulls. Re-pulling with `exec-out` resolves it.
+
 ## References
 
 - `AndroidNative/app/src/main/cpp/profiler/AndroidGcHook.{cpp,hpp}`
