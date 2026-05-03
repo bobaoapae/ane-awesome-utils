@@ -521,4 +521,16 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeRegisterMethodTable(
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
+// Phase 7a — programmatic GC trigger. Routes through AndroidGcHook which
+// invokes the original `MMgc::GC::Collect` with the runtime-captured GC
+// singleton. Returns false until the first observed Collect has populated
+// the singleton (typically within a few seconds of profiler start).
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeRequestGc(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_gc_hook) return JNI_FALSE;
+    return g_gc_hook->requestCollect() ? JNI_TRUE : JNI_FALSE;
+}
+
 } // extern "C"

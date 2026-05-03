@@ -60,6 +60,10 @@ static std::atomic<bool>                    g_active{false};
 static std::atomic<std::uint64_t>           g_diag_collect_calls{0};
 static thread_local bool                    t_in_gc_hook = false;
 
+// Captured GC singleton — set on first observed Collect() call. Subsequent
+// programmatic requestCollect() invocations call original Collect with this.
+static std::atomic<void*> g_captured_gc_this{nullptr};
+
 static void* g_stub_collect = nullptr;
 static GCCollect_t g_orig_collect = nullptr;
 
@@ -141,6 +145,16 @@ static void proxy_GCCollect(void* gc_this) {
     t_in_gc_hook = true;
     g_diag_collect_calls.fetch_add(1, std::memory_order_relaxed);
 
+    // Capture singleton on first sighting. Subsequent calls overwrite (idempotent
+    // if engine has only one GC instance, which avmplus does — single per
+    // AvmCore). If overwrite changes the value, log it (may indicate per-iso GC).
+    void* prev = g_captured_gc_this.exchange(gc_this, std::memory_order_acq_rel);
+    if (prev == nullptr) {
+        LOGI("captured GC singleton: this=%p (programmatic requestCollect now armed)", gc_this);
+    } else if (prev != gc_this) {
+        LOGW("GC singleton changed: %p -> %p (multi-GC?)", prev, gc_this);
+    }
+
     const std::uint64_t t0 = nowNs();
     g_orig_collect(gc_this);
     const std::uint64_t t1 = nowNs();
@@ -221,6 +235,23 @@ void AndroidGcHook::uninstall() {
 
 std::uint64_t AndroidGcHook::diagCollectCalls() const {
     return g_diag_collect_calls.load(std::memory_order_relaxed);
+}
+
+bool AndroidGcHook::requestCollect() {
+    if (!g_active.load(std::memory_order_acquire)) return false;
+    if (g_orig_collect == nullptr) return false;
+    void* gc_this = g_captured_gc_this.load(std::memory_order_acquire);
+    if (gc_this == nullptr) {
+        LOGW("requestCollect: GC singleton not captured yet — call requires "
+             "at least one observed Collect cycle first");
+        return false;
+    }
+    LOGI("requestCollect: invoking GC::Collect(this=%p)", gc_this);
+    // Re-enter through proxy so the cycle is recorded as a GcCycleEvent
+    // (tagged Programmatic via flag once we extend kind enum). For now
+    // the observer treats it identically to a runtime-triggered cycle.
+    proxy_GCCollect(gc_this);
+    return true;
 }
 
 } // namespace ane::profiler

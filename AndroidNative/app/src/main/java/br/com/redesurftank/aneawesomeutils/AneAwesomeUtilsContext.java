@@ -193,6 +193,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(ProfilerProbeExit.KEY, new ProfilerProbeExit());
         functionMap.put(ProfilerRegisterMethodTable.KEY, new ProfilerRegisterMethodTable());
         functionMap.put(ProfilerRecordFrame.KEY, new ProfilerRecordFrame());
+        functionMap.put(ProfilerRequestGc.KEY, new ProfilerRequestGc());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -2319,6 +2320,29 @@ public class AneAwesomeUtilsContext extends FREContext {
                 return FREObject.newObject(ok);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "profilerRecordFrame failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_profilerRequestGc():Boolean}
+     *
+     * <p>Phase 7a — programmatic GC trigger. Routes to {@code AndroidGcHook}
+     * which calls {@code MMgc::GC::Collect} on the runtime-captured GC
+     * singleton. Returns false until at least one Collect cycle has been
+     * observed (singleton not yet known); AS3 should retry after a few
+     * frames if the first call returns false.
+     */
+    public static class ProfilerRequestGc implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerRequestGc";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                boolean ok = Profiler.requestGc();
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerRequestGc failed", e);
                 try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
             }
         }

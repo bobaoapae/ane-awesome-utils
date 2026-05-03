@@ -1062,11 +1062,50 @@ public class AneAwesomeUtils {
     public function profilerStart(outputPath:String, options:Object = null):Boolean {
         if (!_successInit) return false;
 
-        // Android subset: only the Scout TCP byte tap is available currently.
-        // Memory/render/AS3-object hooks require additional reverse-engineering
-        // of libCore.so symbols (Phase B work — not in this delivery). The
-        // .flmc file produced is parser-compatible with the Windows output.
+        // Android: two operating modes selected by options shape.
+        //   - options.deep === true OR any of {memory, snapshots, timing}
+        //     → DeepProfilerController (.aneprof) — full Phase 2 mode with
+        //       native alloc/free events via alloc_tracer wiring + snapshots
+        //       + markers. AS3 method walker (Phase 3) and IMemorySampler
+        //       hook (Phase 4) are TBD.
+        //   - else → CaptureController (.flmc Scout TCP byte tap, legacy)
         if (IsAndroid()) {
+            var anyDeepOpt:Boolean = options != null && (
+                options.deep === true ||
+                options.memory !== undefined ||
+                options.snapshots !== undefined ||
+                options.timing !== undefined ||
+                options.maxLiveAllocationsPerSnapshot !== undefined ||
+                options.snapshotIntervalMs !== undefined
+            );
+            if (anyDeepOpt) {
+                // Deep .aneprof mode
+                var aTiming:Boolean = options != null && options.timing !== undefined
+                        ? Boolean(options.timing) : true;
+                var aMemory:Boolean = options != null && options.memory !== undefined
+                        ? Boolean(options.memory) : false;
+                var aSnapshots:Boolean = options != null && options.snapshots !== undefined
+                        ? Boolean(options.snapshots) : true;
+                var aMaxLive:int = options != null && options.maxLiveAllocationsPerSnapshot !== undefined
+                        ? int(options.maxLiveAllocationsPerSnapshot) : 4096;
+                var aIntervalMs:int = options != null && options.snapshotIntervalMs !== undefined
+                        ? int(options.snapshotIntervalMs) : 0;
+                var aAs3Sampling:Boolean = options != null && options.as3ObjectSampling !== undefined
+                        ? Boolean(options.as3ObjectSampling) : false;
+                var aHeaderJson:String = options != null && options.headerJson !== undefined
+                        ? String(options.headerJson)
+                        : "{\"format\":\"aneprof\",\"formatVersion\":1,\"backend\":\"deep-native\",\"platform\":\"android\",\"timing\":" + (aTiming ? "true" : "false") + ",\"memory\":" + (aMemory ? "true" : "false") + ",\"snapshots\":" + (aSnapshots ? "true" : "false") + ",\"maxLiveAllocationsPerSnapshot\":" + aMaxLive + ",\"snapshotIntervalMs\":" + aIntervalMs + ",\"as3ObjectSampling\":" + (aAs3Sampling ? "true" : "false") + "}";
+                try {
+                    var dRc:int = int(_extContext.call("awesomeUtils_profilerStartDeep",
+                                                       outputPath, aHeaderJson,
+                                                       aTiming, aMemory, aSnapshots,
+                                                       aMaxLive, aIntervalMs, aAs3Sampling));
+                    return dRc > 0;
+                } catch (eD:Error) { return false; }
+                return false;
+            }
+
+            // Legacy Scout-tap .flmc mode
             var port:int = options != null && options.telemetryPort !== undefined
                     ? int(options.telemetryPort) : 0;
             var hdr:String = options != null && options.headerJson !== undefined
@@ -1131,6 +1170,12 @@ public class AneAwesomeUtils {
     public function profilerStop():Boolean {
         if (!_successInit) return false;
         if (IsAndroid()) {
+            // Try deep stop first (Phase 2 mode); fall back to legacy.
+            // Both are idempotent — calling stop on inactive controller returns 0.
+            try {
+                var dRc:int = int(_extContext.call("awesomeUtils_profilerStopDeep"));
+                if (dRc > 0) return true;
+            } catch (eD:Error) { /* fall through */ }
             try {
                 var rc:int = int(_extContext.call("awesomeUtils_profilerStop"));
                 return rc > 0;
@@ -1144,15 +1189,28 @@ public class AneAwesomeUtils {
 
     public function profilerSnapshot(label:String = null):Boolean {
         if (!_successInit) return false;
+        var lbl:String = label == null ? "" : label;
+        if (IsAndroid()) {
+            try {
+                return Boolean(_extContext.call("awesomeUtils_profilerSnapshot", lbl));
+            } catch (e:Error) { return false; }
+            return false;
+        }
         if (!IsWindows()) return false;
-        return _extContext.call("awesomeUtils_profilerSnapshot", label == null ? "" : label) as Boolean;
+        return _extContext.call("awesomeUtils_profilerSnapshot", lbl) as Boolean;
     }
 
     public function profilerGetStatus():Object {
         if (!_successInit) return null;
         if (IsAndroid()) {
             try {
-                // Android impl returns a JSON string via the FREFunction.
+                // Try deep status first; if "NotInitialized" fall back to legacy.
+                var deepJson:String = _extContext.call("awesomeUtils_profilerGetStatusDeep") as String;
+                if (deepJson != null && deepJson.length > 0 && deepJson.indexOf("NotInitialized") < 0) {
+                    return JSON.parse(deepJson);
+                }
+            } catch (eD:Error) { /* fall through */ }
+            try {
                 var json:String = _extContext.call("awesomeUtils_profilerGetStatus") as String;
                 if (json == null || json.length == 0) return null;
                 return JSON.parse(json);
@@ -1165,17 +1223,26 @@ public class AneAwesomeUtils {
 
     public function profilerMarker(name:String, value:* = null):Boolean {
         if (!_successInit) return false;
+        var valueJson:String = profilerValueToJson(value);
+        if (IsAndroid()) {
+            try {
+                return Boolean(_extContext.call("awesomeUtils_profilerMarker", name, valueJson));
+            } catch (e:Error) { return false; }
+            return false;
+        }
         if (IsWindows()) {
-            return _extContext.call("awesomeUtils_profilerMarker",
-                                    name,
-                                    profilerValueToJson(value)) as Boolean;
+            return _extContext.call("awesomeUtils_profilerMarker", name, valueJson) as Boolean;
         }
         return true;
     }
 
     public function profilerRequestGc():Boolean {
         if (!_successInit) return false;
-        if (!IsWindows()) return false;
+        // Phase 7a — Android parity: AndroidGcHook captures GC singleton from
+        // the first observed Collect cycle and exposes a programmatic trigger.
+        // Returns false until the first cycle has fired (typically <2s after
+        // profiler start, since runtime GC fires automatically).
+        if (!IsWindows() && !IsAndroid()) return false;
         return _extContext.call("awesomeUtils_profilerRequestGc") as Boolean;
     }
 

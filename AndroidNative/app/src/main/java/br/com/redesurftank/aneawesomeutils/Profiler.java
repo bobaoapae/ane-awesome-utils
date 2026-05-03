@@ -137,6 +137,18 @@ public final class Profiler {
         return nativeRecordFrame(frameIndex, durationNs, allocationCount, allocationBytes, label);
     }
 
+    /**
+     * Phase 7a — programmatic GC trigger. Invokes {@code MMgc::GC::Collect} on
+     * the captured GC singleton (recovered at runtime from the first observed
+     * collection cycle through {@code AndroidGcHook}). Returns false if the
+     * singleton has not been captured yet (no GC has fired since profiler
+     * start), in which case AS3 should retry after the runtime triggers an
+     * automatic collection.
+     */
+    public static boolean requestGc() {
+        return nativeRequestGc();
+    }
+
     private static native int     nativeStart(String outputPath, String headerJson, int telemetryPort);
     private static native int     nativeStop();
     private static native String  nativeGetStatus();
@@ -156,6 +168,7 @@ public final class Profiler {
     private static native boolean nativeRecordFrame(long frameIndex, long durationNs,
                                                      int allocationCount, long allocationBytes,
                                                      String label);
+    private static native boolean nativeRequestGc();
 
     private Profiler() {}
 }
