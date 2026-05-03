@@ -192,6 +192,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(ProfilerProbeEnter.KEY, new ProfilerProbeEnter());
         functionMap.put(ProfilerProbeExit.KEY, new ProfilerProbeExit());
         functionMap.put(ProfilerRegisterMethodTable.KEY, new ProfilerRegisterMethodTable());
+        functionMap.put(ProfilerRecordFrame.KEY, new ProfilerRecordFrame());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -2289,6 +2290,35 @@ public class AneAwesomeUtilsContext extends FREContext {
                 return FREObject.newObject(ok);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "profilerRegisterMethodTable failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * {@code awesomeUtils_profilerRecordFrame(frameIndex:Number, durationNs:Number,
+     *                                          allocationCount:int, allocationBytes:Number,
+     *                                          label:String):Boolean}
+     *
+     * <p>Phase 7b: explicit AS3-side Frame event. Distinct from Phase 6
+     * RenderFrame events (auto-emitted from EGL hook) — used for scene
+     * transitions, "battle_start", or any AS3-driven frame boundary marker.
+     */
+    public static class ProfilerRecordFrame implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerRecordFrame";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                if (args == null || args.length < 2) return FREObject.newObject(false);
+                long frameIndex = (args[0] != null) ? (long) args[0].getAsDouble() : 0L;
+                long durationNs = (args[1] != null) ? (long) args[1].getAsDouble() : 0L;
+                int  allocCount = (args.length > 2 && args[2] != null) ? args[2].getAsInt() : 0;
+                long allocBytes = (args.length > 3 && args[3] != null) ? (long) args[3].getAsDouble() : 0L;
+                String label    = (args.length > 4 && args[4] != null) ? args[4].getAsString() : "";
+                boolean ok = Profiler.recordFrame(frameIndex, durationNs, allocCount, allocBytes, label);
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerRecordFrame failed", e);
                 try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
             }
         }

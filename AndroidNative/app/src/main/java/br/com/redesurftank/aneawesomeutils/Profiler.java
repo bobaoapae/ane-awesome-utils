@@ -126,6 +126,17 @@ public final class Profiler {
         return nativeRegisterMethodTable(tableBytes);
     }
 
+    /**
+     * Phase 7b — emit an AS3-side Frame event with optional label. Separate
+     * from the Phase 6 RenderFrame events auto-emitted by the EGL hook;
+     * intended for scene-transition markers, "battle_start", etc.
+     */
+    public static boolean recordFrame(long frameIndex, long durationNs,
+                                       int allocationCount, long allocationBytes,
+                                       String label) {
+        return nativeRecordFrame(frameIndex, durationNs, allocationCount, allocationBytes, label);
+    }
+
     private static native int     nativeStart(String outputPath, String headerJson, int telemetryPort);
     private static native int     nativeStop();
     private static native String  nativeGetStatus();
@@ -142,6 +153,9 @@ public final class Profiler {
     private static native boolean nativeProbeEnter(int methodId);
     private static native boolean nativeProbeExit(int methodId);
     private static native boolean nativeRegisterMethodTable(byte[] tableBytes);
+    private static native boolean nativeRecordFrame(long frameIndex, long durationNs,
+                                                     int allocationCount, long allocationBytes,
+                                                     String label);
 
     private Profiler() {}
 }

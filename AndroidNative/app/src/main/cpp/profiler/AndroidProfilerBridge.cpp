@@ -439,6 +439,30 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeProbeExit(
     return g_deep_ctrl->method_exit(static_cast<std::uint32_t>(jMethodId)) ? JNI_TRUE : JNI_FALSE;
 }
 
+// Phase 7b: AS3-side `Profiler.recordFrame(idx, durationNs, allocCount,
+// allocBytes, label)` emits a Frame event into the .aneprof stream. This is
+// SEPARATE from Phase 6 RenderFrame events (which are auto-emitted from the
+// EGL hook) — Frame events are explicit AS3-side markers for things like
+// scene transitions, "battle_start", etc. The analyzer renders both event
+// types in the timeline.
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeRecordFrame(
+        JNIEnv* env, jclass,
+        jlong jFrameIndex, jlong jDurationNs,
+        jint jAllocCount, jlong jAllocBytes,
+        jstring jLabel) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_deep_ctrl) return JNI_FALSE;
+    std::string label = jLabel ? jstrToCpp(env, jLabel) : std::string{};
+    bool ok = g_deep_ctrl->record_frame(
+        static_cast<std::uint64_t>(jFrameIndex),
+        static_cast<std::uint64_t>(jDurationNs),
+        static_cast<std::uint32_t>(jAllocCount < 0 ? 0 : jAllocCount),
+        static_cast<std::uint64_t>(jAllocBytes < 0 ? 0 : jAllocBytes),
+        label);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeRegisterMethodTable(
         JNIEnv* env, jclass, jbyteArray jBytes) {
