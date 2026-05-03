@@ -35,9 +35,19 @@ struct BuildIdMatch {
 //   Function signature: void GC::Collect(this) — single ptr arg
 //   Body emits .gc.CollectionWork Scout marker, dispatches to specialized
 //   collection paths via flags at this+0x3b1, this+0x3b2, this+0xc20
-// ARMv7 build-id 582a8f65b8dcb741e5eb869ccf9526137270d99e → TBD
+//
+// ARMv7 build-id 582a8f65b8dcb741e5eb869ccf9526137270d99e → +0x5501e0 (+1 thumb bit)
+//   Same logical structure verified via Thumb-2 disasm:
+//   - push {r4-r7, lr} + push.w {r8-r11} + vpush {d8-d10} + sub sp, #0x98
+//   - mov r4, r0 (saves this)
+//   - ldrb r0, [r4, #0xa] → already-running flag (offset differs from ARM64
+//     this+0x9 due to ARMv7 alignment but same semantic)
+//   - if non-zero, sets r9=1 (already running) and branches around work
+//   - Inline literal pool with .gc.CollectionWork at +0x5501c4 (Adobe puts
+//     read-only data in .text on ARMv7 build)
 static constexpr BuildIdMatch kKnownBuilds[] = {
     {"7dde220f62c90358cfc2cb082f5ce63ab0cd3966", 0x896824},
+    {"582a8f65b8dcb741e5eb869ccf9526137270d99e", 0x5501e1},  // +1 Thumb bit
 };
 
 // Function signature inferred from disassembly:
