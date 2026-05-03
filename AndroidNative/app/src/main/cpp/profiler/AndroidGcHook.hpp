@@ -35,6 +35,17 @@ public:
     // Programmatic GC trigger. Returns true if a GC singleton has been
     // observed (captured from a prior Collect() call) and Collect was invoked.
     // Returns false if no Collect has fired yet and the singleton is unknown.
+    //
+    // Activation prerequisite: at least one runtime-triggered Collect must
+    // have fired since hook install. Boot+idle workloads (<5MB AS3 alloc
+    // pressure) typically do NOT trigger natural collections — synthetic
+    // androidProbe churn for 70s with 4861 allocs was insufficient on
+    // OnePlus 15. In real gameplay (PVP, scene transitions, asset loads)
+    // collections fire within seconds; subsequent requestCollect() calls
+    // work indefinitely.
+    //
+    // AS3 callers should retry on false to handle the activation race —
+    // see Profiler.requestGc() Java doc for the recommended pattern.
     bool requestCollect();
 
 private:
