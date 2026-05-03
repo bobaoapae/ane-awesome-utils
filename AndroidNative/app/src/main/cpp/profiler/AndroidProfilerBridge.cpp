@@ -29,6 +29,7 @@
 #include <android/log.h>
 #include "AndroidRuntimeHook.hpp"
 #include "AndroidRenderHook.hpp"
+#include "AndroidDeepMemoryHook.hpp"
 #include "CaptureController.hpp"
 #include "DeepProfilerController.hpp"
 
@@ -64,6 +65,7 @@ std::unique_ptr<ane::profiler::AndroidRuntimeHook>  g_hook;
 // Deep .aneprof mode
 std::unique_ptr<ane::profiler::DeepProfilerController> g_deep_ctrl;
 std::unique_ptr<ane::profiler::AndroidRenderHook>      g_render_hook;
+std::unique_ptr<ane::profiler::AndroidDeepMemoryHook>  g_deep_mem_hook;
 
 // Helper: fetch a Java String into a std::string. Returns empty on failure.
 std::string jstrToCpp(JNIEnv* env, jstring j) {
@@ -301,6 +303,21 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStartDeep(
         }
     }
 
+    // Phase 5: install deep memory hook on libCore.so:GCHeap::Alloc when memory
+    // tracking is enabled. Build-id-pinned offset; refuses to install on
+    // unknown SDK builds (prevents wild patches). Coexists with alloc_tracer's
+    // libc shadowhook — DPC dedupes by ptr.
+    if (cfg.memory_enabled) {
+        g_deep_mem_hook = std::make_unique<ane::profiler::AndroidDeepMemoryHook>();
+        if (!g_deep_mem_hook->install(g_deep_ctrl.get())) {
+            LOGW("nativeStartDeep: deep memory hook install failed (unknown build-id "
+                 "or libCore.so unloaded) — continuing with alloc_tracer libc shadowhook only");
+            g_deep_mem_hook.reset();
+        } else {
+            LOGI("nativeStartDeep: deep memory hook installed (libCore.so GCHeap::Alloc)");
+        }
+    }
+
     if (jAs3Sampling != JNI_FALSE) {
         LOGW("nativeStartDeep: as3Sampling requested but Android AS3 method "
              "walker / IMemorySampler hook is not yet implemented (Phase 3+4 "
@@ -330,6 +347,11 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStopDeep(
     if (g_render_hook) {
         g_render_hook->uninstall();
         g_render_hook.reset();
+    }
+    // Uninstall Phase 5 deep memory hook before stopping the controller.
+    if (g_deep_mem_hook) {
+        g_deep_mem_hook->uninstall();
+        g_deep_mem_hook.reset();
     }
     bool ok = g_deep_ctrl->stop();
     LOGI("nativeStopDeep: stopped (rc=%d)", ok ? 1 : 0);

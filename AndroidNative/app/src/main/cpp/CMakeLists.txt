@@ -48,6 +48,9 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         # Android-specific render hook (Phase 6)
         profiler/AndroidRenderHook.cpp
 
+        # Android-specific deep memory hook (Phase 5 — GCHeap::Alloc shadowhook)
+        profiler/AndroidDeepMemoryHook.cpp
+
         # JNI bridge for AS3 → native profiler
         profiler/AndroidProfilerBridge.cpp)
 
