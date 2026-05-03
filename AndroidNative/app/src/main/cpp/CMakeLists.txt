@@ -45,6 +45,9 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         # Android-specific runtime hook
         profiler/AndroidRuntimeHook.cpp
 
+        # Android-specific render hook (Phase 6)
+        profiler/AndroidRenderHook.cpp
+
         # JNI bridge for AS3 → native profiler
         profiler/AndroidProfilerBridge.cpp)
 

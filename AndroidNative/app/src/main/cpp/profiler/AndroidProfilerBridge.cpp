@@ -28,6 +28,7 @@
 #include <jni.h>
 #include <android/log.h>
 #include "AndroidRuntimeHook.hpp"
+#include "AndroidRenderHook.hpp"
 #include "CaptureController.hpp"
 #include "DeepProfilerController.hpp"
 
@@ -62,6 +63,7 @@ std::unique_ptr<ane::profiler::AndroidRuntimeHook>  g_hook;
 
 // Deep .aneprof mode
 std::unique_ptr<ane::profiler::DeepProfilerController> g_deep_ctrl;
+std::unique_ptr<ane::profiler::AndroidRenderHook>      g_render_hook;
 
 // Helper: fetch a Java String into a std::string. Returns empty on failure.
 std::string jstrToCpp(JNIEnv* env, jstring j) {
@@ -261,7 +263,7 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStartDeep(
     cfg.header_json = header_json;
     cfg.timing_enabled    = (jTiming    != JNI_FALSE);
     cfg.memory_enabled    = (jMemory    != JNI_FALSE);
-    cfg.render_enabled    = false;  // Stage3D render hook = no Android equiv yet
+    cfg.render_enabled    = (jTiming != JNI_FALSE);  // Phase 6: EGL/GLES hook (gated by timing flag)
     cfg.snapshots_enabled = (jSnapshots != JNI_FALSE);
     cfg.max_live_allocations_per_snapshot =
         jMaxLive > 0 ? static_cast<std::uint32_t>(jMaxLive) : 4096;
@@ -284,6 +286,19 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStartDeep(
         ane::alloc_tracer::setDeepProfilerController(g_deep_ctrl.get());
         LOGI("nativeStartDeep: alloc_tracer wired to deep controller "
              "(call AllocTracer.start() separately to enable hooks)");
+    }
+
+    // Phase 6: install EGL/GLES render hook if timing/render is enabled. Hook
+    // is global (one render thread per app); shared with the deep controller
+    // so RenderFrame events flow into the .aneprof stream.
+    if (cfg.render_enabled) {
+        g_render_hook = std::make_unique<ane::profiler::AndroidRenderHook>();
+        if (!g_render_hook->install(g_deep_ctrl.get())) {
+            LOGW("nativeStartDeep: render hook install failed — continuing without RenderFrame events");
+            g_render_hook.reset();
+        } else {
+            LOGI("nativeStartDeep: render hook installed (eglSwapBuffers + glDraw*)");
+        }
     }
 
     if (jAs3Sampling != JNI_FALSE) {
@@ -310,6 +325,12 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStopDeep(
     // Unwire alloc_tracer first so any in-flight events stop trying to call
     // record_alloc/free on a stopped controller.
     ane::alloc_tracer::setDeepProfilerController(nullptr);
+    // Uninstall render hook before stopping the controller (proxies hold a
+    // weak ref; uninstall() clears that and the swap proxy stops emitting).
+    if (g_render_hook) {
+        g_render_hook->uninstall();
+        g_render_hook.reset();
+    }
     bool ok = g_deep_ctrl->stop();
     LOGI("nativeStopDeep: stopped (rc=%d)", ok ? 1 : 0);
     return ok ? 1 : 0;
