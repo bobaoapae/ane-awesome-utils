@@ -23,6 +23,13 @@
 #include <unordered_map>
 #include <vector>
 #include <string>
+
+// Include the DeepProfilerController API so alloc_tracer can route alloc/
+// free events into the .aneprof event stream when the deep profiler is
+// recording. Defined in shared/profiler/include/DeepProfilerController.hpp;
+// we keep a weak global pointer that AndroidProfilerBridge wires/unwires
+// on profilerStart/Stop.
+#include "DeepProfilerController.hpp"
 #include <mutex>
 #include <atomic>
 #include <algorithm>
@@ -100,13 +107,39 @@ static free_t    g_orig_free    = nullptr;
 static mmap_t    g_orig_mmap    = nullptr;
 static munmap_t  g_orig_munmap  = nullptr;
 
-// Re-entry guard: don't trace allocations made by the tracer itself
-// (unordered_map rehash, log buffer, JSON builder, etc).
-static thread_local bool t_in_tracer = false;
+// Re-entry guard owned by proxy entry. Phase 0 invariant: t_in_tracer is set
+// the first time control enters any proxy (proxy_malloc/calloc/realloc/free/
+// mmap/munmap) and cleared on exit. All inner tracer machinery (recordAlloc,
+// captureStack, unordered_map insert, DeepProfilerController writes) runs WITH
+// the guard set, so any internal allocation re-entering our proxies takes the
+// early-return fast path.
+//
+// `tls_model("initial-exec")` forces the linker to allocate this TLS slot in
+// the .tbss section at .so load time (as an ELF TLS via TPIDR_EL0 on ARM64 /
+// TPIDRURW on ARMv7), NOT via __emutls_get_address. Without this attribute,
+// the NDK toolchain falls back to emulated TLS for some reason (visible via
+// llvm-readelf showing __emutls_v.* symbols in the .so), and the very first
+// access from a fresh thread would call malloc to allocate the __emutls block
+// — which itself goes through proxy_malloc, which itself accesses t_in_tracer,
+// triggering infinite recursion → stack overflow → SIGSEGV.
+static thread_local __attribute__((tls_model("initial-exec"))) bool t_in_tracer = false;
+
+struct ScopedTracerGuard {
+    ScopedTracerGuard() { t_in_tracer = true; }
+    ~ScopedTracerGuard() { t_in_tracer = false; }
+};
 
 // libCore.so address range — populated on start() via dl_iterate_phdr.
 static uintptr_t g_libcore_start = 0;
 static uintptr_t g_libcore_end   = 0;
+
+// DeepProfilerController integration — when the .aneprof deep profiler is
+// recording, route alloc/free events through it so they appear in the
+// .aneprof event stream alongside snapshots, markers, and (eventually) AS3
+// stack annotations. Set/cleared by AndroidProfilerBridge during
+// profilerStart/Stop. NULL when only the standalone JSONL alloc tracer is
+// active (no overhead in that case).
+static std::atomic<ane::profiler::DeepProfilerController*> g_dpc{nullptr};
 
 // ----- libCore.so range discovery -----
 
@@ -187,12 +220,14 @@ static int64_t nowMs() {
 
 // Returns true if this allocation should be traced. Captures the stack as
 // a side effect and writes it into outFrames.
+//
+// PRECONDITION: t_in_tracer is set (caller is the proxy entry guard via
+// ScopedTracerGuard). Proxy already filtered by size+active+!in_tracer.
 static bool shouldTrace(size_t size, uintptr_t* outFrames, size_t* outNFrames) {
     if (size < kMinTrackSize) {
         g_total_undersize.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    if (t_in_tracer) return false;
 
     *outNFrames = captureStack(outFrames, kMaxStackFrames);
 
@@ -228,7 +263,6 @@ static void recordAlloc(uintptr_t addr, size_t size, int kind) {
     rec.nframes = nframes;
     memcpy(rec.pc, pc, nframes * sizeof(uintptr_t));
 
-    t_in_tracer = true;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_live.size() >= kMaxLiveAllocs) {
@@ -238,67 +272,110 @@ static void recordAlloc(uintptr_t addr, size_t size, int kind) {
             g_total_tracked.fetch_add(1, std::memory_order_relaxed);
         }
     }
-    t_in_tracer = false;
+    // Mirror the alloc into the .aneprof event stream when the deep profiler
+    // is recording. The proxy entry guard already prevents re-entry, so any
+    // allocations the controller's writer thread/queue makes recursively
+    // through libc take the proxy's early-return path (small alloc) or
+    // t_in_tracer-true path (large alloc).
+    auto* dpc = g_dpc.load(std::memory_order_acquire);
+    if (dpc != nullptr) {
+        dpc->record_alloc_if_untracked(reinterpret_cast<void*>(addr),
+                                        static_cast<std::uint64_t>(size));
+    }
 }
 
+// PRECONDITION: t_in_tracer is set (caller is the proxy entry guard).
 static void recordFree(uintptr_t addr) {
     if (addr == 0) return;
-    if (t_in_tracer) return;
-    t_in_tracer = true;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_live.erase(addr);
     }
-    t_in_tracer = false;
+    auto* dpc = g_dpc.load(std::memory_order_acquire);
+    if (dpc != nullptr) {
+        dpc->record_free_if_tracked(reinterpret_cast<void*>(addr));
+    }
 }
 
 // ----- Hook proxies -----
+//
+// Phase 0 fix: each proxy filters by kMinTrackSize (or unconditional pass for
+// free/munmap whose ptr was never tracked) BEFORE accessing t_in_tracer. The
+// thread_local read on first access by a fresh thread can otherwise trigger
+// __emutls_get_address → libc malloc → proxy_malloc → infinite recursion →
+// stack overflow → SIGSEGV (NDK r28 + clang 19 emulated-TLS path on ARM64).
+//
+// Once we know the alloc is large enough to potentially track, we apply a
+// ScopedTracerGuard that holds t_in_tracer=true for the entire recording
+// lifecycle (captureStack, unordered_map insert, DPC mirror), so any nested
+// libc call from inside takes the early-return fast path at proxy_malloc.
+//
+// For free/munmap, t_in_tracer is read only when g_active is true, since the
+// vast majority of free() calls in production are for small allocations
+// never recorded. This is a heuristic — recordFree will still erase from
+// g_live whether it's tracked or not (linear hash, O(1) miss is fine).
 
 static void* proxy_malloc(size_t size) {
     void* p = (g_orig_malloc != nullptr) ? g_orig_malloc(size) : nullptr;
-    if (g_active.load(std::memory_order_relaxed) && p) {
-        recordAlloc((uintptr_t)p, size, 0);
-    }
+    if (size < kMinTrackSize) return p;  // skip TLS access for small allocs
+    if (t_in_tracer || !g_active.load(std::memory_order_relaxed) || !p) return p;
+    ScopedTracerGuard guard;
+    recordAlloc((uintptr_t)p, size, 0);
     return p;
 }
 
 static void* proxy_calloc(size_t nmemb, size_t size) {
     void* p = (g_orig_calloc != nullptr) ? g_orig_calloc(nmemb, size) : nullptr;
-    if (g_active.load(std::memory_order_relaxed) && p) {
-        recordAlloc((uintptr_t)p, nmemb * size, 1);
-    }
+    size_t total = nmemb * size;
+    if (total < kMinTrackSize) return p;
+    if (t_in_tracer || !g_active.load(std::memory_order_relaxed) || !p) return p;
+    ScopedTracerGuard guard;
+    recordAlloc((uintptr_t)p, total, 1);
     return p;
 }
 
 static void* proxy_realloc(void* ptr, size_t size) {
     void* p = (g_orig_realloc != nullptr) ? g_orig_realloc(ptr, size) : nullptr;
-    if (g_active.load(std::memory_order_relaxed)) {
-        if (ptr) recordFree((uintptr_t)ptr);
-        if (p)   recordAlloc((uintptr_t)p, size, 2);
-    }
+    // Always need to drop the old ptr from g_live if it was tracked, even if
+    // new size is small. Use the same TLS gate logic as malloc.
+    if (size < kMinTrackSize && ptr == nullptr) return p;
+    if (t_in_tracer || !g_active.load(std::memory_order_relaxed)) return p;
+    ScopedTracerGuard guard;
+    if (ptr)                         recordFree((uintptr_t)ptr);
+    if (p && size >= kMinTrackSize)  recordAlloc((uintptr_t)p, size, 2);
     return p;
 }
 
 static void proxy_free(void* ptr) {
-    if (g_active.load(std::memory_order_relaxed)) {
-        recordFree((uintptr_t)ptr);
+    if (ptr == nullptr) return;
+    if (t_in_tracer || !g_active.load(std::memory_order_relaxed)) {
+        if (g_orig_free) g_orig_free(ptr);
+        return;
     }
+    ScopedTracerGuard guard;
+    recordFree((uintptr_t)ptr);
     if (g_orig_free) g_orig_free(ptr);
 }
 
 static void* proxy_mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
     void* p = (g_orig_mmap != nullptr) ? g_orig_mmap(addr, length, prot, flags, fd, offset)
                                        : MAP_FAILED;
-    if (g_active.load(std::memory_order_relaxed) && p != MAP_FAILED) {
-        recordAlloc((uintptr_t)p, length, 3);
-    }
+    if (length < kMinTrackSize) return p;
+    if (t_in_tracer || !g_active.load(std::memory_order_relaxed) || p == MAP_FAILED) return p;
+    ScopedTracerGuard guard;
+    recordAlloc((uintptr_t)p, length, 3);
     return p;
 }
 
 static int proxy_munmap(void* addr, size_t length) {
-    if (g_active.load(std::memory_order_relaxed)) {
-        recordFree((uintptr_t)addr);
+    if (length < kMinTrackSize || addr == nullptr) {
+        return (g_orig_munmap != nullptr) ? g_orig_munmap(addr, length) : -1;
     }
+    if (t_in_tracer || !g_active.load(std::memory_order_relaxed)) {
+        return (g_orig_munmap != nullptr) ? g_orig_munmap(addr, length) : -1;
+    }
+    ScopedTracerGuard guard;
+    recordFree((uintptr_t)addr);
     return (g_orig_munmap != nullptr) ? g_orig_munmap(addr, length) : -1;
 }
 
@@ -358,6 +435,25 @@ static bool symbolize(uintptr_t pc, char* out, size_t outSize) {
 }
 
 } // namespace
+
+// Public C++ API (called from AndroidProfilerBridge.cpp during deep profiler
+// start/stop) — wire/unwire the DeepProfilerController so alloc/free events
+// flow into the .aneprof stream alongside the standalone JSONL ring.
+namespace ane::alloc_tracer {
+
+void setDeepProfilerController(ane::profiler::DeepProfilerController* dpc) {
+    g_dpc.store(dpc, std::memory_order_release);
+}
+
+ane::profiler::DeepProfilerController* getDeepProfilerController() {
+    return g_dpc.load(std::memory_order_acquire);
+}
+
+bool isActive() {
+    return g_active.load(std::memory_order_acquire);
+}
+
+} // namespace ane::alloc_tracer
 
 // ----- JNI entry points -----
 
@@ -465,21 +561,23 @@ Java_br_com_redesurftank_aneawesomeutils_AllocTracer_nativePurgeStalePhase(
         }
     }
 
-    // Free outside the live-table lock. t_in_tracer is set so proxy_free will
-    // pass through without trying to lock g_mutex again.
+    // Free outside the live-table lock. ScopedTracerGuard makes proxy_free
+    // pass through without re-acquiring g_mutex (proxy_free reads t_in_tracer
+    // before any g_active or recordFree work).
     int freed = 0;
     uint64_t freedBytes = 0;
-    t_in_tracer = true;
-    for (const auto& kv : candidates) {
-        if (g_orig_free) {
-            g_orig_free(reinterpret_cast<void*>(kv.first));
-        } else {
-            ::free(reinterpret_cast<void*>(kv.first));
+    {
+        ScopedTracerGuard guard;
+        for (const auto& kv : candidates) {
+            if (g_orig_free) {
+                g_orig_free(reinterpret_cast<void*>(kv.first));
+            } else {
+                ::free(reinterpret_cast<void*>(kv.first));
+            }
+            freed++;
+            freedBytes += kv.second;
         }
-        freed++;
-        freedBytes += kv.second;
     }
-    t_in_tracer = false;
 
     char buf[256];
     snprintf(buf, sizeof(buf),
