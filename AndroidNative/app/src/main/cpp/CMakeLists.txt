@@ -51,6 +51,9 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         # Android-specific deep memory hook (Phase 5 — GCHeap::Alloc shadowhook)
         profiler/AndroidDeepMemoryHook.cpp
 
+        # Android-specific GC observer hook (Phase 7a — GC::Collect shadowhook)
+        profiler/AndroidGcHook.cpp
+
         # JNI bridge for AS3 → native profiler
         profiler/AndroidProfilerBridge.cpp)
 

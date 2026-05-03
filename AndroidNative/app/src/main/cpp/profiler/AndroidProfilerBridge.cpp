@@ -30,6 +30,7 @@
 #include "AndroidRuntimeHook.hpp"
 #include "AndroidRenderHook.hpp"
 #include "AndroidDeepMemoryHook.hpp"
+#include "AndroidGcHook.hpp"
 #include "CaptureController.hpp"
 #include "DeepProfilerController.hpp"
 
@@ -66,6 +67,7 @@ std::unique_ptr<ane::profiler::AndroidRuntimeHook>  g_hook;
 std::unique_ptr<ane::profiler::DeepProfilerController> g_deep_ctrl;
 std::unique_ptr<ane::profiler::AndroidRenderHook>      g_render_hook;
 std::unique_ptr<ane::profiler::AndroidDeepMemoryHook>  g_deep_mem_hook;
+std::unique_ptr<ane::profiler::AndroidGcHook>          g_gc_hook;
 
 // Helper: fetch a Java String into a std::string. Returns empty on failure.
 std::string jstrToCpp(JNIEnv* env, jstring j) {
@@ -318,6 +320,19 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStartDeep(
         }
     }
 
+    // Phase 7a: install GC observer hook on libCore.so:MMgc::GC::Collect.
+    // Emits one GcCycle event per Collect() call so the analyzer can correlate
+    // alloc/free deltas around GC cycles. Build-id-pinned, no-op on unknown.
+    if (cfg.memory_enabled) {
+        g_gc_hook = std::make_unique<ane::profiler::AndroidGcHook>();
+        if (!g_gc_hook->install(g_deep_ctrl.get())) {
+            LOGW("nativeStartDeep: GC observer hook install failed — GcCycle events disabled");
+            g_gc_hook.reset();
+        } else {
+            LOGI("nativeStartDeep: GC observer hook installed (libCore.so GC::Collect)");
+        }
+    }
+
     if (jAs3Sampling != JNI_FALSE) {
         LOGW("nativeStartDeep: as3Sampling requested but Android AS3 method "
              "walker / IMemorySampler hook is not yet implemented (Phase 3+4 "
@@ -352,6 +367,11 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStopDeep(
     if (g_deep_mem_hook) {
         g_deep_mem_hook->uninstall();
         g_deep_mem_hook.reset();
+    }
+    // Uninstall Phase 7a GC observer hook before stopping the controller.
+    if (g_gc_hook) {
+        g_gc_hook->uninstall();
+        g_gc_hook.reset();
     }
     bool ok = g_deep_ctrl->stop();
     LOGI("nativeStopDeep: stopped (rc=%d)", ok ? 1 : 0);
