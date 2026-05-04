@@ -174,6 +174,14 @@ static void* proxy_GCHeapAlloc(std::size_t size, int flags) {
             if (dpc != nullptr) {
                 dpc->record_alloc_if_untracked(p, static_cast<std::uint64_t>(size));
             }
+            // Phase 4c: queue for class-name resolution. On ARMv7 this is the
+            // ONLY entry point feeding the queue (FixedMalloc::Alloc is inlined
+            // into GCHeap callers per Iter N+22 finding). On ARM64 both proxies
+            // feed; the dedup happens at recordAllocPending level via ptr.
+            AndroidAs3ObjectHook* as3_hook = g_as3_hook.load(std::memory_order_acquire);
+            if (as3_hook != nullptr) {
+                as3_hook->recordAllocPending(p, size);
+            }
         }
     }
     t_in_deep_hook = false;

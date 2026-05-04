@@ -108,30 +108,44 @@ public:
     std::uint64_t allocsQueued() const;
     std::uint64_t allocsDropped() const;
 
-    // Field offsets derived from avmplus source for AArch64 (8-byte ptr,
-    // 8-byte alignment). Subject to runtime verification via installProbe()
-    // before the hook goes hot.
+    // Field offsets derived from avmplus source. Each pointer field scales
+    // with sizeof(void*): 8 bytes on AArch64, 4 bytes on ARMv7. Subject to
+    // runtime verification via installProbe() before going hot.
     //
-    // Inheritance chain for any AS3 ScriptObject:
-    //   GCTraceableBase (virtual → vtable* @0)
+    // Inheritance chain for any AS3 ScriptObject (V = sizeof(void*)):
+    //   GCTraceableBase (virtual → vtable* @0, V bytes)
     //     ↓
     //   GCFinalizedObject (no fields)
     //     ↓
-    //   RCObject (uint32_t composite + 4 padding = 8 bytes @8)
+    //   RCObject (uint32_t composite @V; on ARM64 also 4 bytes padding)
     //     ↓
     //   AvmPlusScriptableObject (DEBUGGER-off → no fields)
     //     ↓
-    //   ScriptObject (VTable* vtable @16, GCMember<ScriptObject> delegate @24)
-    //     ↓
-    //   <concrete AS3 class>
+    //   ScriptObject (VTable* vtable @2V on AArch64 / @V+4 on ARMv7,
+    //                 GCMember<ScriptObject> delegate @+V)
     struct LayoutOffsets {
-        std::uint32_t scriptobject_vtable_off = 16;  // ScriptObject -> VTable*
-        std::uint32_t vtable_traits_off       = 40;  // VTable -> Traits  (offset = vtable*+8 + Toplevel*+8 + init+8 + base+8 + ivtable+8 = 40)
-        std::uint32_t traits_name_off         = 144; // Traits -> Stringp _name
-        std::uint32_t string_buffer_off       = 8;   // String.m_buffer (after vtable; AvmPlusScriptableObject has 0 fields, RCObject has composite+pad=8)
-        std::uint32_t string_extra_off        = 16;  // String.m_extra
-        std::uint32_t string_length_off       = 24;  // String.m_length (int32)
-        std::uint32_t string_flags_off        = 28;  // String.m_bitsAndFlags (uint32)
+        // ScriptObject layout depends on architecture:
+        //   AArch64: vtable*(8) + composite(4)+pad(4) + VTable*(8) → VTable@16
+        //   ARMv7:   vtable*(4) + composite(4)         + VTable*(4) → VTable@8
+#if defined(__aarch64__)
+        std::uint32_t scriptobject_vtable_off = 16;
+        std::uint32_t vtable_traits_off       = 40;  // V*5 = 8*5
+        std::uint32_t traits_name_off         = 144; // V*18 = 8*18 (core+base+param+cache+neg+8*primary+sec+pool+itraits+ns)
+        std::uint32_t string_buffer_off       = 8;   // V (after vtable)
+        std::uint32_t string_extra_off        = 16;  // V*2
+        std::uint32_t string_length_off       = 24;  // V*3
+        std::uint32_t string_flags_off        = 28;  // V*3 + 4
+#elif defined(__arm__)
+        std::uint32_t scriptobject_vtable_off = 8;   // 4+4
+        std::uint32_t vtable_traits_off       = 20;  // V*5 = 4*5
+        std::uint32_t traits_name_off         = 72;  // V*18 = 4*18
+        std::uint32_t string_buffer_off       = 4;
+        std::uint32_t string_extra_off        = 8;
+        std::uint32_t string_length_off       = 12;
+        std::uint32_t string_flags_off        = 16;
+#else
+#  error "Unsupported architecture for AndroidAs3ObjectHook"
+#endif
     };
 
     // String.m_bitsAndFlags bit definitions (from StringObject.h)

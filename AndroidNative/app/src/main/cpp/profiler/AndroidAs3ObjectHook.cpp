@@ -78,29 +78,27 @@ static inline std::uint64_t nowNs() {
 // ---------------------------------------------------------------------------
 // Pointer validation — given a candidate pointer, decide if it points into
 // the GC heap region. Conservative checks reject most non-heap pointers.
+// Pointer width is sizeof(uintptr_t) — 8 on AArch64, 4 on ARMv7.
 
 static inline bool isPlausibleHeapPtr(std::uintptr_t p) {
     if (p == 0) return false;
-    if (p & 0x7) return false;            // 8-byte aligned
-    // Userspace range on AArch64 Android is typically 0x0000_0000_0000_0000..
-    // 0x0000_007F_FFFF_FFFF (39-bit). Reject obvious tag values, RCObject
-    // poison patterns, and kernel-space.
+    if (p & (sizeof(void*) - 1)) return false;  // pointer-aligned
+#if defined(__aarch64__)
     if (p < 0x1000) return false;
-    if (p > 0x0000007FFFFFFFFFULL) return false;
+    if (p > 0x0000007FFFFFFFFFULL) return false;  // 39-bit userspace
+#elif defined(__arm__)
+    if (p < 0x1000) return false;
+    if (p > 0xBFFFFFFFu) return false;            // ARMv7 Linux user 3GB ceiling
+#endif
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Read a u64 from a possibly-bad pointer. Returns 0 on segfault. We use a
-// signal-handler-protected read here, but for the initial implementation a
-// straight read is used — the caller is expected to validate ranges first.
-//
-// TBD: install a thread-local SIGSEGV trampoline like Windows crash detector
-// does; for now rely on isPlausibleHeapPtr filters.
+// readPtr returns uintptr_t — 8 bytes on AArch64, 4 bytes on ARMv7. The caller
+// must have already passed isPlausibleHeapPtr() on `addr`.
 
-static inline std::uint64_t readU64(std::uintptr_t addr) {
+static inline std::uintptr_t readPtr(std::uintptr_t addr) {
     if (!isPlausibleHeapPtr(addr)) return 0;
-    return *reinterpret_cast<const volatile std::uint64_t*>(addr);
+    return *reinterpret_cast<const volatile std::uintptr_t*>(addr);
 }
 
 static inline std::uint32_t readU32(std::uintptr_t addr) {
@@ -129,21 +127,20 @@ bool resolveClassName(std::uintptr_t obj_ptr, char* out, std::size_t out_capacit
 
     if (!isPlausibleHeapPtr(obj_ptr)) return false;
 
-    // Step 1: read AVM2 VTable* from ScriptObject + 16
-    std::uintptr_t vtable = readU64(obj_ptr + g_layout.scriptobject_vtable_off);
+    // Step 1: read AVM2 VTable* from ScriptObject + scriptobject_vtable_off
+    std::uintptr_t vtable = readPtr(obj_ptr + g_layout.scriptobject_vtable_off);
     if (!isPlausibleHeapPtr(vtable)) return false;
 
-    // Step 2: read Traits* from VTable + 40
-    std::uintptr_t traits = readU64(vtable + g_layout.vtable_traits_off);
+    // Step 2: read Traits* from VTable + vtable_traits_off
+    std::uintptr_t traits = readPtr(vtable + g_layout.vtable_traits_off);
     if (!isPlausibleHeapPtr(traits)) return false;
 
-    // Step 3: read Stringp _name from Traits + 144
-    std::uintptr_t name_str = readU64(traits + g_layout.traits_name_off);
+    // Step 3: read Stringp _name from Traits + traits_name_off
+    std::uintptr_t name_str = readPtr(traits + g_layout.traits_name_off);
     if (!isPlausibleHeapPtr(name_str)) return false;
 
-    // Step 4: read String fields. The buffer pointer is at +8, length at +24,
-    // bitsAndFlags at +28.
-    std::uintptr_t buf  = readU64(name_str + g_layout.string_buffer_off);
+    // Step 4: read String fields. Pointer-width-aware via the layout struct.
+    std::uintptr_t buf  = readPtr(name_str + g_layout.string_buffer_off);
     std::int32_t   len  = readI32(name_str + g_layout.string_length_off);
     std::uint32_t  bits = readU32(name_str + g_layout.string_flags_off);
 
