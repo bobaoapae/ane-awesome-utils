@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "DeepProfilerController.hpp"
+#include "AndroidAs3ObjectHook.hpp"
 
 #define LOG_TAG "AneDeepMemHook"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -63,6 +64,7 @@ typedef void* (*FixedAlloc_t)(void* self, std::size_t size, int flags);
 // ----- State -----
 
 static std::atomic<DeepProfilerController*> g_controller{nullptr};
+static std::atomic<AndroidAs3ObjectHook*>   g_as3_hook{nullptr};
 static std::atomic<bool>                    g_active{false};
 static std::atomic<std::uint64_t>           g_diag_alloc_calls{0};
 static std::atomic<std::uint64_t>           g_diag_alloc_bytes{0};
@@ -199,6 +201,13 @@ static void* proxy_FixedAlloc(void* self, std::size_t size, int flags) {
             if (dpc != nullptr) {
                 dpc->record_alloc_if_untracked(p, static_cast<std::uint64_t>(size));
             }
+            // Phase 4c: queue (ptr, size) for deferred class-name resolution.
+            // The drain thread reads ptr[0]->VTable->Traits->name once the AS3
+            // constructor has populated the VTable slot.
+            AndroidAs3ObjectHook* as3_hook = g_as3_hook.load(std::memory_order_acquire);
+            if (as3_hook != nullptr) {
+                as3_hook->recordAllocPending(p, size);
+            }
         }
     }
     t_in_deep_hook = false;
@@ -209,6 +218,10 @@ static void* proxy_FixedAlloc(void* self, std::size_t size, int flags) {
 
 AndroidDeepMemoryHook::~AndroidDeepMemoryHook() {
     uninstall();
+}
+
+void AndroidDeepMemoryHook::setAs3ObjectHook(AndroidAs3ObjectHook* hook) {
+    g_as3_hook.store(hook, std::memory_order_release);
 }
 
 bool AndroidDeepMemoryHook::install(DeepProfilerController* controller) {

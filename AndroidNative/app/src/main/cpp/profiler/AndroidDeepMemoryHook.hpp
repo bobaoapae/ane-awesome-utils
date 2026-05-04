@@ -34,6 +34,7 @@
 namespace ane::profiler {
 
 class DeepProfilerController;
+class AndroidAs3ObjectHook;
 
 class AndroidDeepMemoryHook {
 public:
@@ -47,6 +48,11 @@ public:
     bool install(DeepProfilerController* controller);
     void uninstall();
     bool installed() const noexcept { return installed_; }
+
+    // Phase 4c integration: when a typed-alloc hook is installed, the FixedAlloc
+    // proxy will additionally enqueue (ptr, size) into it for deferred class
+    // name resolution. May be set/cleared while hook is live.
+    void setAs3ObjectHook(AndroidAs3ObjectHook* hook);
 
     // Diagnostics
     std::uint64_t diagAllocCalls()    const;

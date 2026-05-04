@@ -15,8 +15,12 @@
 
 #include <android/log.h>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <thread>
 
 #include "DeepProfilerController.hpp"
 #include "AneprofFormat.hpp"
@@ -34,9 +38,42 @@ static std::atomic<bool>                    g_active{false};
 static std::atomic<std::uint64_t>           g_diag_allocs_observed{0};
 static std::atomic<std::uint64_t>           g_diag_names_resolved{0};
 static std::atomic<std::uint64_t>           g_diag_names_unresolved{0};
+static std::atomic<std::uint64_t>           g_diag_allocs_queued{0};
+static std::atomic<std::uint64_t>           g_diag_allocs_dropped{0};
 
 // Reusable layout instance. Populated from defaults and validated by probe.
 static AndroidAs3ObjectHook::LayoutOffsets g_layout{};
+
+// ---------------------------------------------------------------------------
+// Ring buffer: pending allocs awaiting class-name resolution. Pushed from
+// proxy_FixedAlloc (multi-producer), drained by a single worker thread
+// (single-consumer). Lock-free via atomic counters; full queue drops events
+// rather than blocking the alloc hot path.
+
+static constexpr std::size_t kRingCapacity = 4096;  // power of 2 for masking
+
+struct PendingAlloc {
+    void*           ptr;
+    std::uint64_t   size;
+    std::uint64_t   timestamp_ns;
+    std::uint32_t   thread_id;
+};
+
+static PendingAlloc          g_ring[kRingCapacity];
+static std::atomic<std::uint64_t> g_ring_write{0};   // monotonic write counter
+static std::atomic<std::uint64_t> g_ring_read{0};    // monotonic read counter
+
+static std::thread           g_drain_thread;
+static std::atomic<bool>     g_drain_stop{false};
+static std::mutex            g_drain_mu;
+static std::condition_variable g_drain_cv;
+
+static inline std::uint64_t nowNs() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count());
+}
 
 // ---------------------------------------------------------------------------
 // Pointer validation — given a candidate pointer, decide if it points into
@@ -155,7 +192,100 @@ bool resolveClassName(std::uintptr_t obj_ptr, char* out, std::size_t out_capacit
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Drain thread: runs in its own thread, sleeps in 1ms increments. Each wake,
+// drains entries that are >= kDeferDelayNs old, calls resolveClassName(), and
+// emits As3Alloc into the DPC stream.
+
+static void drainThreadMain() {
+    char name_buf[128];
+    while (!g_drain_stop.load(std::memory_order_acquire)) {
+        std::uint64_t r = g_ring_read.load(std::memory_order_acquire);
+        std::uint64_t w = g_ring_write.load(std::memory_order_acquire);
+
+        const std::uint64_t now = nowNs();
+        bool processed_any = false;
+
+        while (r < w) {
+            const PendingAlloc& entry = g_ring[r & (kRingCapacity - 1)];
+            // If entry is too recent, wait for the constructor to finish.
+            if (now - entry.timestamp_ns < AndroidAs3ObjectHook::kDeferDelayNs) {
+                break;  // sleep, retry
+            }
+
+            DeepProfilerController* dpc = g_controller.load(std::memory_order_acquire);
+            if (dpc != nullptr && entry.ptr != nullptr) {
+                std::uintptr_t obj = reinterpret_cast<std::uintptr_t>(entry.ptr);
+                bool resolved = resolveClassName(obj, name_buf, sizeof(name_buf));
+                if (resolved) {
+                    g_diag_names_resolved.fetch_add(1, std::memory_order_relaxed);
+                    // Emit As3Alloc with class name as label/payload.
+                    // Note: aneprof currently uses As3ObjectEvent {sample_id, size,
+                    // type_name_len, stack_len} + variable label. We synthesize a
+                    // unique sample_id from ptr to allow downstream dedup.
+                    aneprof::As3ObjectEvent ev{};
+                    ev.sample_id = static_cast<std::uint64_t>(obj);
+                    ev.size = entry.size;
+                    ev.type_name_len = static_cast<std::uint32_t>(std::strlen(name_buf));
+                    ev.stack_len = 0;
+                    // The DPC's As3 emission path needs the event + name bytes
+                    // appended. For now, emit via a generic marker — actual
+                    // As3Alloc EventType emission requires DPC method we'll wire
+                    // up next iteration once API surface is confirmed.
+                    char marker_value[160];
+                    std::snprintf(marker_value, sizeof(marker_value),
+                                  "{\"class\":\"%s\",\"size\":%llu,\"ptr\":\"0x%llx\"}",
+                                  name_buf,
+                                  (unsigned long long)entry.size,
+                                  (unsigned long long)obj);
+                    dpc->marker("as3_alloc", marker_value);
+                } else {
+                    g_diag_names_unresolved.fetch_add(1, std::memory_order_relaxed);
+                }
+                g_diag_allocs_observed.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            ++r;
+            processed_any = true;
+        }
+
+        g_ring_read.store(r, std::memory_order_release);
+
+        if (!processed_any) {
+            // No work — sleep. CV wait with 1ms timeout so we don't stall on
+            // shutdown.
+            std::unique_lock<std::mutex> lk(g_drain_mu);
+            g_drain_cv.wait_for(lk, std::chrono::milliseconds(1));
+        }
+    }
+}
+
 } // namespace
+
+bool AndroidAs3ObjectHook::recordAllocPending(void* ptr, std::size_t size) {
+    if (!g_active.load(std::memory_order_acquire)) return false;
+    if (ptr == nullptr) return false;
+    // Filter: AS3 ScriptObject minimum size is sizeof(VTable*) + composite-pad +
+    // VTable* + delegate = 24 bytes. Anything smaller can't be a ScriptObject.
+    if (size < 24) return false;
+
+    std::uint64_t w = g_ring_write.fetch_add(1, std::memory_order_acq_rel);
+    std::uint64_t r = g_ring_read.load(std::memory_order_acquire);
+    if (w - r >= kRingCapacity) {
+        // Queue full — drop. Don't decrement write to avoid races; the slot
+        // we claimed will simply be overwritten by a future entry. Track drop.
+        g_diag_allocs_dropped.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    PendingAlloc& slot = g_ring[w & (kRingCapacity - 1)];
+    slot.ptr = ptr;
+    slot.size = static_cast<std::uint64_t>(size);
+    slot.timestamp_ns = nowNs();
+    slot.thread_id = 0;  // could fill from gettid() if needed
+    g_diag_allocs_queued.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
 
 AndroidAs3ObjectHook::~AndroidAs3ObjectHook() {
     uninstall();
@@ -165,27 +295,41 @@ bool AndroidAs3ObjectHook::install(DeepProfilerController* controller) {
     if (installed_) return true;
     if (controller == nullptr) return false;
 
-    // Default offsets are assumed valid for the target build-id. Probe before
-    // going hot — but the probe itself is also deferred. For now: install in
-    // skeleton mode, hook firing deferred to next iteration.
     g_controller.store(controller, std::memory_order_release);
     g_layout = layout_;
+    g_ring_write.store(0, std::memory_order_release);
+    g_ring_read.store(0, std::memory_order_release);
+    g_diag_allocs_observed.store(0);
+    g_diag_names_resolved.store(0);
+    g_diag_names_unresolved.store(0);
+    g_diag_allocs_queued.store(0);
+    g_diag_allocs_dropped.store(0);
+    g_drain_stop.store(false, std::memory_order_release);
     g_active.store(true, std::memory_order_release);
+    g_drain_thread = std::thread(drainThreadMain);
     installed_ = true;
 
-    LOGI("install: skeleton mode — hook integration with FixedMalloc::Alloc "
-         "deferred. Layout: vtable=+%u traits=+%u name=+%u buf=+%u len=+%u flags=+%u",
+    LOGI("install: As3 typed-alloc resolver active. Layout: vtable=+%u "
+         "traits=+%u name=+%u buf=+%u len=+%u flags=+%u; ring=%zu entries; "
+         "defer=%lluns",
          (unsigned)layout_.scriptobject_vtable_off,
          (unsigned)layout_.vtable_traits_off,
          (unsigned)layout_.traits_name_off,
          (unsigned)layout_.string_buffer_off,
          (unsigned)layout_.string_length_off,
-         (unsigned)layout_.string_flags_off);
+         (unsigned)layout_.string_flags_off,
+         kRingCapacity,
+         (unsigned long long)kDeferDelayNs);
     return true;
 }
 
 void AndroidAs3ObjectHook::uninstall() {
     g_active.store(false, std::memory_order_release);
+    g_drain_stop.store(true, std::memory_order_release);
+    g_drain_cv.notify_all();
+    if (g_drain_thread.joinable()) {
+        g_drain_thread.join();
+    }
     g_controller.store(nullptr, std::memory_order_release);
     installed_ = false;
 }
@@ -207,6 +351,14 @@ std::uint64_t AndroidAs3ObjectHook::namesResolved() const {
 
 std::uint64_t AndroidAs3ObjectHook::namesUnresolved() const {
     return g_diag_names_unresolved.load(std::memory_order_relaxed);
+}
+
+std::uint64_t AndroidAs3ObjectHook::allocsQueued() const {
+    return g_diag_allocs_queued.load(std::memory_order_relaxed);
+}
+
+std::uint64_t AndroidAs3ObjectHook::allocsDropped() const {
+    return g_diag_allocs_dropped.load(std::memory_order_relaxed);
 }
 
 } // namespace ane::profiler

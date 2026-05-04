@@ -31,6 +31,7 @@
 #include "AndroidRenderHook.hpp"
 #include "AndroidDeepMemoryHook.hpp"
 #include "AndroidGcHook.hpp"
+#include "AndroidAs3ObjectHook.hpp"
 #include "CaptureController.hpp"
 #include "DeepProfilerController.hpp"
 
@@ -68,6 +69,7 @@ std::unique_ptr<ane::profiler::DeepProfilerController> g_deep_ctrl;
 std::unique_ptr<ane::profiler::AndroidRenderHook>      g_render_hook;
 std::unique_ptr<ane::profiler::AndroidDeepMemoryHook>  g_deep_mem_hook;
 std::unique_ptr<ane::profiler::AndroidGcHook>          g_gc_hook;
+std::unique_ptr<ane::profiler::AndroidAs3ObjectHook>   g_as3_object_hook;
 
 // Helper: fetch a Java String into a std::string. Returns empty on failure.
 std::string jstrToCpp(JNIEnv* env, jstring j) {
@@ -333,6 +335,21 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStartDeep(
         }
     }
 
+    // Phase 4c: install typed-AS3-alloc resolver. Walks VTable→Traits→name
+    // chain at ~50us after each FixedMalloc::Alloc, emits as3_alloc markers
+    // with class name. Coexists with the deep memory hook (which provides the
+    // pending-alloc queue source).
+    if (cfg.memory_enabled && g_deep_mem_hook) {
+        g_as3_object_hook = std::make_unique<ane::profiler::AndroidAs3ObjectHook>();
+        if (!g_as3_object_hook->install(g_deep_ctrl.get())) {
+            LOGW("nativeStartDeep: AS3 typed-alloc hook install failed");
+            g_as3_object_hook.reset();
+        } else {
+            g_deep_mem_hook->setAs3ObjectHook(g_as3_object_hook.get());
+            LOGI("nativeStartDeep: AS3 typed-alloc resolver installed (Phase 4c)");
+        }
+    }
+
     if (jAs3Sampling != JNI_FALSE) {
         LOGW("nativeStartDeep: as3Sampling requested but Android AS3 method "
              "walker / IMemorySampler hook is not yet implemented (Phase 3+4 "
@@ -362,6 +379,17 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStopDeep(
     if (g_render_hook) {
         g_render_hook->uninstall();
         g_render_hook.reset();
+    }
+    // Uninstall Phase 4c AS3 typed-alloc hook BEFORE the deep memory hook
+    // (the deep memory hook proxy holds a pointer to the AS3 hook). Order
+    // matters: clear g_as3_hook on the deep memory hook side first, then
+    // uninstall the AS3 hook itself (which joins its drain thread).
+    if (g_deep_mem_hook && g_as3_object_hook) {
+        g_deep_mem_hook->setAs3ObjectHook(nullptr);
+    }
+    if (g_as3_object_hook) {
+        g_as3_object_hook->uninstall();
+        g_as3_object_hook.reset();
     }
     // Uninstall Phase 5 deep memory hook before stopping the controller.
     if (g_deep_mem_hook) {

@@ -91,10 +91,22 @@ public:
     void uninstall();
     bool installed() const noexcept { return installed_; }
 
+    // Called from AndroidDeepMemoryHook::proxy_FixedAlloc after a successful
+    // allocation. Pushes (ptr, size) into a global ring buffer; the worker
+    // thread drains entries that are >kDeferDelayUs old and walks the
+    // VTable→Traits→name chain to emit a typed As3Alloc event.
+    //
+    // Thread-safe; lock-free via atomic indices on the ring buffer. Returns
+    // false if the queue is full (caller continues without As3 emission —
+    // we never block the alloc hot path).
+    bool recordAllocPending(void* ptr, std::size_t size);
+
     // Diagnostic counters
     std::uint64_t allocsObserved() const;
     std::uint64_t namesResolved() const;
     std::uint64_t namesUnresolved() const;
+    std::uint64_t allocsQueued() const;
+    std::uint64_t allocsDropped() const;
 
     // Field offsets derived from avmplus source for AArch64 (8-byte ptr,
     // 8-byte alignment). Subject to runtime verification via installProbe()
@@ -126,6 +138,10 @@ public:
     static constexpr std::uint32_t kStringWidthMask    = 0x00000001;
     static constexpr std::uint32_t k7BitAsciiFlag      = 0x00000008;
     static constexpr std::uint32_t kInternedFlag       = 0x00000010;
+
+    // Drain delay: we wait ~50us after the alloc before reading ptr[0]. By
+    // then the AS3 constructor has set up the VTable.
+    static constexpr std::uint64_t kDeferDelayNs = 50'000;  // 50us
 
 private:
     // installProbe(): allocates a sentinel AS3 object via a known synthesizing
