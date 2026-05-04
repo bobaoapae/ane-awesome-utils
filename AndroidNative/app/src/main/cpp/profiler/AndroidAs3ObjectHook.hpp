@@ -96,15 +96,36 @@ public:
     std::uint64_t namesResolved() const;
     std::uint64_t namesUnresolved() const;
 
-    // Field offsets derived from avmplus source. Subject to runtime
-    // verification via installProbe() before the hook goes hot.
+    // Field offsets derived from avmplus source for AArch64 (8-byte ptr,
+    // 8-byte alignment). Subject to runtime verification via installProbe()
+    // before the hook goes hot.
+    //
+    // Inheritance chain for any AS3 ScriptObject:
+    //   GCTraceableBase (virtual → vtable* @0)
+    //     ↓
+    //   GCFinalizedObject (no fields)
+    //     ↓
+    //   RCObject (uint32_t composite + 4 padding = 8 bytes @8)
+    //     ↓
+    //   AvmPlusScriptableObject (DEBUGGER-off → no fields)
+    //     ↓
+    //   ScriptObject (VTable* vtable @16, GCMember<ScriptObject> delegate @24)
+    //     ↓
+    //   <concrete AS3 class>
     struct LayoutOffsets {
-        std::uint32_t traits_name_off = 144;     // Traits._name (Stringp)
-        std::uint32_t string_buffer_off = 0;     // String.m_buffer.p8 — TBD via probe
-        std::uint32_t string_length_off = 0;     // String.m_length — TBD via probe
-        std::uint32_t string_flags_off = 0;      // String.m_bitsAndFlags — TBD via probe
-        std::uint32_t vtable_traits_off = 0;     // VTable -> Traits — TBD via probe
+        std::uint32_t scriptobject_vtable_off = 16;  // ScriptObject -> VTable*
+        std::uint32_t vtable_traits_off       = 40;  // VTable -> Traits  (offset = vtable*+8 + Toplevel*+8 + init+8 + base+8 + ivtable+8 = 40)
+        std::uint32_t traits_name_off         = 144; // Traits -> Stringp _name
+        std::uint32_t string_buffer_off       = 8;   // String.m_buffer (after vtable; AvmPlusScriptableObject has 0 fields, RCObject has composite+pad=8)
+        std::uint32_t string_extra_off        = 16;  // String.m_extra
+        std::uint32_t string_length_off       = 24;  // String.m_length (int32)
+        std::uint32_t string_flags_off        = 28;  // String.m_bitsAndFlags (uint32)
     };
+
+    // String.m_bitsAndFlags bit definitions (from StringObject.h)
+    static constexpr std::uint32_t kStringWidthMask    = 0x00000001;
+    static constexpr std::uint32_t k7BitAsciiFlag      = 0x00000008;
+    static constexpr std::uint32_t kInternedFlag       = 0x00000010;
 
 private:
     // installProbe(): allocates a sentinel AS3 object via a known synthesizing

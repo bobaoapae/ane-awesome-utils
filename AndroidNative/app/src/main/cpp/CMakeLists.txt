@@ -54,6 +54,9 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         # Android-specific GC observer hook (Phase 7a — GC::Collect shadowhook)
         profiler/AndroidGcHook.cpp
 
+        # Android-specific typed AS3 alloc hook (Phase 4c — VTable→Traits walker)
+        profiler/AndroidAs3ObjectHook.cpp
+
         # JNI bridge for AS3 → native profiler
         profiler/AndroidProfilerBridge.cpp)
 
