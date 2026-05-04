@@ -408,6 +408,21 @@ void AndroidAs3ObjectHook::uninstall() {
         g_drain_thread.join();
     }
     g_controller.store(nullptr, std::memory_order_release);
+
+    // Dump diagnostic counters at teardown so we can tell whether the
+    // walker actually saw any allocs and whether the pointer-chase
+    // (VTable→Traits→name) succeeded. Zero observed = no allocs reached
+    // the queue (deep memory hook isn't feeding); zero resolved with
+    // non-zero unresolved = layout offsets wrong for this libCore.so
+    // build; non-zero dropped = ring too small for the rate.
+    LOGI("uninstall: stats observed=%llu queued=%llu dropped=%llu "
+         "resolved=%llu unresolved=%llu",
+         (unsigned long long)g_diag_allocs_observed.load(),
+         (unsigned long long)g_diag_allocs_queued.load(),
+         (unsigned long long)g_diag_allocs_dropped.load(),
+         (unsigned long long)g_diag_names_resolved.load(),
+         (unsigned long long)g_diag_names_unresolved.load());
+
     installed_ = false;
 }
 
