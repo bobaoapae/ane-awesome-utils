@@ -17,10 +17,14 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <csetjmp>
+#include <csignal>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "DeepProfilerController.hpp"
 #include "AneprofFormat.hpp"
@@ -93,17 +97,89 @@ static inline bool isPlausibleHeapPtr(std::uintptr_t p) {
     return true;
 }
 
-// readPtr returns uintptr_t — 8 bytes on AArch64, 4 bytes on ARMv7. The caller
-// must have already passed isPlausibleHeapPtr() on `addr`.
+// ---------------------------------------------------------------------------
+// SIGSEGV-safe pointer chase. Defends the walker against unmapped pages
+// encountered while dereferencing arbitrary heap pointers (most allocations
+// entering the queue are NOT AS3 ScriptObjects; reading at canonical
+// ScriptObject offsets lands in random data or unmapped regions).
+//
+// Two layers:
+//   1. mincore() pre-check on the page containing `addr` — cheap syscall,
+//      catches the unmapped case 100% of the time (returns -ENOMEM). This
+//      is the primary line of defense.
+//   2. siglongjmp safety net: the walker arms a per-thread sigsetjmp before
+//      each guarded read; CrashSignalHandler.cpp's signalHandler calls our
+//      As3WalkerGuard_maybeLongjmp() weak-link hook BEFORE its own crash
+//      capture path, so SIGSEGV/SIGBUS inside the guard window unwind back
+//      to the read site instead of aborting the process. Same pattern as
+//      AirIMEGuard.
+//
+// We deliberately do NOT install our own sigaction — fighting over signal
+// handler chain with CrashSignalHandler races on whoever was installed last.
+
+static thread_local sigjmp_buf t_safe_read_jmp;
+static thread_local bool       t_safe_read_active = false;
+static long                    g_page_size = 4096;  // initialized at install
+
+extern "C" bool As3WalkerGuard_maybeLongjmp(int sig, siginfo_t* info, void* ctx) {
+    (void)info; (void)ctx;
+    if (sig != SIGSEGV && sig != SIGBUS) return false;
+    if (!t_safe_read_active) return false;
+    t_safe_read_active = false;
+    siglongjmp(t_safe_read_jmp, 1);
+    // unreachable
+    return true;
+}
+
+// Defined in CrashSignalHandler.cpp. Idempotent. We call it from install() so
+// the As3WalkerGuard_maybeLongjmp weak hook actually gets reached when SIGSEGV
+// fires inside the walker — without this, libc's default handler aborts the
+// process before any of our chain runs.
+extern "C" void AneAwesomeUtils_installSignalHandlerIfNeeded();
+
+static void ensureSegvHandlerInstalled() {
+    g_page_size = sysconf(_SC_PAGESIZE);
+    if (g_page_size <= 0) g_page_size = 4096;
+    AneAwesomeUtils_installSignalHandlerIfNeeded();
+}
+
+// Returns true if the page containing addr is currently mapped + resident.
+// mincore returns -ENOMEM (i.e., negative) if any page in the range isn't
+// mapped at all; that's the dominant failure mode we're guarding against.
+// Resident-but-not-cached pages still count as mapped (mincore returns 0 with
+// vec[0]=0 — that's still "page exists" which is what we want).
+static inline bool isPageMapped(std::uintptr_t addr) {
+    std::uintptr_t page_base = addr & ~(static_cast<std::uintptr_t>(g_page_size) - 1);
+    unsigned char vec = 0;
+    int rc = mincore(reinterpret_cast<void*>(page_base),
+                     static_cast<std::size_t>(g_page_size), &vec);
+    return rc == 0;
+}
+
+// SIGSEGV/SIGBUS-guarded read. Returns 0 on fault. Caller must have already
+// validated alignment and range via isPlausibleHeapPtr().
+template <typename T>
+static inline T safeRead(std::uintptr_t addr) {
+    if (!isPageMapped(addr)) return T{};
+    T val = T{};
+    t_safe_read_active = true;
+    if (sigsetjmp(t_safe_read_jmp, 1) == 0) {
+        val = *reinterpret_cast<const volatile T*>(addr);
+    } else {
+        val = T{};
+    }
+    t_safe_read_active = false;
+    return val;
+}
 
 static inline std::uintptr_t readPtr(std::uintptr_t addr) {
     if (!isPlausibleHeapPtr(addr)) return 0;
-    return *reinterpret_cast<const volatile std::uintptr_t*>(addr);
+    return safeRead<std::uintptr_t>(addr);
 }
 
 static inline std::uint32_t readU32(std::uintptr_t addr) {
     if (addr == 0 || (addr & 0x3) || addr < 0x1000) return 0;
-    return *reinterpret_cast<const volatile std::uint32_t*>(addr);
+    return safeRead<std::uint32_t>(addr);
 }
 
 static inline std::int32_t readI32(std::uintptr_t addr) {
@@ -112,7 +188,7 @@ static inline std::int32_t readI32(std::uintptr_t addr) {
 
 static inline std::uint8_t readU8(std::uintptr_t addr) {
     if (addr == 0 || addr < 0x1000) return 0;
-    return *reinterpret_cast<const volatile std::uint8_t*>(addr);
+    return safeRead<std::uint8_t>(addr);
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +367,10 @@ AndroidAs3ObjectHook::~AndroidAs3ObjectHook() {
 bool AndroidAs3ObjectHook::install(DeepProfilerController* controller) {
     if (installed_) return true;
     if (controller == nullptr) return false;
+
+    // Install signal handler BEFORE we start any thread that does pointer
+    // chasing. The handler is process-wide and idempotent.
+    ensureSegvHandlerInstalled();
 
     g_controller.store(controller, std::memory_order_release);
     g_layout = layout_;

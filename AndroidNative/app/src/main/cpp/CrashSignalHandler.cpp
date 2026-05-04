@@ -80,6 +80,13 @@ static volatile long g_bc_time_sec     =  0;  // 0 = never updated
 // longjmp'd and control never reaches here (function is noreturn in that path).
 extern "C" __attribute__((weak)) bool AirIMEGuard_maybeLongjmp(int sig, siginfo_t* info, void* ctx);
 
+// Same pattern for the Phase 4c AS3-object walker (AndroidAs3ObjectHook). The
+// drain thread dereferences arbitrary heap pointers while resolving class
+// names; landing in unmapped pages is expected and survivable. The walker
+// arms a per-thread sigsetjmp before each guarded read; this callback
+// performs the corresponding siglongjmp when SIGSEGV/SIGBUS fires inside it.
+extern "C" __attribute__((weak)) bool As3WalkerGuard_maybeLongjmp(int sig, siginfo_t* info, void* ctx);
+
 static const char* signalName(int sig) {
     switch (sig) {
         case SIGSEGV: return "SIGSEGV";
@@ -259,6 +266,13 @@ static void signalHandler(int sig, siginfo_t* info, void* ctx) {
     // here. Falls through if the guard isn't armed or this isn't SIGSEGV.
     if (sig == SIGSEGV && AirIMEGuard_maybeLongjmp && AirIMEGuard_maybeLongjmp(sig, info, ctx)) {
         return; // unreachable — longjmp already happened
+    }
+
+    // Same dibs for the Phase 4c walker — if the drain thread is mid-deref
+    // inside a guarded read, longjmp out instead of crashing the process.
+    if ((sig == SIGSEGV || sig == SIGBUS) &&
+        As3WalkerGuard_maybeLongjmp && As3WalkerGuard_maybeLongjmp(sig, info, ctx)) {
+        return; // unreachable
     }
 
     // Open log file — note: no O_APPEND. With O_APPEND the kernel would move us
