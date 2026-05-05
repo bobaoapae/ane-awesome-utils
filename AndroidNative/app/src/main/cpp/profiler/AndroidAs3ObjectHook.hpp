@@ -145,7 +145,18 @@ public:
         std::uint32_t string_flags_off        = 36;  // + 4 (uint32 m_bitsAndFlags)
 #elif defined(__arm__)
         std::uint32_t scriptobject_vtable_off = 8;   // vtable(4) + composite(4)
-        std::uint32_t vtable_traits_off       = 20;  // V*5 = 4*5
+        // VTable->Traits offset: source-derived value (V*5 = 20) does NOT
+        // match the shipping libCore.so layout. Auto-discovery probe on
+        // build-id 582a8f65... (Galaxy A10 ARMv7 51.1.3.10) reported 35
+        // resolved-name hits for offset 32 vs zero for offset 20 — Adobe's
+        // release build adds 3 extra pointer-sized fields to VTable beyond
+        // the open-source avmplus VTable.h layout. Source had:
+        //   GCTraceableObject vtable*(0), _toplevel(V), init(2V), base(3V),
+        //   ivtable(4V), traits(5V) → traits_off = 5V = 20.
+        // Shipping build appears to have added 3 more V-sized fields before
+        // traits (possibly cached prototype/ctor/native-ID slots that were
+        // gated behind a build flag in the OSS sources).
+        std::uint32_t vtable_traits_off       = 32;  // V*8 = 4*8 — discovery-validated
         std::uint32_t traits_name_off         = 72;  // V*18 = 4*18
         std::uint32_t string_buffer_off       = 8;   // vtable(4) + composite(4)
         std::uint32_t string_extra_off        = 12;  // + V
