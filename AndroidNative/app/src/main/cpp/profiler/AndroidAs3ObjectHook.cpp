@@ -45,6 +45,30 @@ static std::atomic<std::uint64_t>           g_diag_names_unresolved{0};
 static std::atomic<std::uint64_t>           g_diag_allocs_queued{0};
 static std::atomic<std::uint64_t>           g_diag_allocs_dropped{0};
 
+// Per-step failure counters — pinpoint which link in the
+// ScriptObject→VTable→Traits→Stringp chain is breaking the resolve.
+// Bumped inside resolveClassName before every `return false`.
+static std::atomic<std::uint64_t>           g_diag_fail_obj_invalid{0};
+static std::atomic<std::uint64_t>           g_diag_fail_vtable_invalid{0};
+static std::atomic<std::uint64_t>           g_diag_fail_traits_invalid{0};
+static std::atomic<std::uint64_t>           g_diag_fail_name_invalid{0};
+static std::atomic<std::uint64_t>           g_diag_fail_string_buf{0};
+static std::atomic<std::uint64_t>           g_diag_fail_string_len{0};
+
+// Hex dump of the first N unresolved allocs — recorded at drain time, dumped
+// at uninstall. Lets us reverse-engineer the actual VTable offset post-hoc
+// without static analysis: pick a known-typed alloc (e.g. by size) from the
+// dump, walk the bytes, and identify which dword is a vtable pointer.
+static constexpr std::size_t kProbeDumpCount = 12;
+static constexpr std::size_t kProbeDumpBytes = 64;
+struct ProbeDump {
+    std::uint64_t  ptr;
+    std::uint64_t  size;
+    std::uint8_t   bytes[kProbeDumpBytes];
+};
+static std::atomic<std::uint32_t>           g_probe_count{0};
+static ProbeDump                            g_probe_dumps[kProbeDumpCount];
+
 // Reusable layout instance. Populated from defaults and validated by probe.
 static AndroidAs3ObjectHook::LayoutOffsets g_layout{};
 
@@ -201,27 +225,45 @@ bool resolveClassName(std::uintptr_t obj_ptr, char* out, std::size_t out_capacit
     if (out_capacity < 2) return false;
     out[0] = '\0';
 
-    if (!isPlausibleHeapPtr(obj_ptr)) return false;
+    if (!isPlausibleHeapPtr(obj_ptr)) {
+        g_diag_fail_obj_invalid.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
 
     // Step 1: read AVM2 VTable* from ScriptObject + scriptobject_vtable_off
     std::uintptr_t vtable = readPtr(obj_ptr + g_layout.scriptobject_vtable_off);
-    if (!isPlausibleHeapPtr(vtable)) return false;
+    if (!isPlausibleHeapPtr(vtable)) {
+        g_diag_fail_vtable_invalid.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
 
     // Step 2: read Traits* from VTable + vtable_traits_off
     std::uintptr_t traits = readPtr(vtable + g_layout.vtable_traits_off);
-    if (!isPlausibleHeapPtr(traits)) return false;
+    if (!isPlausibleHeapPtr(traits)) {
+        g_diag_fail_traits_invalid.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
 
     // Step 3: read Stringp _name from Traits + traits_name_off
     std::uintptr_t name_str = readPtr(traits + g_layout.traits_name_off);
-    if (!isPlausibleHeapPtr(name_str)) return false;
+    if (!isPlausibleHeapPtr(name_str)) {
+        g_diag_fail_name_invalid.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
 
     // Step 4: read String fields. Pointer-width-aware via the layout struct.
     std::uintptr_t buf  = readPtr(name_str + g_layout.string_buffer_off);
     std::int32_t   len  = readI32(name_str + g_layout.string_length_off);
     std::uint32_t  bits = readU32(name_str + g_layout.string_flags_off);
 
-    if (!isPlausibleHeapPtr(buf)) return false;
-    if (len <= 0 || len > 256) return false;  // class names are always reasonable
+    if (!isPlausibleHeapPtr(buf)) {
+        g_diag_fail_string_buf.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    if (len <= 0 || len > 256) {
+        g_diag_fail_string_len.fetch_add(1, std::memory_order_relaxed);
+        return false;  // class names are always reasonable
+    }
 
     bool is_k16 = (bits & AndroidAs3ObjectHook::kStringWidthMask) != 0;
     bool is_7bit_ascii = (bits & AndroidAs3ObjectHook::k7BitAsciiFlag) != 0;
@@ -314,6 +356,24 @@ static void drainThreadMain() {
                     dpc->marker("as3_alloc", marker_value);
                 } else {
                     g_diag_names_unresolved.fetch_add(1, std::memory_order_relaxed);
+                    // Record first kProbeDumpCount unresolved alloc bytes for
+                    // post-hoc layout discovery. Picks every-Nth unresolved
+                    // alloc so we don't all-bunch on identical tiny strings
+                    // from one cycle.
+                    static std::atomic<std::uint64_t> probe_skip{0};
+                    std::uint64_t s = probe_skip.fetch_add(1, std::memory_order_relaxed);
+                    if ((s & 0x3F) == 0) {  // every 64th unresolved
+                        std::uint32_t idx = g_probe_count.fetch_add(1, std::memory_order_relaxed);
+                        if (idx < kProbeDumpCount) {
+                            ProbeDump& slot = g_probe_dumps[idx];
+                            slot.ptr = static_cast<std::uint64_t>(obj);
+                            slot.size = entry.size;
+                            // Page-checked safe copy of first kProbeDumpBytes bytes.
+                            for (std::size_t b = 0; b < kProbeDumpBytes; ++b) {
+                                slot.bytes[b] = readU8(obj + b);
+                            }
+                        }
+                    }
                 }
                 g_diag_allocs_observed.fetch_add(1, std::memory_order_relaxed);
             }
@@ -422,6 +482,36 @@ void AndroidAs3ObjectHook::uninstall() {
          (unsigned long long)g_diag_allocs_dropped.load(),
          (unsigned long long)g_diag_names_resolved.load(),
          (unsigned long long)g_diag_names_unresolved.load());
+
+    // Per-step failure breakdown — the largest counter pinpoints which
+    // pointer offset is wrong for this libCore.so build.
+    LOGI("uninstall: failures obj_invalid=%llu vtable_invalid=%llu "
+         "traits_invalid=%llu name_invalid=%llu string_buf=%llu string_len=%llu",
+         (unsigned long long)g_diag_fail_obj_invalid.load(),
+         (unsigned long long)g_diag_fail_vtable_invalid.load(),
+         (unsigned long long)g_diag_fail_traits_invalid.load(),
+         (unsigned long long)g_diag_fail_name_invalid.load(),
+         (unsigned long long)g_diag_fail_string_buf.load(),
+         (unsigned long long)g_diag_fail_string_len.load());
+
+    // Hex dump of the first probe samples — used offline to identify the
+    // VTable offset by inspection (look for repeating dword patterns
+    // across allocs of similar size — that's the vtable pointer).
+    std::uint32_t n = g_probe_count.load();
+    if (n > kProbeDumpCount) n = kProbeDumpCount;
+    for (std::uint32_t i = 0; i < n; ++i) {
+        const ProbeDump& d = g_probe_dumps[i];
+        char hex[kProbeDumpBytes * 3 + 1];
+        for (std::size_t b = 0; b < kProbeDumpBytes; ++b) {
+            std::snprintf(hex + b * 3, 4, "%02x ", d.bytes[b]);
+        }
+        hex[kProbeDumpBytes * 3] = '\0';
+        LOGI("probe[%u] ptr=0x%llx size=%llu bytes=%s",
+             i,
+             (unsigned long long)d.ptr,
+             (unsigned long long)d.size,
+             hex);
+    }
 
     installed_ = false;
 }
