@@ -113,9 +113,68 @@ PLT/GOT patches on `libc.so:malloc/calloc/realloc/free/mmap/munmap`. No
 avoid TLS access on small allocations (NDK r28 `__emutls_get_address`
 calls libc malloc on first thread_local touch — recursion).
 
-## Permanent NO-GOs (RA blocked)
+### Phase 4c — AS3 typed alloc via VTable→Traits→Stringp walk (LIVE)
 
-These phases are not implementable on Android with current binaries:
+**Status: validated on Galaxy A10 ARMv7 (build-id `582a8f65...`)**.
+
+Plan B unblocked via two findings during the phase4c-ra multi-agent pass:
+
+1. **arm64-mapper** (against analysis-output/android-arm64/all_functions_decompiled.c):
+   the entire AArch64 51.1.3.12 MMgc allocator stack — `FixedMalloc::Alloc +
+   FixedAlloc::InlineAllocSansHook + GCAlloc::Alloc + GC::Alloc +
+   GCHeap::Alloc` — collapses into ONE universal `malloc`-shim function
+   (`FUN_0099b4f8`). "BitmapData / Atom / ScriptObject / String all funnel
+   through it." On the corresponding 51.1.3.10 ARM64 build the entry is
+   `+0x8a11d8` (already in `kKnownBuilds[]`), and on ARMv7 51.1.3.10 the
+   analogous universal entry is **`+0x5541cd`** — the same address already
+   wired as `gcheap_alloc_offset` in `AndroidDeepMemoryHook`. The 23 caller
+   functions all invoke it with `(size, flags)` per `FixedMallocOpts` — no
+   second allocator layer exists, so no extra hookpoint is needed.
+
+2. **source-analyst** (against `binary-optimizer/avmplus/MMgc/`):
+   - `String` inherits from RCObject so its `m_buffer/m_length/m_flags`
+     offsets all add an extra V (4 ARMv7 / 8 AArch64) for the `composite`
+     field that the original LayoutOffsets struct missed.
+   - The recommended hookpoint at the source level is `GCAlloc::Alloc`,
+     but in the malloc-shim build the entire stack collapses into a single
+     entry, making the per-class chokepoint analysis moot.
+
+Layout offsets validated by an in-walker auto-discovery probe added in
+`AndroidAs3ObjectHook.cpp`. The probe tries every (vtable_off × traits_off ×
+name_off) combo on every unresolved alloc and reports per-combo hit
+counts at uninstall:
+
+```
+discover: vtable=+8 traits=+32 name=+72 hits=35   <-- TOP for ARMv7
+discover: vtable=+8 traits=+16 name=+72 hits=11
+discover: vtable=+16 traits=+24 name=+72 hits=12
+discover: vtable=+24 traits=+24 name=+72 hits=30
+```
+
+The source-derived `vtable_traits_off = V*5` (= 20 on ARMv7) gave **zero**
+hits. The actual offset is **V*8 = 32** — Adobe's release VTable has three
+extra pointer-sized fields between the open-source `ivtable` and `traits`
+(likely cached prototype/ctor/native-ID slots gated behind a build flag in
+the OSS sources). Same shift applied to AArch64 (V*8 = 64), pending live
+validation on OnePlus 15.
+
+**ARMv7 PVP-3x soak validation** (~10 min capture):
+
+| Class                  | Count |
+|------------------------|-------|
+| CrazyTankSocketEvent   | 207   |
+| RoomInfo               |  79   |
+| RoomPlayer             |  59   |
+| PackageIn              |  39   |
+| FastEvent              |  28   |
+| RoomPlayerAction       |  17   |
+| DictionaryEvent        |  12   |
+| (various game managers) | …    |
+
+579 typed `as3_alloc` markers + 592k untyped alloc events on the same
+stream. The 0.1% typed ratio is the expected steady-state — most allocs
+through the universal entry are non-ScriptObject (chunks, raw bytes,
+strings, ABC bytecode buffers).
 
 ### Phase 4a — `IMemorySampler` typed AS3 alloc
 
@@ -123,12 +182,8 @@ Adobe stripped the entire `IMemorySampler` interface from Android
 `libCore.so`. No vtable, no string anchors (`presample`,
 `recordAllocationSample`, `recordDeallocationSample` not present), no
 indirect xrefs. Confirmed via headless string scan + symbol enumeration in
-Iter N+18.
-
-**Plan B** (direct `MMgc::GC::Alloc`+Traits walk) is also blocked: Adobe
-stripped all `_ZN5MMgc*` typeinfo so the Traits pointer at the call site
-can't be resolved to a class name without parallel avmplus source
-matching (multi-week, low confidence). Skipped.
+Iter N+18. **Phase 4c (above) supersedes Phase 4a** for typed allocation
+capture — typed names come from a Traits walk, not a Sampler hook.
 
 ### Phase 4b — AS3 reference graph
 
@@ -150,8 +205,9 @@ Cross-arch device matrix:
 |---|---|---|
 | 0 — alloc_tracer reentrancy | ✅ PVP 30min, 0 SIGSEGV, >1M allocs | ✅ PVP 30min, 0 SIGSEGV |
 | 3 — AS3 method walker | ✅ method_id non-zero in capture | ✅ method_id non-zero in capture |
+| 4c — typed AS3 alloc walker | ⏳ pending discovery probe run | ✅ 579 markers/PVP-3x, real game classes |
 | 5 — GCHeap deep hook | ✅ events flowing | ✅ events flowing |
-| 5 ext — FixedMalloc fast-path | ✅ 547× coverage in PVP 3x | ⚠ inlined, GCHeap-only |
+| 5 ext — FixedMalloc fast-path | ✅ 547× coverage in PVP 3x | ⚠ inlined, GCHeap-only — but malloc-shim collapse means single entry catches everything |
 | 6 — RenderHook | ✅ ~3600 RenderFrame events / 60s | ✅ |
 | 7a observer — GC::Collect | ✅ cycles emitted | ✅ cycles emitted |
 | 7a programmatic — requestGc | ✅ singleton captured + re-invoked | ✅ same |
