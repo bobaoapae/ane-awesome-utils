@@ -95,21 +95,57 @@ prefix byte + string), NOT native-function-pointer tables. They tell the
 AVM how to resolve AS3 calls but don't directly map to C++ function
 addresses.
 
-**Next concrete RA step**: locate the **native binding table** that maps
-each ABC method name to a C++ function pointer. In avmplus open source,
-this is `flashNativeIDs` array at `flash::display::DisplayObjectContainer`
-class registration site. Adobe ships this stripped of symbols, but the
-table layout (a struct array of `{name_idx, fn_ptr}` typically) should
-be discoverable by scanning the .data section adjacent to the class
-constructor.
+**RA finding**: all occurrences of these strings in libCore.so are
+entries in **ABC bytecode constant pools** (length-prefix byte + string,
+no null terminator), NOT C-string native binding tables. The same name
+(e.g., `addEventListener`) appears 3 times because 3 different ABC
+classes reference it in their bytecode. Adobe does NOT ship a separate
+name → fn_ptr binding table — the AVM2 method resolver compiles the
+binding inline via switch/array on method ordinal, not via string
+lookup.
 
-Alternative path: hook at AVM2 dispatch layer (`AvmCore::CallNative` or
-similar) — slower but doesn't require finding individual binding-table
-entries. Trade-off: every native call gets intercepted.
+This makes the original plan ("shadowhook DisplayObjectContainer::addChild
++ EventDispatcher::addEventListener directly") significantly harder than
+expected: there's no easy XREF-from-string path to the C++ implementation.
+
+**Constraint**: per project policy, all instrumentation must live in the
+ANE (no AS3 compiler modifications). Two viable hooks-only paths:
+
+1. **Bindiff-driven RA of the 4 target functions in libCore.so**:
+   Windows `libCore.dll` exposes `flash::display::DisplayObjectContainer::
+   _addChildAt` and the equivalent `EventDispatcher` methods at known
+   RVAs (in `docs/profiler-rva-51-1-3-10.md`). Function pseudocode is
+   identical between Windows x64 and Android AArch64 builds (same source).
+   Cross-ref each Windows function's anchors (string xrefs, control flow,
+   call graph signature) against Android libCore.so to recover offsets.
+   Once offsets known, shadowhook each.
+   - Pros: per-method hooks, minimal hot-path overhead, exact plan match.
+   - Cons: ~2 days of RA per function × 4 functions × 2 archs = ~16 days
+     unless bindiff pipeline accelerates it. Each AIR SDK upgrade
+     re-RAs.
+
+2. **Hook AVM2 dispatch layer** (`AvmCore::CallNative` / `MethodEnv::
+   coerceEnter` or similar):
+   Single hook intercepts every AS3 → C++ call. Filter at runtime by
+   method name (via `MethodInfo::abc_name` walked from `MethodEnv*`).
+   When name matches one of the 4 patterns, capture (owner, arg) from
+   the AVM stack and emit reference event.
+   - Pros: covers ALL native dispatches with one hook; works for any
+     class/method without per-target RA. ONE function offset to find.
+   - Cons: hot path. Filter cost on every native call (~1000s/sec).
+     Still requires RA of `CallNative`/`coerceEnter` in libCore.so —
+     ~2-3 days of bindiff vs Windows.
+
+**Currently pursuing**: Path 1 via bindiff. Started by locating Windows
+RVAs for the 4 target functions in `docs/profiler-rva-51-1-3-10.md`.
+Each function then needs Android offset recovery via cross-architecture
+function-shape matching (Ghidra Bindiff or manual anchor matching).
 
 Reference Windows implementation lives in
 `WindowsNative/src/profiler/WindowsAs3ObjectHook.cpp:139` (`g_as3_refs`).
-Estimated total: ~900 LOC + RA of 4 methods × 2 architectures.
+Windows uses native shadowhook (works because Windows AIR has more
+exposed binding metadata). Android can't easily replicate that, so
+Path 1 is the practical Android-equivalent.
 
 ### Phase 4c — Path B (typed AS3 alloc via VTable→Traits walk)
 **Status:** ✅ Production. Hooks `MMgc::FixedMalloc::Alloc` (Phase 5
