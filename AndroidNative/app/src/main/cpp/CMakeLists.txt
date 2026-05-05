@@ -63,6 +63,12 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         # Android-specific productive sampler hook (Phase 4a — recordAllocationSample)
         profiler/AndroidAs3SamplerHook.cpp
 
+        # Android AS3 reference graph hook (Phase 4b)
+        profiler/AndroidAs3RefGraphHook.cpp
+
+        # Generic experiment hook for runtime RA without rebuild (Phase 4b RA tooling)
+        profiler/AndroidExperimentHook.cpp
+
         # JNI bridge for AS3 → native profiler
         profiler/AndroidProfilerBridge.cpp)
 

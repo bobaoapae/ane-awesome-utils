@@ -1295,6 +1295,31 @@ public class AneAwesomeUtils {
         return _extContext.call("awesomeUtils_profilerAs3SamplerUninstall") as Boolean;
     }
 
+    /**
+     * Phase 4b RA tooling — install a generic shadowhook on libCore.so +
+     * offset. Logs args (x0..x5 AAPCS64) + hits to logcat tag
+     * AneExperimentHook. Returns slot index (0..31) or -1 on failure.
+     * Up to 32 concurrent hooks. Use to validate RA candidates without
+     * rebuilding the ANE.
+     */
+    public function profilerExperimentHookInstall(offset:Number, label:String):int {
+        if (!_successInit) return -1;
+        if (!IsAndroid()) return -1;
+        return int(_extContext.call("awesomeUtils_profilerExperimentHookInstall", offset, label));
+    }
+
+    public function profilerExperimentHookHits(offset:Number):Number {
+        if (!_successInit) return -1;
+        if (!IsAndroid()) return -1;
+        return Number(_extContext.call("awesomeUtils_profilerExperimentHookHits", offset));
+    }
+
+    public function profilerExperimentHookUninstallAll():Boolean {
+        if (!_successInit) return false;
+        if (!IsAndroid()) return false;
+        return _extContext.call("awesomeUtils_profilerExperimentHookUninstallAll") as Boolean;
+    }
+
     public function profilerRecordFrame(frameIndex:Number,
                                         durationMs:Number,
                                         allocationCount:uint = 0,

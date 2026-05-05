@@ -199,6 +199,9 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(ProfilerSamplerHookUninstall.KEY, new ProfilerSamplerHookUninstall());
         functionMap.put(ProfilerAs3SamplerInstall.KEY, new ProfilerAs3SamplerInstall());
         functionMap.put(ProfilerAs3SamplerUninstall.KEY, new ProfilerAs3SamplerUninstall());
+        functionMap.put(ProfilerExperimentHookInstall.KEY, new ProfilerExperimentHookInstall());
+        functionMap.put(ProfilerExperimentHookHits.KEY, new ProfilerExperimentHookHits());
+        functionMap.put(ProfilerExperimentHookUninstallAll.KEY, new ProfilerExperimentHookUninstallAll());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -2394,6 +2397,57 @@ public class AneAwesomeUtilsContext extends FREContext {
                 return FREObject.newObject(ok);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "as3SamplerInstall failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /** Phase 4b RA tooling — generic experiment hook. */
+    public static class ProfilerExperimentHookInstall implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerExperimentHookInstall";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                long offset = (args != null && args.length >= 1 && args[0] != null)
+                    ? (long) args[0].getAsDouble() : 0;
+                String label = "?";
+                if (args != null && args.length >= 2 && args[1] != null) {
+                    label = args[1].getAsString();
+                }
+                int slot = Profiler.experimentHookInstall(offset, label);
+                return FREObject.newObject(slot);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "experimentHookInstall failed", e);
+                try { return FREObject.newObject(-1); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerExperimentHookHits implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerExperimentHookHits";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                long offset = (args != null && args.length >= 1 && args[0] != null)
+                    ? (long) args[0].getAsDouble() : 0;
+                long hits = Profiler.experimentHookHits(offset);
+                return FREObject.newObject((double) hits);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "experimentHookHits failed", e);
+                try { return FREObject.newObject(-1.0); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerExperimentHookUninstallAll implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerExperimentHookUninstallAll";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                Profiler.experimentHookUninstallAll();
+                return FREObject.newObject(true);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "experimentHookUninstallAll failed", e);
                 try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
             }
         }

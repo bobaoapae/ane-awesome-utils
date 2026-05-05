@@ -33,6 +33,8 @@
 #include "AndroidGcHook.hpp"
 #include "AndroidSamplerHook.hpp"
 #include "AndroidAs3SamplerHook.hpp"
+#include "AndroidAs3RefGraphHook.hpp"
+#include "AndroidExperimentHook.hpp"
 #include "AndroidAs3ObjectHook.hpp"
 #include "CaptureController.hpp"
 #include "DeepProfilerController.hpp"
@@ -74,6 +76,7 @@ std::unique_ptr<ane::profiler::AndroidGcHook>          g_gc_hook;
 std::unique_ptr<ane::profiler::AndroidAs3ObjectHook>   g_as3_object_hook;
 std::unique_ptr<ane::profiler::AndroidSamplerHook>     g_sampler_hook;  // Phase 4a RA
 std::unique_ptr<ane::profiler::AndroidAs3SamplerHook>  g_as3_sampler_hook;  // Phase 4a productive
+std::unique_ptr<ane::profiler::AndroidAs3RefGraphHook> g_as3_refgraph_hook; // Phase 4b
 
 // Helper: fetch a Java String into a std::string. Returns empty on failure.
 std::string jstrToCpp(JNIEnv* env, jstring j) {
@@ -354,6 +357,20 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStartDeep(
         }
     }
 
+    // Phase 4b: install AS3 reference-graph hook. Currently partial —
+    // only EventDispatcher::addEventListener (HIGH-confidence offset).
+    // addChild/removeChild/removeEventListener pending RA finalization.
+    if (cfg.memory_enabled) {
+        g_as3_refgraph_hook = std::make_unique<ane::profiler::AndroidAs3RefGraphHook>();
+        if (!g_as3_refgraph_hook->install(g_deep_ctrl.get())) {
+            LOGW("nativeStartDeep: AS3 ref graph hook install failed (build-id "
+                 "not in known list, or hook collision)");
+            g_as3_refgraph_hook.reset();
+        } else {
+            LOGI("nativeStartDeep: AS3 ref graph hook installed (Phase 4b partial)");
+        }
+    }
+
     if (jAs3Sampling != JNI_FALSE) {
         LOGW("nativeStartDeep: as3Sampling requested but Android AS3 method "
              "walker / IMemorySampler hook is not yet implemented (Phase 3+4 "
@@ -399,6 +416,13 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStopDeep(
     if (g_deep_mem_hook) {
         g_deep_mem_hook->uninstall();
         g_deep_mem_hook.reset();
+    }
+    // Phase 4b — uninstall ref-graph hook before deep_ctrl goes away (the
+    // proxy holds a g_controller reference; tear down before the controller
+    // is destroyed).
+    if (g_as3_refgraph_hook) {
+        g_as3_refgraph_hook->uninstall();
+        g_as3_refgraph_hook.reset();
     }
     // Phase 4a productive — uninstall recordAllocationSample hook FIRST.
     if (g_as3_sampler_hook) {
@@ -647,6 +671,34 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeAs3SamplerUninstall(
     g_as3_sampler_hook->uninstall();
     g_as3_sampler_hook.reset();
     return JNI_TRUE;
+}
+
+// Phase 4b RA tooling — generic experiment hook. AS3 passes any libCore.so
+// offset; ANE shadowhooks it at runtime; logs args + hit counts. Useful
+// for testing RA candidates without rebuilding the ANE.
+JNIEXPORT jint JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeExperimentHookInstall(
+        JNIEnv* env, jclass, jlong jOffset, jstring jLabel) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    std::string label = jLabel ? jstrToCpp(env, jLabel) : std::string("?");
+    return ane::profiler::AndroidExperimentHook::install(
+        static_cast<std::uintptr_t>(jOffset), label.c_str());
+}
+
+JNIEXPORT jlong JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeExperimentHookHits(
+        JNIEnv* env, jclass, jlong jOffset) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return static_cast<jlong>(
+        ane::profiler::AndroidExperimentHook::hitsForOffset(
+            static_cast<std::uintptr_t>(jOffset)));
+}
+
+JNIEXPORT void JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeExperimentHookUninstallAll(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    ane::profiler::AndroidExperimentHook::uninstallAll();
 }
 
 } // extern "C"

@@ -188,6 +188,30 @@ public final class Profiler {
         return nativeAs3SamplerUninstall();
     }
 
+    /**
+     * Phase 4b RA tooling — install a generic shadowhook on libCore.so +
+     * offset. Logs args (x0..x5 AAPCS64) + hit counts to logcat tag
+     * AneExperimentHook. Returns slot index (0..31) on success, -1 on
+     * failure (no free slot, already hooked, or shadowhook error).
+     *
+     * Use to validate RA candidates without rebuilding the ANE: install
+     * a few candidate offsets, run AS3 code that should fire one of them,
+     * uninstall and inspect counts.
+     */
+    public static int experimentHookInstall(long libcoreOffset, String label) {
+        return nativeExperimentHookInstall(libcoreOffset, label);
+    }
+
+    /** Returns hit count at the given offset, or -1 if not installed. */
+    public static long experimentHookHits(long libcoreOffset) {
+        return nativeExperimentHookHits(libcoreOffset);
+    }
+
+    /** Uninstall all experiment hooks; logs hit + arg snapshots. */
+    public static void experimentHookUninstallAll() {
+        nativeExperimentHookUninstallAll();
+    }
+
     private static native int     nativeStart(String outputPath, String headerJson, int telemetryPort);
     private static native int     nativeStop();
     private static native String  nativeGetStatus();
@@ -213,6 +237,9 @@ public final class Profiler {
     private static native boolean nativeSamplerHookUninstall();
     private static native boolean nativeAs3SamplerInstall();
     private static native boolean nativeAs3SamplerUninstall();
+    private static native int     nativeExperimentHookInstall(long offset, String label);
+    private static native long    nativeExperimentHookHits(long offset);
+    private static native void    nativeExperimentHookUninstallAll();
 
     private Profiler() {}
 }
