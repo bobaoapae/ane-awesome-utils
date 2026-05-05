@@ -137,16 +137,22 @@ public:
         // AArch64) for the RCObject composite + pad.
 #if defined(__aarch64__)
         std::uint32_t scriptobject_vtable_off = 16;
-        // VTable->Traits: source-derived V*5 (= 40) does not match the
-        // shipping libCore.so layout. ARMv7 (V=4) auto-discovery probe
-        // proved the actual offset is V*8 (= 32 on ARMv7) — 3 extra
-        // pointer-sized fields beyond the open-source avmplus VTable.h
-        // layout are present in Adobe's build. The same 3 extra fields
-        // should apply on AArch64 by the same logic, scaling V to 8 →
-        // traits_off = 8 * 8 = 64. Run the auto-discovery probe on a
-        // OnePlus 15 ARM64 build-id 7dde220f... to confirm.
-        std::uint32_t vtable_traits_off       = 64;  // V*8 = 8*8 (extrapolated from ARMv7 discovery)
-        std::uint32_t traits_name_off         = 144; // V*18 = 8*18 (core+base+param+cache+neg+8*primary+sec+pool+itraits+ns)
+        // VTable->Traits: ARMv7 source-derived V*5 (= 20) was wrong;
+        // discovery proved V*8 (= 32 on ARMv7). The extrapolation V*8 to
+        // AArch64 (= 64) was ALSO wrong — Cat S60 (build-id 7dde220f...)
+        // discovery proved AArch64 layout has _name at +224 (28V, not 18V)
+        // and traits at +48 (6V). Hits per combo with samples:
+        //   vtable=+16 traits=+48 name=+224 hits=39 sample=Object
+        //   vtable=+32 traits=+48 name=+224 hits=37 sample=Object
+        //   vtable=+16 traits=+32 name=+224 hits=27 sample=TimerManager::Tim
+        //   vtable=+16 traits=+128 name=+144 hits=15 sample=NewCacheManager
+        //   vtable=+16 traits=+128 name=+224 hits=12 sample=String
+        //   vtable=+16 traits=+112 name=+224 hits=12 sample=String
+        // The 3 extra pointer-sized fields hypothesis from ARMv7 fails on
+        // AArch64 — Adobe's release build inserts MORE fields with 64-bit
+        // ABI (likely cache_line aligned padding on 8-byte ABI).
+        std::uint32_t vtable_traits_off       = 48;  // discovery-validated on Cat S60
+        std::uint32_t traits_name_off         = 224; // discovery-validated on Cat S60
         std::uint32_t string_buffer_off       = 16;  // vtable(8) + composite(4) + pad(4)
         std::uint32_t string_extra_off        = 24;  // + V
         std::uint32_t string_length_off       = 32;  // + V

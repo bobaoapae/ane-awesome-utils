@@ -60,7 +60,7 @@ static std::atomic<std::uint64_t>           g_diag_fail_string_len{0};
 // without static analysis: pick a known-typed alloc (e.g. by size) from the
 // dump, walk the bytes, and identify which dword is a vtable pointer.
 static constexpr std::size_t kProbeDumpCount = 12;
-static constexpr std::size_t kProbeDumpBytes = 64;
+static constexpr std::size_t kProbeDumpBytes = 256;  // bumped 64→256 to see deeper Traits offsets
 struct ProbeDump {
     std::uint64_t  ptr;
     std::uint64_t  size;
@@ -69,31 +69,58 @@ struct ProbeDump {
 static std::atomic<std::uint32_t>           g_probe_count{0};
 static ProbeDump                            g_probe_dumps[kProbeDumpCount];
 
-// Auto-discovery: for each unresolved alloc, try combinations of vtable
-// offset candidates (4, 8, 12, 16, 20, 24) × traits offset candidates
-// (16, 20, 24, 32, 40) × name offset candidates (60, 64, 72, 144). For
-// each combo that yields a plausible class name (7-bit ASCII, length 1-64,
-// chars in [A-Za-z0-9._:]), bump a counter. The combo with the most hits
-// after a full scenario reveals the true layout for this build-id.
+// Auto-discovery: for each unresolved alloc, try combinations of (vtable_off,
+// traits_off, name_off) candidates. For each combo that yields a plausible
+// class name (7-bit ASCII, length 1-64, chars in [A-Za-z0-9._:]), bump a
+// counter. The combo with the most hits after a full scenario reveals the
+// true layout for this build-id.
 //
 // This sidesteps the problem that:
 //   (a) source-derived offsets may be wrong for a specific compiler build
 //   (b) static RA on stripped binaries can't easily extract them
 //   (c) probe hex dumps don't always include a known-typed seed object
 //
-// Cost: ~16 candidate combos × 4 chase reads each ≈ 64 page-checked reads
-// per unresolved alloc. At 1300 unresolved/run, ~83k extra reads — fine
-// for a one-shot calibration pass; gate behind a build flag for production.
-static constexpr std::uint32_t kDiscoverVtableOffs[] = { 4, 8, 12, 16, 20, 24 };
-static constexpr std::uint32_t kDiscoverTraitsOffs[] = { 16, 20, 24, 32, 40 };
-static constexpr std::uint32_t kDiscoverNameOffs[]   = { 60, 64, 72, 80, 144 };
+// Arch-specific candidate matrices: AArch64 ScriptObject can ONLY have
+// vtable@+16 (vtable*(8) + composite(4) + pad(4)); offsets +4/+8/+12 read
+// the composite field as a fake pointer and produce false hits. ARMv7 has
+// vtable*(4) + composite(4) so offset +8 is correct. Wider traits/name
+// sweeps on AArch64 because Adobe's ARM64 build-id 7dde220f... still
+// produces 0 resolutions with the (8V, 18V) extrapolation from ARMv7.
+#if defined(__aarch64__)
+// AArch64: vtable@+16 fixed. First sweep on Cat S60 (build-id 7dde220f...)
+// reported top hits at vtable=+16 traits=+48|+56 name=+224 (matrix max),
+// suggesting the actual name offset is at or beyond +224. Widen further:
+// traits sweep 4V..16V (32..128), name sweep 8V..56V (64..448).
+// 4 × 13 × 17 = 884 combos × ~4 chase reads = ~3500 reads/alloc.
+static constexpr std::uint32_t kDiscoverVtableOffs[] = { 16, 20, 24, 32 };
+static constexpr std::uint32_t kDiscoverTraitsOffs[] = { 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128 };
+static constexpr std::uint32_t kDiscoverNameOffs[]   = { 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 256, 288, 320, 352, 384, 448 };
+#elif defined(__arm__)
+// ARMv7: validated layout vtable=+8, traits=+32, name=+72. Keep wider sweep
+// in case build-id changes. 3 × 8 × 7 = 168 combos.
+static constexpr std::uint32_t kDiscoverVtableOffs[] = { 8, 12, 16 };
+static constexpr std::uint32_t kDiscoverTraitsOffs[] = { 16, 20, 24, 28, 32, 36, 40, 48 };
+static constexpr std::uint32_t kDiscoverNameOffs[]   = { 60, 64, 68, 72, 80, 88, 96 };
+#else
+#  error "Unsupported architecture for AndroidAs3ObjectHook auto-discovery"
+#endif
 static constexpr std::size_t kNDV = sizeof(kDiscoverVtableOffs) / sizeof(kDiscoverVtableOffs[0]);
 static constexpr std::size_t kNDT = sizeof(kDiscoverTraitsOffs) / sizeof(kDiscoverTraitsOffs[0]);
 static constexpr std::size_t kNDN = sizeof(kDiscoverNameOffs)   / sizeof(kDiscoverNameOffs[0]);
 static std::atomic<std::uint64_t> g_discover_hits[kNDV * kNDT * kNDN]{};
 static std::atomic<std::uint64_t> g_discover_attempts{0};
+// Per-combo first-resolved-name: lets us eyeball whether hits are real class
+// names (e.g. "MovieClip") or random ASCII noise that passes validation.
+// Single-writer-per-combo via atomic CAS.
+static constexpr std::size_t kDiscoverNameBufLen = 32;
+struct DiscoverSample {
+    char name[kDiscoverNameBufLen];
+    std::atomic<bool> filled{false};
+};
+static DiscoverSample g_discover_samples[kNDV * kNDT * kNDN];
 // Guard: bound the work so we don't spin on too many unresolveds.
-static constexpr std::uint64_t kDiscoverMaxAttempts = 4000;
+// Bumped from 4000 → 8000 to give wider AArch64 matrix more samples per run.
+static constexpr std::uint64_t kDiscoverMaxAttempts = 8000;
 
 // Reusable layout instance. Populated from defaults and validated by probe.
 static AndroidAs3ObjectHook::LayoutOffsets g_layout{};
@@ -367,12 +394,17 @@ static void runLayoutDiscovery(std::uintptr_t obj_ptr) {
                 if (!isPlausibleHeapPtr(buf)) continue;
                 if (len <= 0 || len > 64) continue;
 
-                // Validate the name bytes look like a class name.
+                // Validate the name bytes look like a class name. Also
+                // capture the first 31 chars into a stack buffer so we can
+                // log a sample for this combo.
                 bool is_k16 = (bits & AndroidAs3ObjectHook::kStringWidthMask) != 0;
                 bool ok = true;
                 bool has_alpha = false;
                 std::uint8_t last_byte = 0xff;
                 int repeats = 0;
+                char sample[kDiscoverNameBufLen]{};
+                std::int32_t copy_n = len < (std::int32_t)(kDiscoverNameBufLen - 1)
+                    ? len : (std::int32_t)(kDiscoverNameBufLen - 1);
                 for (std::int32_t i = 0; i < len; ++i) {
                     std::uint8_t c = is_k16
                         ? readU8(buf + i * 2)
@@ -391,12 +423,19 @@ static void runLayoutDiscovery(std::uintptr_t obj_ptr) {
                         repeats = 0;
                     }
                     last_byte = c;
+                    if (i < copy_n) sample[i] = (char)c;
                 }
                 if (!ok || !has_alpha) continue;
 
-                // Hit. Bump the per-combo counter.
+                // Hit. Bump the per-combo counter and capture the sample.
                 std::size_t idx = (vi * kNDT + ti) * kNDN + ni;
                 g_discover_hits[idx].fetch_add(1, std::memory_order_relaxed);
+                bool expected = false;
+                if (g_discover_samples[idx].filled.compare_exchange_strong(
+                        expected, true, std::memory_order_acq_rel)) {
+                    std::memcpy(g_discover_samples[idx].name, sample,
+                                kDiscoverNameBufLen);
+                }
             }
         }
     }
@@ -623,11 +662,16 @@ void AndroidAs3ObjectHook::uninstall() {
                 std::size_t idx = (vi * kNDT + ti) * kNDN + ni;
                 std::uint64_t hits = g_discover_hits[idx].load();
                 if (hits > 0) {
-                    LOGI("discover: vtable=+%u traits=+%u name=+%u hits=%llu",
+                    const char* sample =
+                        g_discover_samples[idx].filled.load(std::memory_order_acquire)
+                            ? g_discover_samples[idx].name
+                            : "?";
+                    LOGI("discover: vtable=+%u traits=+%u name=+%u hits=%llu sample=%s",
                          (unsigned)kDiscoverVtableOffs[vi],
                          (unsigned)kDiscoverTraitsOffs[ti],
                          (unsigned)kDiscoverNameOffs[ni],
-                         (unsigned long long)hits);
+                         (unsigned long long)hits,
+                         sample);
                 }
             }
         }
