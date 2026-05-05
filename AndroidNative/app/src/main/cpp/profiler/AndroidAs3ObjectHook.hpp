@@ -127,22 +127,30 @@ public:
         // ScriptObject layout depends on architecture:
         //   AArch64: vtable*(8) + composite(4)+pad(4) + VTable*(8) → VTable@16
         //   ARMv7:   vtable*(4) + composite(4)         + VTable*(4) → VTable@8
+        // String inherits the SAME RCObject base (vtable + composite uint32
+        // + pad on 64-bit), NOT a zero-byte base. Earlier versions of this
+        // struct treated AvmPlusScriptableObject as 0 bytes and put
+        // m_buffer at +V instead of +V+composite — that read garbage for
+        // _name even when the rest of the resolution succeeded. Source-
+        // verified against core/StringObject.h:46-496 by the phase4c-ra
+        // source-analyst pass: every String field gets +V (4 ARMv7 / 8
+        // AArch64) for the RCObject composite + pad.
 #if defined(__aarch64__)
         std::uint32_t scriptobject_vtable_off = 16;
         std::uint32_t vtable_traits_off       = 40;  // V*5 = 8*5
         std::uint32_t traits_name_off         = 144; // V*18 = 8*18 (core+base+param+cache+neg+8*primary+sec+pool+itraits+ns)
-        std::uint32_t string_buffer_off       = 8;   // V (after vtable)
-        std::uint32_t string_extra_off        = 16;  // V*2
-        std::uint32_t string_length_off       = 24;  // V*3
-        std::uint32_t string_flags_off        = 28;  // V*3 + 4
+        std::uint32_t string_buffer_off       = 16;  // vtable(8) + composite(4) + pad(4)
+        std::uint32_t string_extra_off        = 24;  // + V
+        std::uint32_t string_length_off       = 32;  // + V
+        std::uint32_t string_flags_off        = 36;  // + 4 (uint32 m_bitsAndFlags)
 #elif defined(__arm__)
-        std::uint32_t scriptobject_vtable_off = 8;   // 4+4
+        std::uint32_t scriptobject_vtable_off = 8;   // vtable(4) + composite(4)
         std::uint32_t vtable_traits_off       = 20;  // V*5 = 4*5
         std::uint32_t traits_name_off         = 72;  // V*18 = 4*18
-        std::uint32_t string_buffer_off       = 4;
-        std::uint32_t string_extra_off        = 8;
-        std::uint32_t string_length_off       = 12;
-        std::uint32_t string_flags_off        = 16;
+        std::uint32_t string_buffer_off       = 8;   // vtable(4) + composite(4)
+        std::uint32_t string_extra_off        = 12;  // + V
+        std::uint32_t string_length_off       = 16;  // + V
+        std::uint32_t string_flags_off        = 20;  // + 4 (uint32 m_bitsAndFlags)
 #else
 #  error "Unsupported architecture for AndroidAs3ObjectHook"
 #endif
