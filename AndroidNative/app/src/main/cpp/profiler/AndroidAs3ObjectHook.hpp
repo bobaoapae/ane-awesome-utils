@@ -135,47 +135,32 @@ public:
         // verified against core/StringObject.h:46-496 by the phase4c-ra
         // source-analyst pass: every String field gets +V (4 ARMv7 / 8
         // AArch64) for the RCObject composite + pad.
+// Layout offsets are baked-in per-arch, validated against AIR SDK
+// 51.1.3.10 release builds. They diverge from the open-source avmplus
+// header layout because Adobe's shipping libCore.so adds extra
+// pointer-sized fields. Validation device + build-id per arch:
+//   AArch64: Cat S60, build-id 7dde220f6...
+//   ARMv7:   Galaxy A10, build-id 582a8f65...
+// SDK upgrade obligates re-validation — the discovery probe code lives
+// in git history of AndroidAs3ObjectHook.cpp (revert the file to its
+// pre-cleanup state, run the same minimal test scenario, read top-hit
+// combos out of logcat AneAs3ObjectHook tag).
 #if defined(__aarch64__)
         std::uint32_t scriptobject_vtable_off = 16;
-        // VTable->Traits: ARMv7 source-derived V*5 (= 20) was wrong;
-        // discovery proved V*8 (= 32 on ARMv7). The extrapolation V*8 to
-        // AArch64 (= 64) was ALSO wrong — Cat S60 (build-id 7dde220f...)
-        // discovery proved AArch64 layout has _name at +224 (28V, not 18V)
-        // and traits at +48 (6V). Hits per combo with samples:
-        //   vtable=+16 traits=+48 name=+224 hits=39 sample=Object
-        //   vtable=+32 traits=+48 name=+224 hits=37 sample=Object
-        //   vtable=+16 traits=+32 name=+224 hits=27 sample=TimerManager::Tim
-        //   vtable=+16 traits=+128 name=+144 hits=15 sample=NewCacheManager
-        //   vtable=+16 traits=+128 name=+224 hits=12 sample=String
-        //   vtable=+16 traits=+112 name=+224 hits=12 sample=String
-        // The 3 extra pointer-sized fields hypothesis from ARMv7 fails on
-        // AArch64 — Adobe's release build inserts MORE fields with 64-bit
-        // ABI (likely cache_line aligned padding on 8-byte ABI).
-        std::uint32_t vtable_traits_off       = 48;  // discovery-validated on Cat S60
-        std::uint32_t traits_name_off         = 224; // discovery-validated on Cat S60
+        std::uint32_t vtable_traits_off       = 48;
+        std::uint32_t traits_name_off         = 224;
         std::uint32_t string_buffer_off       = 16;  // vtable(8) + composite(4) + pad(4)
-        std::uint32_t string_extra_off        = 24;  // + V
-        std::uint32_t string_length_off       = 32;  // + V
-        std::uint32_t string_flags_off        = 36;  // + 4 (uint32 m_bitsAndFlags)
+        std::uint32_t string_extra_off        = 24;
+        std::uint32_t string_length_off       = 32;
+        std::uint32_t string_flags_off        = 36;
 #elif defined(__arm__)
         std::uint32_t scriptobject_vtable_off = 8;   // vtable(4) + composite(4)
-        // VTable->Traits offset: source-derived value (V*5 = 20) does NOT
-        // match the shipping libCore.so layout. Auto-discovery probe on
-        // build-id 582a8f65... (Galaxy A10 ARMv7 51.1.3.10) reported 35
-        // resolved-name hits for offset 32 vs zero for offset 20 — Adobe's
-        // release build adds 3 extra pointer-sized fields to VTable beyond
-        // the open-source avmplus VTable.h layout. Source had:
-        //   GCTraceableObject vtable*(0), _toplevel(V), init(2V), base(3V),
-        //   ivtable(4V), traits(5V) → traits_off = 5V = 20.
-        // Shipping build appears to have added 3 more V-sized fields before
-        // traits (possibly cached prototype/ctor/native-ID slots that were
-        // gated behind a build flag in the OSS sources).
-        std::uint32_t vtable_traits_off       = 32;  // V*8 = 4*8 — discovery-validated
-        std::uint32_t traits_name_off         = 72;  // V*18 = 4*18
-        std::uint32_t string_buffer_off       = 8;   // vtable(4) + composite(4)
-        std::uint32_t string_extra_off        = 12;  // + V
-        std::uint32_t string_length_off       = 16;  // + V
-        std::uint32_t string_flags_off        = 20;  // + 4 (uint32 m_bitsAndFlags)
+        std::uint32_t vtable_traits_off       = 32;
+        std::uint32_t traits_name_off         = 72;
+        std::uint32_t string_buffer_off       = 8;
+        std::uint32_t string_extra_off        = 12;
+        std::uint32_t string_length_off       = 16;
+        std::uint32_t string_flags_off        = 20;
 #else
 #  error "Unsupported architecture for AndroidAs3ObjectHook"
 #endif
