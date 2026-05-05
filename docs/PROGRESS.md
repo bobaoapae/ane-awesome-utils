@@ -141,6 +141,22 @@ RVAs for the 4 target functions in `docs/profiler-rva-51-1-3-10.md`.
 Each function then needs Android offset recovery via cross-architecture
 function-shape matching (Ghidra Bindiff or manual anchor matching).
 
+### Identified Android offsets (build-id 7dde220f...)
+
+| Function | Win RVA | Android offset | Confidence | Method |
+|---|---|---|---|---|
+| `EventDispatcher.addEventListener` | 0x1fc6fc | **0x00c98060** | HIGH | callee-frequency: matches Windows pattern of 3 callees called 4× each (0x268ae0, 0x2697f0, 0xd1b12c) |
+| addChild | 0x50724c | TBD | — | shape candidates: 0x33c804, 0xb319c8, 0xcb3ec8, 0xe12ce0 (5 within size+bl_count tolerance, no strong shared-callee disambiguation yet) |
+| addChildAt | 0x5073e0 | TBD | — | similar — 5 candidates, all `0xb1XXXX`/`0xc0XXXX`/`0xdf0XXX` |
+| removeChild | 0x507cac | TBD | — | 7-byte tail thunk — too small to fingerprint |
+| removeChildAt | 0x507d5c | TBD | — | 1310 candidates — fingerprint too generic |
+| removeEventListener | 0x1ff3e4 | TBD | — | 1508 candidates — fingerprint too generic |
+
+The two "small" functions (removeChild, removeEventListener) need a
+different strategy: locate them via their call relationship to
+addChild/addEventListener (caller-callee graph) once those big-fish
+matches are confirmed.
+
 Reference Windows implementation lives in
 `WindowsNative/src/profiler/WindowsAs3ObjectHook.cpp:139` (`g_as3_refs`).
 Windows uses native shadowhook (works because Windows AIR has more
