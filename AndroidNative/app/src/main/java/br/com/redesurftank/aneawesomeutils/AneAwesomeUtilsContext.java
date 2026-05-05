@@ -194,6 +194,11 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(ProfilerRegisterMethodTable.KEY, new ProfilerRegisterMethodTable());
         functionMap.put(ProfilerRecordFrame.KEY, new ProfilerRecordFrame());
         functionMap.put(ProfilerRequestGc.KEY, new ProfilerRequestGc());
+        functionMap.put(ProfilerDumpAvmCore.KEY, new ProfilerDumpAvmCore());
+        functionMap.put(ProfilerSamplerHookInstall.KEY, new ProfilerSamplerHookInstall());
+        functionMap.put(ProfilerSamplerHookUninstall.KEY, new ProfilerSamplerHookUninstall());
+        functionMap.put(ProfilerAs3SamplerInstall.KEY, new ProfilerAs3SamplerInstall());
+        functionMap.put(ProfilerAs3SamplerUninstall.KEY, new ProfilerAs3SamplerUninstall());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -2343,6 +2348,88 @@ public class AneAwesomeUtilsContext extends FREContext {
                 return FREObject.newObject(ok);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "profilerRequestGc failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * Phase 4a RA — install diagnostic hook on every non-null sampler
+     * vftable slot. Per-slot hit counts logged at uninstall.
+     */
+    public static class ProfilerSamplerHookInstall implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerSamplerHookInstall";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                boolean ok = Profiler.samplerHookInstall();
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "samplerHookInstall failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerSamplerHookUninstall implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerSamplerHookUninstall";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                boolean ok = Profiler.samplerHookUninstall();
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "samplerHookUninstall failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerAs3SamplerInstall implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerAs3SamplerInstall";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                boolean ok = Profiler.as3SamplerInstall();
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "as3SamplerInstall failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerAs3SamplerUninstall implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerAs3SamplerUninstall";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                boolean ok = Profiler.as3SamplerUninstall();
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "as3SamplerUninstall failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
+     * RA-only helper. Dumps AvmCore* via the captured GC singleton (gc+0x10).
+     * Phase 4a sampler RA — take pre/post snapshots around startSampling().
+     */
+    public static class ProfilerDumpAvmCore implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerDumpAvmCore";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                String label = "?";
+                if (args != null && args.length >= 1 && args[0] != null) {
+                    label = args[0].getAsString();
+                }
+                boolean ok = Profiler.dumpAvmCore(label);
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerDumpAvmCore failed", e);
                 try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
             }
         }

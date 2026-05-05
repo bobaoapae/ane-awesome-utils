@@ -57,6 +57,12 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         # Android-specific typed AS3 alloc hook (Phase 4c — VTable→Traits walker)
         profiler/AndroidAs3ObjectHook.cpp
 
+        # Android-specific sampler vftable hook (Phase 4a RA — diagnostic)
+        profiler/AndroidSamplerHook.cpp
+
+        # Android-specific productive sampler hook (Phase 4a — recordAllocationSample)
+        profiler/AndroidAs3SamplerHook.cpp
+
         # JNI bridge for AS3 → native profiler
         profiler/AndroidProfilerBridge.cpp)
 

@@ -149,6 +149,45 @@ public final class Profiler {
         return nativeRequestGc();
     }
 
+    /**
+     * RA helper — dump AvmCore (recovered via gc_this+0x10 from the captured
+     * GC singleton) with a labeled prefix. Used during Phase 4a sampler RA
+     * to take pre/post snapshots around {@code flash.sampler.startSampling()}.
+     * Output goes to logcat tag {@code AneGcHook}. Returns false if no GC
+     * has been captured yet.
+     */
+    public static boolean dumpAvmCore(String label) {
+        return nativeDumpAvmCore(label);
+    }
+
+    /**
+     * Phase 4a RA — install diagnostic hook on every non-null sampler
+     * vftable slot. Requires {@link #requestGc()} to have captured the
+     * GC singleton (call forceGcViaChurn first). Per-slot hit counts
+     * logged at uninstall.
+     */
+    public static boolean samplerHookInstall() {
+        return nativeSamplerHookInstall();
+    }
+
+    /** Phase 4a RA — uninstall + log per-slot hit counts. */
+    public static boolean samplerHookUninstall() {
+        return nativeSamplerHookUninstall();
+    }
+
+    /**
+     * Phase 4a productive — install recordAllocationSample hook. Resolves
+     * class names via Traits walk and emits as3_alloc_sampler markers.
+     */
+    public static boolean as3SamplerInstall() {
+        return nativeAs3SamplerInstall();
+    }
+
+    /** Phase 4a productive — uninstall + log capture-rate stats. */
+    public static boolean as3SamplerUninstall() {
+        return nativeAs3SamplerUninstall();
+    }
+
     private static native int     nativeStart(String outputPath, String headerJson, int telemetryPort);
     private static native int     nativeStop();
     private static native String  nativeGetStatus();
@@ -169,6 +208,11 @@ public final class Profiler {
                                                      int allocationCount, long allocationBytes,
                                                      String label);
     private static native boolean nativeRequestGc();
+    private static native boolean nativeDumpAvmCore(String label);
+    private static native boolean nativeSamplerHookInstall();
+    private static native boolean nativeSamplerHookUninstall();
+    private static native boolean nativeAs3SamplerInstall();
+    private static native boolean nativeAs3SamplerUninstall();
 
     private Profiler() {}
 }

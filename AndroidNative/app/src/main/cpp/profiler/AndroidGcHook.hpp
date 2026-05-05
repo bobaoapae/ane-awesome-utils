@@ -48,6 +48,15 @@ public:
     // see Profiler.requestGc() Java doc for the recommended pattern.
     bool requestCollect();
 
+    // RA helper: dump AvmCore* (recovered from captured GC singleton at
+    // gc_this+0x10) with a labeled prefix. Called from AS3 to take pre/post
+    // snapshots around `flash.sampler.startSampling()` so we can diff and
+    // identify the m_sampler field offset.
+    //
+    // Returns false if no GC singleton has been captured yet (call requires
+    // at least one Collect cycle since hook install).
+    bool dumpAvmCore(const char* label);
+
 private:
     bool installed_ = false;
 };

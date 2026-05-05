@@ -31,6 +31,8 @@
 #include "AndroidRenderHook.hpp"
 #include "AndroidDeepMemoryHook.hpp"
 #include "AndroidGcHook.hpp"
+#include "AndroidSamplerHook.hpp"
+#include "AndroidAs3SamplerHook.hpp"
 #include "AndroidAs3ObjectHook.hpp"
 #include "CaptureController.hpp"
 #include "DeepProfilerController.hpp"
@@ -70,6 +72,8 @@ std::unique_ptr<ane::profiler::AndroidRenderHook>      g_render_hook;
 std::unique_ptr<ane::profiler::AndroidDeepMemoryHook>  g_deep_mem_hook;
 std::unique_ptr<ane::profiler::AndroidGcHook>          g_gc_hook;
 std::unique_ptr<ane::profiler::AndroidAs3ObjectHook>   g_as3_object_hook;
+std::unique_ptr<ane::profiler::AndroidSamplerHook>     g_sampler_hook;  // Phase 4a RA
+std::unique_ptr<ane::profiler::AndroidAs3SamplerHook>  g_as3_sampler_hook;  // Phase 4a productive
 
 // Helper: fetch a Java String into a std::string. Returns empty on failure.
 std::string jstrToCpp(JNIEnv* env, jstring j) {
@@ -396,6 +400,18 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStopDeep(
         g_deep_mem_hook->uninstall();
         g_deep_mem_hook.reset();
     }
+    // Phase 4a productive — uninstall recordAllocationSample hook FIRST.
+    if (g_as3_sampler_hook) {
+        g_as3_sampler_hook->uninstall();
+        g_as3_sampler_hook.reset();
+    }
+    // Phase 4a RA — uninstall sampler diagnostic hook FIRST (it shadowhooks
+    // sampler vftable slots; if those funcs are called after we tear down
+    // the proxies' counters, we'd UAF).
+    if (g_sampler_hook) {
+        g_sampler_hook->uninstall();
+        g_sampler_hook.reset();
+    }
     // Uninstall Phase 7a GC observer hook before stopping the controller.
     if (g_gc_hook) {
         g_gc_hook->uninstall();
@@ -559,6 +575,78 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeRequestGc(
     std::lock_guard<std::mutex> lk(g_mu);
     if (!g_gc_hook) return JNI_FALSE;
     return g_gc_hook->requestCollect() ? JNI_TRUE : JNI_FALSE;
+}
+
+// RA helper — dump AvmCore via the GC observer hook (gc+0x10 = AvmCore*).
+// Used to take labeled snapshots before/after `flash.sampler.startSampling()`
+// so we can diff in logcat and identify the m_sampler offset.
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeDumpAvmCore(
+        JNIEnv* env, jclass, jstring jLabel) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_gc_hook) return JNI_FALSE;
+    std::string label = jLabel ? jstrToCpp(env, jLabel) : std::string("?");
+    return g_gc_hook->dumpAvmCore(label.c_str()) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Phase 4a RA — install diagnostic sampler hook on every non-null vftable
+// slot. Requires AndroidGcHook captured the GC singleton (call after
+// forceGcViaChurn). Per-slot hit counts logged on uninstall.
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeSamplerHookInstall(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (g_sampler_hook) {
+        // Already installed — uninstall and reinstall to reset counters
+        g_sampler_hook->uninstall();
+        g_sampler_hook.reset();
+    }
+    g_sampler_hook = std::make_unique<ane::profiler::AndroidSamplerHook>();
+    bool ok = g_sampler_hook->install(g_deep_ctrl.get());
+    if (!ok) {
+        g_sampler_hook.reset();
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeSamplerHookUninstall(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_sampler_hook) return JNI_FALSE;
+    g_sampler_hook->uninstall();
+    g_sampler_hook.reset();
+    return JNI_TRUE;
+}
+
+// Phase 4a productive — install hook on recordAllocationSample slot.
+// Resolves class names via Traits walk and emits as3_alloc_sampler markers.
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeAs3SamplerInstall(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (g_as3_sampler_hook) {
+        g_as3_sampler_hook->uninstall();
+        g_as3_sampler_hook.reset();
+    }
+    g_as3_sampler_hook = std::make_unique<ane::profiler::AndroidAs3SamplerHook>();
+    bool ok = g_as3_sampler_hook->install(g_deep_ctrl.get());
+    if (!ok) {
+        g_as3_sampler_hook.reset();
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeAs3SamplerUninstall(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_as3_sampler_hook) return JNI_FALSE;
+    g_as3_sampler_hook->uninstall();
+    g_as3_sampler_hook.reset();
+    return JNI_TRUE;
 }
 
 } // extern "C"

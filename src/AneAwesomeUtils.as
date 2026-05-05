@@ -1246,6 +1246,55 @@ public class AneAwesomeUtils {
         return _extContext.call("awesomeUtils_profilerRequestGc") as Boolean;
     }
 
+    /**
+     * RA-only helper. Dumps AvmCore* (recovered from the captured GC
+     * singleton at gc+0x10) to logcat tag AneGcHook. Used during Phase 4a
+     * sampler RA: take a snapshot before flash.sampler.startSampling() and
+     * another after — the field that becomes non-null is m_sampler.
+     * Returns false until at least one runtime Collect has been observed.
+     */
+    public function profilerDumpAvmCore(label:String):Boolean {
+        if (!_successInit) return false;
+        if (!IsAndroid()) return false;
+        return _extContext.call("awesomeUtils_profilerDumpAvmCore", label) as Boolean;
+    }
+
+    /**
+     * Phase 4a RA — install diagnostic hook on every non-null sampler
+     * vftable slot. Per-slot hit counts logged at uninstall (logcat tag
+     * AneSamplerHook). Requires profilerRequestGc to have captured GC.
+     */
+    public function profilerSamplerHookInstall():Boolean {
+        if (!_successInit) return false;
+        if (!IsAndroid()) return false;
+        return _extContext.call("awesomeUtils_profilerSamplerHookInstall") as Boolean;
+    }
+
+    public function profilerSamplerHookUninstall():Boolean {
+        if (!_successInit) return false;
+        if (!IsAndroid()) return false;
+        return _extContext.call("awesomeUtils_profilerSamplerHookUninstall") as Boolean;
+    }
+
+    /**
+     * Phase 4a productive — install hook on recordAllocationSample so that
+     * EVERY AS3 alloc the AVM sampler emits is intercepted, class name
+     * resolved via Traits walk, and emitted as as3_alloc_sampler marker.
+     * Replaces Phase 4c (manual VTable→Traits walker on all FixedMalloc
+     * allocs, ~5% rate) with the AVM-canonical path.
+     */
+    public function profilerAs3SamplerInstall():Boolean {
+        if (!_successInit) return false;
+        if (!IsAndroid()) return false;
+        return _extContext.call("awesomeUtils_profilerAs3SamplerInstall") as Boolean;
+    }
+
+    public function profilerAs3SamplerUninstall():Boolean {
+        if (!_successInit) return false;
+        if (!IsAndroid()) return false;
+        return _extContext.call("awesomeUtils_profilerAs3SamplerUninstall") as Boolean;
+    }
+
     public function profilerRecordFrame(frameIndex:Number,
                                         durationMs:Number,
                                         allocationCount:uint = 0,
