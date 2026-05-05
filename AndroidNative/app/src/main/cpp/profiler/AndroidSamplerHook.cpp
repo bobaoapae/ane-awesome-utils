@@ -44,12 +44,40 @@ static std::uintptr_t             g_origin_avmcore_off[kMaxHooks]{};
 static std::atomic<bool>          g_active{false};
 static thread_local bool          t_in_proxy = false;
 
+// Capture first arg (x0 = `this` in AAPCS64 virtual call) on first
+// invocation per slot. If x0 is the SAME across all calls = real
+// virtual method on a fixed instance (sampler singleton). If x0
+// varies = function is shared across vtables / called per-object.
+struct ArgSnapshot {
+    std::atomic<bool> filled{false};
+    long a0_first;
+    long a1_first;
+    long a2_first;
+    std::atomic<int> distinct_a0_count{0};
+    long last_a0;
+};
+static ArgSnapshot g_arg_snap[kMaxHooks]{};
+
 // Per-hook proxy. Each must be a distinct C function (shadowhook needs
 // unique trampoline addresses). 96 proxies via macro.
 #define DEFINE_PROXY(N)                                                      \
     static long proxy_##N(long a0, long a1, long a2, long a3,                \
                            long a4, long a5, long a6, long a7) {             \
-        g_diag_hits[N].fetch_add(1, std::memory_order_relaxed);              \
+        std::uint64_t cnt = g_diag_hits[N].fetch_add(1, std::memory_order_relaxed); \
+        if (cnt < 100) {                                                     \
+            /* Track distinct a0 values in first 100 calls */                \
+            if (!g_arg_snap[N].filled.load(std::memory_order_relaxed)) {     \
+                g_arg_snap[N].a0_first = a0;                                 \
+                g_arg_snap[N].a1_first = a1;                                 \
+                g_arg_snap[N].a2_first = a2;                                 \
+                g_arg_snap[N].last_a0 = a0;                                  \
+                g_arg_snap[N].distinct_a0_count.store(1, std::memory_order_relaxed); \
+                g_arg_snap[N].filled.store(true, std::memory_order_release); \
+            } else if (a0 != g_arg_snap[N].last_a0) {                        \
+                g_arg_snap[N].distinct_a0_count.fetch_add(1, std::memory_order_relaxed); \
+                g_arg_snap[N].last_a0 = a0;                                  \
+            }                                                                \
+        }                                                                    \
         if (t_in_proxy || !g_active.load(std::memory_order_relaxed)) {       \
             generic_fn fn = g_orig_fn[N].load(std::memory_order_relaxed);    \
             return fn ? fn(a0, a1, a2, a3, a4, a5, a6, a7) : 0;              \
@@ -197,8 +225,9 @@ static std::size_t collectSamplerCandidates(std::uintptr_t avmcore) {
         if (!safeReadPtr(vftable, s0)) continue;
         if (!isPtrInText(s0)) continue;
 
-        // Collect first 8 slots of this vftable
-        for (std::size_t slot = 0; slot < 8; slot++) {
+        // Collect first 16 slots of this vftable (avmplus IMemorySampler
+        // has 12-14 virtual methods; 16 is a safe upper bound)
+        for (std::size_t slot = 0; slot < 16; slot++) {
             std::uintptr_t fn = 0;
             if (!safeReadPtr(vftable + slot * 8, fn)) continue;
             if (fn == 0 || !isPtrInText(fn)) continue;
@@ -318,12 +347,22 @@ void AndroidSamplerHook::uninstall() {
     }
     for (std::size_t k = 0; k < n; k++) {
         std::size_t i = entries[k].i;
+        int distinct_a0 = g_arg_snap[i].distinct_a0_count.load(std::memory_order_relaxed);
         LOGI("  hook[%zu] hits=%llu fn=0x%lx vt=0x%lx slot=%zu avmcore_off=0x%lx",
              i, (unsigned long long)entries[k].hits,
              (unsigned long)g_fn_addr[i],
              (unsigned long)g_origin_vftable[i],
              g_origin_slot[i],
              (unsigned long)g_origin_avmcore_off[i]);
+        if (g_arg_snap[i].filled.load(std::memory_order_relaxed)) {
+            LOGI("    args: a0=0x%lx a1=0x%lx a2=0x%lx distinct_a0=%d %s",
+                 (unsigned long)g_arg_snap[i].a0_first,
+                 (unsigned long)g_arg_snap[i].a1_first,
+                 (unsigned long)g_arg_snap[i].a2_first,
+                 distinct_a0,
+                 distinct_a0 <= 2 ? "[FIXED-THIS = real virtual method]"
+                                  : "[VARYING-THIS = shared func, not a real virtual]");
+        }
     }
     LOGI("uninstall: %zu hooks fired (of %zu installed)", n, hooked_count_);
     // Tear down all hooks

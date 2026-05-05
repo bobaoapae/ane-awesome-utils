@@ -26,11 +26,21 @@ namespace {
 
 // Discovered RA path for build-id 7dde220f... (Cat S60 ARM64):
 //   gc_this + 0x10  =  AvmCore*
-//   AvmCore + 0xa0  =  IMemorySampler*
+//   AvmCore + 0x68  =  IMemorySampler*  (validated by 16-slot scan
+//                                         + arg-shape filter: distinct_a0=1
+//                                         across 150622 hits, a2=0x3e8=1000
+//                                         matches AS3 alloc size)
 //   *(sampler)      =  vftable
-//   vftable[+7]     =  recordAllocationSample (288 hits/40k allocs in churn)
-constexpr std::size_t kSamplerOffsetInAvmCore = 0xa0;
-constexpr std::size_t kRecordAllocSlot        = 7;
+//   vftable[+12]    =  recordAllocationSample (150622 hits in 16x8MB churn,
+//                                              ratio 1:1 with allocs)
+//
+// AAPCS64 signature recovered:
+//   void recordAllocationSample(IMemorySampler* this,  // x0  FIXED
+//                                const void* item,      // x1  varies (heap)
+//                                size_t size,           // x2  varies, bytes
+//                                ...);
+constexpr std::size_t kSamplerOffsetInAvmCore = 0x68;
+constexpr std::size_t kRecordAllocSlot        = 12;
 
 using record_alloc_fn = void (*)(void* sampler_this, const void* item, std::size_t size,
                                   long flag1, long flag2,
@@ -60,9 +70,14 @@ static bool safeReadPtr(std::uintptr_t addr, std::uintptr_t& out) {
     return true;
 }
 
-// Resolve a ScriptObject ptr → class name. Reuses the same VTable→Traits→
-// _name walk as AndroidAs3ObjectHook (Phase 4c), but on a verified
-// AS3-typed alloc passed by the sampler (not a guess from FixedMalloc).
+// Resolve a sampler-passed item ptr → class name.
+//
+// Sampler captures EVERY MMgc::FixedMalloc alloc, not just AS3 ScriptObjects.
+// ScriptObjects have AS3 VTable at +16 (per Phase 4c discovery: GCTraceable
+// vtable + composite + pad + AS3 VTable). Non-ScriptObject AVM internals
+// have their own layout. We try the ScriptObject layout (+16) first since
+// that's what we want; if walk fails, the alloc isn't a typed AS3 object
+// and we just count it as "unresolved" without emitting a name.
 //
 // Layout offsets (AArch64, validated via Phase 4c discovery on Cat S60):
 //   ScriptObject + 16 = VTable*
@@ -132,13 +147,23 @@ static void proxy_recordAllocationSample(void* sampler_this, const void* item,
     // Forward to original FIRST (AVM may have invariants we can't reorder)
     record_alloc_fn orig = g_orig.load(std::memory_order_relaxed);
 
-    // Log first 3 invocations so we can verify the AAPCS64 arg shape
+    // Log first 6 invocations: args + first 32 bytes of `item` so we can
+    // identify what's at +0/+8/+16/+24 (VTable could be at any offset
+    // depending on Adobe's ScriptObject layout).
     int log_n = g_first_logs.load(std::memory_order_relaxed);
-    if (log_n < 3) {
+    if (log_n < 6) {
         g_first_logs.fetch_add(1, std::memory_order_relaxed);
+        std::uintptr_t ip = reinterpret_cast<std::uintptr_t>(item);
+        std::uintptr_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+        safeReadPtr(ip + 0,  w0);
+        safeReadPtr(ip + 8,  w1);
+        safeReadPtr(ip + 16, w2);
+        safeReadPtr(ip + 24, w3);
         LOGI("recordAllocationSample arg dump: this=%p item=%p size=%zu "
-             "f1=0x%lx f2=0x%lx a5=0x%lx",
-             sampler_this, item, size, flag1, flag2, arg5);
+             "f1=0x%lx f2=0x%lx; item+0=0x%lx +8=0x%lx +16=0x%lx +24=0x%lx",
+             sampler_this, item, size, flag1, flag2,
+             (unsigned long)w0, (unsigned long)w1,
+             (unsigned long)w2, (unsigned long)w3);
     }
 
     if (t_in_proxy || !g_active.load(std::memory_order_relaxed)) {
