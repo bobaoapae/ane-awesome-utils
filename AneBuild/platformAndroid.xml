@@ -6,7 +6,21 @@
 		</repositories>
 		<dependencies>
 			<dependency>implementation "com.squareup.okhttp3:okhttp:5.3.2"</dependency>
-			<dependency>implementation "dnsjava:dnsjava:3.6.3"</dependency>
+			<!-- dnsjava is bundled INTO this ANE's AAR (see
+			     AndroidNative/app/build.gradle.kts `embedded` config).
+			     Consumers must NOT declare it again or R8 hits
+			     duplicate-class. Reason: dnsjava 3.x's
+			     org.xbill.DNS.AsyncSemaphore.acquire uses a
+			     synthetic-lambda-inside-synchronized pattern that trips
+			     the Android 6 (API 23) ART verifier; we ship a
+			     verifier-friendly patched AsyncSemaphore inside the AAR
+			     and merge the rest of dnsjava alongside it. -->
+			<!-- slf4j-api is what bundled dnsjava uses for its @Slf4j
+			     logging annotations; without this on the classpath dnsjava's
+			     class init fails with NoClassDefFoundError on
+			     org/slf4j/LoggerFactory. Slf4j-simple is a tiny logger
+			     implementation that fulfills the @Slf4j contract. -->
+			<dependency>implementation "org.slf4j:slf4j-api:2.0.16"</dependency>
 			<dependency>implementation "androidx.appcompat:appcompat:1.7.1"</dependency>
 			<dependency>implementation "com.fasterxml:aalto-xml:1.3.4"</dependency>
 			<dependency>implementation "javax.xml.stream:stax-api:1.0-2"</dependency>

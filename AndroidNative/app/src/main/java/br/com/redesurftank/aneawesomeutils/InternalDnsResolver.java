@@ -108,7 +108,15 @@ public class InternalDnsResolver {
 
         try {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
-                addresses.addAll(resolveDnsUsingThreadForLowApi(host));
+                // dnsjava 3.x uses java.util.concurrent.CompletionStage /
+                // CompletableFuture which don't exist on Android < 7 (API 24)
+                // and aren't backported by AGP's core library desugaring config
+                // in 2.x. Loading any dnsjava class on Android 6 (API 23) hits
+                // the ART verifier and kills the process. We use a parallel
+                // okhttp+UDP resolver here that NEVER touches dnsjava bytecode,
+                // so the dnsjava classes stay unloaded and verification never
+                // runs against them.
+                addresses.addAll(LegacyDnsResolver.resolve(host));
             } else {
                 List<InetAddress> fromResolversResult = resolveWithDns(host).join();
                 addresses.addAll(fromResolversResult);
