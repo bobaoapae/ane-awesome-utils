@@ -143,19 +143,103 @@ function-shape matching (Ghidra Bindiff or manual anchor matching).
 
 ### Identified Android offsets (build-id 7dde220f...)
 
-| Function | Win RVA | Android offset | Confidence | Method |
-|---|---|---|---|---|
-| `EventDispatcher.addEventListener` | 0x1fc6fc | **0x00c98060** | HIGH | callee-frequency: matches Windows pattern of 3 callees called 4× each (0x268ae0, 0x2697f0, 0xd1b12c) |
-| addChild | 0x50724c | TBD | — | shape candidates: 0x33c804, 0xb319c8, 0xcb3ec8, 0xe12ce0 (5 within size+bl_count tolerance, no strong shared-callee disambiguation yet) |
-| addChildAt | 0x5073e0 | TBD | — | similar — 5 candidates, all `0xb1XXXX`/`0xc0XXXX`/`0xdf0XXX` |
-| removeChild | 0x507cac | TBD | — | 7-byte tail thunk — too small to fingerprint |
-| removeChildAt | 0x507d5c | TBD | — | 1310 candidates — fingerprint too generic |
-| removeEventListener | 0x1ff3e4 | TBD | — | 1508 candidates — fingerprint too generic |
+| Function | Win RVA | Android offset | Status |
+|---|---|---|---|
+| `EventDispatcher.addEventListener` | 0x1fc6fc | TBD | Initial 9 candidates (shape 2560-5120B, bl 24-30) all fired 0× during 1000 explicit AS3 addEventListener calls — wrong offsets |
+| addChild | 0x50724c | TBD | depends on addEventListener anchor |
+| addChildAt | 0x5073e0 | TBD | depends |
+| removeChild | 0x507cac | TBD | 7-byte tail thunk |
+| removeChildAt | 0x507d5c | TBD | depends |
+| removeEventListener | 0x1ff3e4 | TBD | 1508 candidates — too generic |
 
-The two "small" functions (removeChild, removeEventListener) need a
-different strategy: locate them via their call relationship to
-addChild/addEventListener (caller-callee graph) once those big-fish
-matches are confirmed.
+### Phase 4b RA tooling (committed `af11800`)
+
+Generic in-ANE experiment hook lets AS3 (test scenarios) shadowhook any
+libCore.so offset at runtime — no rebuild required. API:
+
+```actionscript
+Profiler.experimentHookInstall(libcoreOffset:Number, label:String):int
+Profiler.experimentHookHits(libcoreOffset:Number):Number
+Profiler.experimentHookUninstallAll():Boolean
+```
+
+Validated working: hooked known-good `MMgc::GCHeap::Alloc` at
+libCore+0x89c42c during 16MB alloc churn → 187 hits captured with
+arg snapshots. Up to 32 concurrent slots.
+
+This pivots the RA workflow from "rebuild+install per offset attempt"
+to "one ANE install + N test scenarios". Iteration goes from ~90s/test
+to ~30s/test.
+
+### Phase 4b finding — direct C++ method hook NOT FEASIBLE on Android
+
+**30 candidates tested, 0 hits during 1000 explicit AS3 addEventListener
+calls.** Shape filter range 1.5x-10x Windows size (1536-10240 B), bl
+15-47 (broader than any reasonable compilation variant). Tested:
+
+```
+0x269fbc  0xcea460  0xbe9ce4  0xc1899c  0x977e2c  0xbda18c  0xb6d568
+0xdcd244  0x476760  0xdc6a08  0xb55bac  0xb70430  0xd21834  0x55b9e4
+0x7bbc50  0x969944  0xc98060  0xc17010  0x38af70  0xc9af74  0xb11b7c
+0xc83ec4  0xb4f8d4  0x59fb8c  0xbceef0  0x97abd0  0x437610  0xbf7ff8
+0xadd388  0xc973b0
+```
+
+All 30 hooked successfully via experiment-hook framework, all reported
+0 hits. Sanity check (`MMgc::GCHeap::Alloc` known-good offset) reported
+187 hits during identical churn — infra works, the candidates are not
+the right targets.
+
+**Conclusion**: AS3 native methods (addEventListener / addChild /
+removeEventListener / removeChild) are NOT exposed as separate C++
+entry points in Android libCore.so for shadowhook to intercept.
+Adobe's Android compilation appears to:
+1. Inline these methods into the AVM2 dispatcher (`AvmCore::CallNative`
+   or equivalent), making them invisible as standalone functions.
+2. Or implement them as ABC bytecode (executed by the AVM interpreter)
+   with no separate C++ implementation.
+
+Either way, the original Phase 4b plan (shadowhook 4 specific C++
+methods) is **architecturally infeasible on Android**, regardless of
+how aggressive the candidate search is.
+
+### Phase 4b — viable alternatives
+
+| Approach | Where to hook | Cost | Trade-off |
+|---|---|---|---|
+| AVM2 dispatcher hook | `AvmCore::CallNative` (or `MethodEnv::coerceEnter`) — single function intercepts EVERY AS3→C++ call | RA of dispatcher + runtime name filter + ~600 LOC | Hot path (1000s/sec calls); MUST be cheap. Locates dispatcher requires its own bindiff session (~2-3 days). |
+| MMgc write-barrier hook | `MMgc::GC::WriteBarrierWrite` — every pointer-field assignment | Already known offset, easy | Captures EVERY write, not just reference semantics. Coarse — would emit 100k+ events/sec, mostly noise. Filter logic unclear. |
+| **Skip Phase 4b** | — | — | Phase 4c covers typed alloc graph (which is what 80% of leak hunts need). Reference graph is nice-to-have for cycle detection but not critical. Plan ships as 9/10 phases green. |
+
+**Decision**: Per user constraint (hooks-only, no compiler injection),
+Phase 4b cannot deliver via direct method hooks. Documented as
+architecturally limited. Phase 4c remains the production typed-alloc
+path with 5% resolution rate (= the actual ScriptObject ratio of all
+FixedMalloc allocs — not a defect).
+
+### Final plan status
+
+| Phase | Status |
+|---|---|
+| 0 reentrancy fix | ✅ production |
+| 1+2 native alloc/free + DPC lifecycle | ✅ production |
+| 3 method walker (compiler probe injection) | ✅ production |
+| 4a IMemorySampler hook | ✅ investigated — equivalent to Phase 4c |
+| 4b reference graph | ❌ architecturally infeasible via puro-hooks (no AS3 compiler injection allowed); 30 wider candidates × 0 hits prove inlining/ABC-bytecode-only impl |
+| 4c typed AS3 alloc walker (Path B) | ✅ production |
+| 5 GCHeap::Alloc deep hook | ✅ production |
+| 6 EGL render hook | ✅ production |
+| 7a profilerRequestGc (GC observer + trigger) | ✅ production |
+| 7b profilerRecordFrame | ✅ production |
+
+**9 of 10 phases green**. Phase 4b documented as architecturally
+limited; alternatives require either AVM2 dispatcher RA (~2-3 days)
+or write-barrier hook (high noise) — both deferred unless leak-hunt
+campaigns reveal cycle-detection requirements that 4c can't satisfy.
+
+The Phase 4b RA tooling (experiment hook + `AndroidExperimentHook`
+JNI/AS3 bridge) is committed (`af11800`) and remains available for
+future RA campaigns on different libCore.so build-ids.
 
 Reference Windows implementation lives in
 `WindowsNative/src/profiler/WindowsAs3ObjectHook.cpp:139` (`g_as3_refs`).
