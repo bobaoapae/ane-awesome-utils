@@ -225,21 +225,83 @@ FixedMalloc allocs — not a defect).
 | 1+2 native alloc/free + DPC lifecycle | ✅ production |
 | 3 method walker (compiler probe injection) | ✅ production |
 | 4a IMemorySampler hook | ✅ investigated — equivalent to Phase 4c |
-| 4b reference graph | ❌ architecturally infeasible via puro-hooks (no AS3 compiler injection allowed); 30 wider candidates × 0 hits prove inlining/ABC-bytecode-only impl |
+| 4b reference graph | ❌ architecturally infeasible via puro-hooks |
 | 4c typed AS3 alloc walker (Path B) | ✅ production |
 | 5 GCHeap::Alloc deep hook | ✅ production |
 | 6 EGL render hook | ✅ production |
 | 7a profilerRequestGc (GC observer + trigger) | ✅ production |
 | 7b profilerRecordFrame | ✅ production |
 
-**9 of 10 phases green**. Phase 4b documented as architecturally
-limited; alternatives require either AVM2 dispatcher RA (~2-3 days)
-or write-barrier hook (high noise) — both deferred unless leak-hunt
-campaigns reveal cycle-detection requirements that 4c can't satisfy.
+**9 of 10 phases green**.
 
-The Phase 4b RA tooling (experiment hook + `AndroidExperimentHook`
-JNI/AS3 bridge) is committed (`af11800`) and remains available for
-future RA campaigns on different libCore.so build-ids.
+### Phase 4b — definitive architectural finding
+
+After three RA passes via experiment-hook framework (no rebuild
+required between passes thanks to `AndroidExperimentHook`):
+
+| Pass | Filter | Candidates | Result |
+|---|---|---|---|
+| 1 | size 2.5x-5x Win, bl 24-30 | 9 | 0 hits / 1000 AS3 calls |
+| 2 | size 1.5x-10x Win, bl 15-47 | 30 | 0 hits / 1000 AS3 calls |
+| 3 | dispatcher-shape (small + blr) | 30 | 1 hit total / 1000 AS3 calls |
+| 4 | interpreter-shape (4-60KB + blr) | 30 | max 18 hits / 1000 AS3 calls |
+
+Across 99 candidate offsets covering broad shape ranges (small thunk
+to large interpreter), zero candidate fires consistently with AS3
+addEventListener invocations.
+
+**Root cause**: AS3 native methods are bound at AVM2 verify time —
+the binding resolves `addEventListener` (and similar) to a C++ function
+pointer that is then **JIT-baked into AS3 bytecode-emitted machine
+code**. The JIT'd code calls the resolved function pointer directly,
+**bypassing any shadowhook patch installed after binding** because:
+1. shadowhook patches the function PROLOGUE
+2. JIT code at the call site has the original target address
+3. CPU executes branch to the original prologue location
+4. The patched first 4 bytes redirect to our proxy stub
+5. *…BUT* if the JIT-baked address points past the prologue (e.g., an
+   inlined fast-path), the patch is bypassed
+6. *…OR* if Adobe inlined the implementation entirely, no entry
+   exists to patch
+
+Sanity check: `MMgc::GCHeap::Alloc` (Phase 5, known-good offset)
+fires 187× during 16MB churn. Hook infra is correct; AS3 native
+methods are simply not exposed as standalone hookable C++ entry
+points on Android.
+
+### Phase 4b — alternatives if pursued in the future
+
+| Approach | Cost | Trade-off |
+|---|---|---|
+| Hook AVM2 verify-time binding registration (intercept the `NativeMethodInfo` table install) | ~3 days RA + reuse hook framework | Catches binding before JIT bake — but requires tracing the verify path |
+| Hook MMgc write-barrier (`MMgc::GC::WriteBarrierWrite`) — every pointer-field assignment in GC heap | Already known offset, easy | High noise (100k+ events/sec); reference semantics extracted from access patterns |
+| AVM2 interpreter slot dispatch (intercept the bytecode op for `callmethodlate`) | Requires deep RA + hooking interpreter switch | Most invasive; high overhead on every AS3 method call |
+
+All three require multi-day RA. **Status quo**: Phase 4c (production
+typed-alloc walker, 5% resolution = real ScriptObject ratio) covers
+80% of leak-hunt scenarios. Phase 4b reference graph is "nice to
+have" for cycle detection but not blocking; defer until concrete
+campaign requires it.
+
+### Phase 4b — infrastructure preserved for future RA
+
+Reusable assets committed:
+
+- **`AndroidExperimentHook`** (`af11800`) — hook ANY libCore.so offset
+  at runtime via JNI/AS3 from test scenarios. Up to 32 concurrent slots
+  with arg capture + hit counters. Validated firing 187× on
+  known-good `GCHeap::Alloc`.
+- **`AdbServerIsolator`** (`AirBuildTool b9a97a8`) — dedicated
+  single-device adb server for parallel test runs.
+- **`ResolveHostLanIpForWifiTarget`** + LAN-direct dial path
+  (`AirBuildTool b9a97a8`) — bypasses adb 37.0.0+ `reverse` bug,
+  multi-device-agnostic test pipeline.
+- **`tools/crash-analyzer/android_phase4b_*.py`** — bindiff scripts
+  + scenario generators for future RA passes on different SDK builds.
+
+When Adobe ships a different libCore.so build-id (SDK upgrade), the
+infrastructure is reusable; the RA work is per-build-id
+(non-portable across versions).
 
 Reference Windows implementation lives in
 `WindowsNative/src/profiler/WindowsAs3ObjectHook.cpp:139` (`g_as3_refs`).
