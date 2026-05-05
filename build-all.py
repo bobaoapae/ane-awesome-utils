@@ -376,18 +376,12 @@ def step_package(env):
     sign_tmp = ANE_BUILD / "codesign-tmp"
     if sign_tmp.exists():
         shutil.rmtree(sign_tmp)
-    sign_tmp.mkdir(parents=True)
+    sign_in = sign_tmp / "in"
+    sign_out = sign_tmp / "out"
+    sign_in.mkdir(parents=True)
+    sign_out.mkdir(parents=True)
 
     cst_home = env["CODESIGNTOOL_PATH"]
-    log("  Signing Windows DLLs...")
-    # SSL.com eSigner treats each TOTP code as single-use: once the tool
-    # consumes a code to authenticate, calling sign() again inside the
-    # same 30 s TOTP window fails with "Unexpected character (<) at
-    # position 0" — the API serves an HTML error page instead of JSON.
-    # We wait just past the 30 s period between calls so the TOTP
-    # generator has rotated to a fresh code.
-    import time as _time
-    TOTP_WINDOW_SEC = 32
 
     def _sanitize_codesign_output(text):
         text = text or ""
@@ -396,53 +390,46 @@ def step_package(env):
                 text = text.replace(secret, "<redacted>")
         return text
 
-    def _sign_dll(src, out_dir):
-        cmd = (f'set "CODE_SIGN_TOOL_PATH={cst_home}" && '
-               f'"{codesigntool}" sign -input_file_path="{src}"'
-               f' -output_dir_path="{out_dir}"'
-               f' -username="{cst_user}" -password="{cst_pass}"'
-               f' -totp_secret="{cst_totp}"')
-        return subprocess.run(
-            cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+    # batch_sign authenticates once (single TOTP) and signs every file in
+    # input_dir, so we avoid the 32 s TOTP-rotation wait that the per-file
+    # `sign` command requires. Files are staged into a flat dir with an
+    # index prefix so windows-32 and windows-64 copies don't collide.
+    log(f"  Signing {len(dlls)} Windows DLLs (batch_sign)...")
+    name_map = {}  # staged filename -> original Path
+    for idx, dll in enumerate(dlls):
+        src = ANE_BUILD / dll
+        staged_name = f"{idx:02d}_{src.name}"
+        shutil.copy2(src, sign_in / staged_name)
+        name_map[staged_name] = src
+
+    cmd = (f'set "CODE_SIGN_TOOL_PATH={cst_home}" && '
+           f'"{codesigntool}" batch_sign'
+           f' -input_dir_path="{sign_in}"'
+           f' -output_dir_path="{sign_out}"'
+           f' -username="{cst_user}" -password="{cst_pass}"'
+           f' -totp_secret="{cst_totp}"')
 
     with timed("codesigntool"):
-        for idx, dll in enumerate(dlls):
-            if idx > 0:
-                log(f"  waiting {TOTP_WINDOW_SEC}s for TOTP window to rotate...")
-                _time.sleep(TOTP_WINDOW_SEC)
-            src = ANE_BUILD / dll
-            before = src.stat().st_mtime
-            signed = None
-            last_output = ""
-            for attempt in range(1, 4):
-                out_dir = sign_tmp / f"{idx}-{attempt}"
-                if out_dir.exists():
-                    shutil.rmtree(out_dir)
-                out_dir.mkdir(parents=True)
-                r = _sign_dll(src, out_dir)
-                last_output = _sanitize_codesign_output(r.stdout)
-                candidate = out_dir / src.name
-                if r.returncode == 0 and candidate.exists():
-                    signed = candidate
-                    break
-                if attempt < 3:
-                    log(f"  CodeSignTool produced no output for {dll}; retrying after TOTP rotation...")
-                    _time.sleep(TOTP_WINDOW_SEC)
-                else:
-                    if last_output:
-                        log(last_output)
-                    if r.returncode != 0:
-                        raise BuildError(f"CodeSignTool failed for {dll} (exit {r.returncode})")
-                    raise BuildError(f"CodeSignTool produced no output for {dll}")
-            shutil.move(str(signed), str(src))
-            if src.stat().st_mtime == before:
-                raise BuildError(f"Signed DLL did not replace original: {dll}")
-        shutil.rmtree(sign_tmp)
+        r = subprocess.run(
+            cmd, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        output = _sanitize_codesign_output(r.stdout)
+        if r.returncode != 0:
+            log(output)
+            raise BuildError(f"CodeSignTool batch_sign failed (exit {r.returncode})")
+
+        for staged_name, original in name_map.items():
+            signed = sign_out / staged_name
+            if not signed.exists():
+                log(output)
+                raise BuildError(f"batch_sign produced no output for {original.name}")
+            before = original.stat().st_mtime
+            shutil.move(str(signed), str(original))
+            if original.stat().st_mtime == before:
+                raise BuildError(f"Signed DLL did not replace original: {original}")
+
+    shutil.rmtree(sign_tmp)
 
     log("  Running ADT...")
     with timed("ADT"):
