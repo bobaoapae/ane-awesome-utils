@@ -137,7 +137,15 @@ public:
         // AArch64) for the RCObject composite + pad.
 #if defined(__aarch64__)
         std::uint32_t scriptobject_vtable_off = 16;
-        std::uint32_t vtable_traits_off       = 40;  // V*5 = 8*5
+        // VTable->Traits: source-derived V*5 (= 40) does not match the
+        // shipping libCore.so layout. ARMv7 (V=4) auto-discovery probe
+        // proved the actual offset is V*8 (= 32 on ARMv7) — 3 extra
+        // pointer-sized fields beyond the open-source avmplus VTable.h
+        // layout are present in Adobe's build. The same 3 extra fields
+        // should apply on AArch64 by the same logic, scaling V to 8 →
+        // traits_off = 8 * 8 = 64. Run the auto-discovery probe on a
+        // OnePlus 15 ARM64 build-id 7dde220f... to confirm.
+        std::uint32_t vtable_traits_off       = 64;  // V*8 = 8*8 (extrapolated from ARMv7 discovery)
         std::uint32_t traits_name_off         = 144; // V*18 = 8*18 (core+base+param+cache+neg+8*primary+sec+pool+itraits+ns)
         std::uint32_t string_buffer_off       = 16;  // vtable(8) + composite(4) + pad(4)
         std::uint32_t string_extra_off        = 24;  // + V
