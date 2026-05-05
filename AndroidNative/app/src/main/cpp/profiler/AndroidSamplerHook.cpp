@@ -30,6 +30,11 @@ void* getCapturedGcSingleton();
 namespace ane::profiler {
 namespace {
 
+// Forward decl — DEFINE_PROXY macro uses g_addr_could_be_traits to test
+// whether a1..a4 look like Traits* parameters. Definition lives further
+// down (after g_lc section bounds are declared).
+static bool g_addr_could_be_traits(std::uintptr_t p);
+
 constexpr std::size_t kMaxHooks = 96;  // collect up to 96 unique functions
 
 using generic_fn = long (*)(long, long, long, long, long, long, long, long);
@@ -53,8 +58,17 @@ struct ArgSnapshot {
     long a0_first;
     long a1_first;
     long a2_first;
+    long a3_first;
+    long a4_first;
     std::atomic<int> distinct_a0_count{0};
     long last_a0;
+    // "Traits-shape" signal: count how many of a1..a4 point into libCore
+    // .data with a vftable head (i.e., look like a Traits* parameter).
+    // Slots that take Traits* will have one of these counters > 0.
+    std::atomic<int> a1_traits_shape_hits{0};
+    std::atomic<int> a2_traits_shape_hits{0};
+    std::atomic<int> a3_traits_shape_hits{0};
+    std::atomic<int> a4_traits_shape_hits{0};
 };
 static ArgSnapshot g_arg_snap[kMaxHooks]{};
 
@@ -65,11 +79,12 @@ static ArgSnapshot g_arg_snap[kMaxHooks]{};
                            long a4, long a5, long a6, long a7) {             \
         std::uint64_t cnt = g_diag_hits[N].fetch_add(1, std::memory_order_relaxed); \
         if (cnt < 100) {                                                     \
-            /* Track distinct a0 values in first 100 calls */                \
             if (!g_arg_snap[N].filled.load(std::memory_order_relaxed)) {     \
                 g_arg_snap[N].a0_first = a0;                                 \
                 g_arg_snap[N].a1_first = a1;                                 \
                 g_arg_snap[N].a2_first = a2;                                 \
+                g_arg_snap[N].a3_first = a3;                                 \
+                g_arg_snap[N].a4_first = a4;                                 \
                 g_arg_snap[N].last_a0 = a0;                                  \
                 g_arg_snap[N].distinct_a0_count.store(1, std::memory_order_relaxed); \
                 g_arg_snap[N].filled.store(true, std::memory_order_release); \
@@ -77,6 +92,15 @@ static ArgSnapshot g_arg_snap[kMaxHooks]{};
                 g_arg_snap[N].distinct_a0_count.fetch_add(1, std::memory_order_relaxed); \
                 g_arg_snap[N].last_a0 = a0;                                  \
             }                                                                \
+            /* Traits-shape probe on a1..a4 (a0 is `this`, never Traits) */  \
+            if (g_addr_could_be_traits((std::uintptr_t)a1))                  \
+                g_arg_snap[N].a1_traits_shape_hits.fetch_add(1, std::memory_order_relaxed); \
+            if (g_addr_could_be_traits((std::uintptr_t)a2))                  \
+                g_arg_snap[N].a2_traits_shape_hits.fetch_add(1, std::memory_order_relaxed); \
+            if (g_addr_could_be_traits((std::uintptr_t)a3))                  \
+                g_arg_snap[N].a3_traits_shape_hits.fetch_add(1, std::memory_order_relaxed); \
+            if (g_addr_could_be_traits((std::uintptr_t)a4))                  \
+                g_arg_snap[N].a4_traits_shape_hits.fetch_add(1, std::memory_order_relaxed); \
         }                                                                    \
         if (t_in_proxy || !g_active.load(std::memory_order_relaxed)) {       \
             generic_fn fn = g_orig_fn[N].load(std::memory_order_relaxed);    \
@@ -198,6 +222,26 @@ static bool isPtrInText(std::uintptr_t p) {
 static bool isPtrInData(std::uintptr_t p) {
     return (p >= g_lc.data_lo && p < g_lc.data_hi) ||
            (p >= g_lc.rodata_lo && p < g_lc.rodata_hi);
+}
+
+static bool g_lc_populated_state() { return g_lc.populated; }
+static bool g_addr_in_libcore_data(std::uintptr_t p) { return isPtrInData(p); }
+
+// Traits-shape probe: ptr is plausibly a Traits* if:
+//  - It's a heap-aligned pointer (NOT in .data/.text directly)
+//  - *(ptr) lands in libCore .data (would be the GCTraceableBase vtable)
+//  - *(*(ptr)) lands in libCore .text (vtable's slot 0 is a function)
+// This is the same signature used for vftable detection elsewhere.
+static bool g_addr_could_be_traits(std::uintptr_t p) {
+    if (!g_lc.populated) return false;
+    if (p < 0x1000 || (p & 7)) return false;
+    if (p > 0x0000007FFFFFFFFFULL) return false;
+    std::uintptr_t vt = 0;
+    if (!safeReadPtr(p, vt)) return false;
+    if (!isPtrInData(vt)) return false;
+    std::uintptr_t s0 = 0;
+    if (!safeReadPtr(vt, s0)) return false;
+    return isPtrInText(s0);
 }
 
 // Walk AvmCore (gc+0x10) for sub-objects. For each pointer field that
@@ -355,13 +399,21 @@ void AndroidSamplerHook::uninstall() {
              g_origin_slot[i],
              (unsigned long)g_origin_avmcore_off[i]);
         if (g_arg_snap[i].filled.load(std::memory_order_relaxed)) {
-            LOGI("    args: a0=0x%lx a1=0x%lx a2=0x%lx distinct_a0=%d %s",
+            int t1 = g_arg_snap[i].a1_traits_shape_hits.load(std::memory_order_relaxed);
+            int t2 = g_arg_snap[i].a2_traits_shape_hits.load(std::memory_order_relaxed);
+            int t3 = g_arg_snap[i].a3_traits_shape_hits.load(std::memory_order_relaxed);
+            int t4 = g_arg_snap[i].a4_traits_shape_hits.load(std::memory_order_relaxed);
+            LOGI("    args: a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx a4=0x%lx distinct_a0=%d",
                  (unsigned long)g_arg_snap[i].a0_first,
                  (unsigned long)g_arg_snap[i].a1_first,
                  (unsigned long)g_arg_snap[i].a2_first,
-                 distinct_a0,
-                 distinct_a0 <= 2 ? "[FIXED-THIS = real virtual method]"
-                                  : "[VARYING-THIS = shared func, not a real virtual]");
+                 (unsigned long)g_arg_snap[i].a3_first,
+                 (unsigned long)g_arg_snap[i].a4_first,
+                 distinct_a0);
+            LOGI("    %s | traits_shape: a1=%d a2=%d a3=%d a4=%d %s",
+                 distinct_a0 <= 2 ? "[FIXED-THIS]" : "[VARYING-THIS]",
+                 t1, t2, t3, t4,
+                 (t1 + t2 + t3 + t4) > 5 ? "[*** TRAITS-PARAM CANDIDATE ***]" : "");
         }
     }
     LOGI("uninstall: %zu hooks fired (of %zu installed)", n, hooked_count_);
