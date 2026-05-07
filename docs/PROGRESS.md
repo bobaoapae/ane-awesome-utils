@@ -852,6 +852,16 @@ with the same telemetry granularity as the Windows D3D9 side. The
 eglGetProcAddress fallback to dlsym is preserved for vendor
 extensions where eglGetProcAddress returns null.
 
+**Zero-overhead-off invariant confirmed post-fix 2026-05-06** via
+`_tmp_aneprof_phase4a_off_overhead.json` — 16MB ByteArray churn +
+1000 listener add/remove cycles WITHOUT calling profilerStart on
+Cat S60. Logcat completely silent for all profiler tags
+(`AneRenderHook`, `AneAs3SamplerHook`, `AneGcHook`, `AneDeepMemHook`,
+`AneAs3ObjectHook`, `AneAs3RefGraphHook`, `AneAllocTracer`) — none
+of the new chunk-Alloc/chunk-Free/chunk-walk/v2-eglGetProcAddress
+hooks install when capture is inactive. Memory delta bounded
+(GC fully reclaimed the 16MB).
+
 **Phase 6 partial parity (2026-05-06).** `AndroidRenderHook` previously
 emitted `RenderFrame` events with `primitive_count`, `clear_count`,
 and all texture-related fields hardcoded to zero. The Windows
