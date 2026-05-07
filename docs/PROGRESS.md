@@ -982,6 +982,24 @@ AneDeepMemHook: install: ChunkAlloc hook OK (target=...stub=...)
 AneDeepMemHook: install: MMgc::Free hook OK (target=...stub=...)
 ```
 
+**Real-gameplay validated 2026-05-06** via hall_idle_real on Cat
+S60 (30-sec Hall-idle window, login + Hall reached + capture):
+
+| Metric | Pre-fix hall_idle | Post-fix hall_idle |
+|---|---|---|
+| alloc events | 10110 | **12213** |
+| free events | **0** | **359** |
+| unknown_frees | 0 | 0 (all matched) |
+| live allocations | 10110 (monotonic) | 11854 (= 12213 - 359, drops on chunk reclaim) |
+| analyzer diagnostic | "incomplete; no free/realloc events captured" | **"probable live allocations remain at stop"** |
+| render_frame events | 193 | 193 (no Phase 6 regression) |
+| File validates | ✅ | ✅ |
+
+The diagnostic line changed from "incomplete" → "probable live
+allocations remain" — the analyzer now sees a balanced
+alloc/free stream and only flags entries that genuinely outlive
+the recording window. This is the parity Windows already had.
+
 **Remaining smaller-tier gap:** Phase 5's `proxy_GCHeapAlloc` and
 `proxy_FixedAlloc` track user-pointers at finer granularity. Their
 Free duals (per-class FixedAlloc::Free) still aren't located, so
