@@ -3,6 +3,51 @@
 Status snapshot for the Phase 0..7 plan defined in the project root planning
 prompt. Updated each iteration of the `/loop` driving Phase 4a/4b finalization.
 
+## Status summary 2026-05-06
+
+| Phase / Hook | Windows | Android (AArch64 / Cat S60) | Notes |
+|---|---|---|---|
+| Phase 0 — alloc_tracer reentrancy | ✅ | ✅ | t_in_tracer guard + arena-alloc hashmap |
+| Phase 1+2 — libc malloc/free shadowhook | ✅ | ✅ | tracker hooks malloc family on libCore.so callers |
+| Phase 3 — method_id on Alloc (compiler probe) | ✅ | ✅ | --profile-probes injects per-method enter/exit |
+| Phase 4a — IMemorySampler typed As3Alloc | ✅ | ✅ | vftable[12] @ libCore+0x8952ec; eager install via warmup |
+| Phase 4b — AS3 reference graph | ✅ (D3D9 hooks) | ⏳ infeasible | 4 RA passes; Adobe inlines on AArch64 — pc1 grouping covers it |
+| Phase 4c — typed AS3 alloc resolver | ✅ | ✅ | record_as3_alloc_raw fast path; analyzer parity |
+| Phase 5 — GCHeap::Alloc / FixedMalloc::Alloc | ✅ | ✅ | hooks at +0x89c42c / +0x8a11d8 |
+| **Phase 5 — MMgc::Free + chunk-Alloc** | ✅ | ✅ | **+0x8a167c (Free) + +0x8a15a4 (Alloc) + chunk-walk sweep** |
+| Phase 6 — eglSwap + glDraw\* (v1) | ✅ | ✅ | primitives_from_mode_count covers all GLES2 modes |
+| **Phase 6 v2 — clear/texImage2D/etc** | ✅ | ✅ | **eglGetProcAddress-resolved (NOT dlsym; was broken)** |
+| Phase 7a — GcCycle live_count/bytes | ✅ | ✅ | reads dpc->status() before/after Collect |
+| Writer — std::FILE\* + setvbuf(_IOFBF, 8MB) | ✅ | ✅ | fixes 1242 stray bytes from libc++ basic_filebuf |
+| Zero-overhead-when-off invariant | ✅ | ✅ | re-validated 2026-05-06 post-Phase 6 v2 fix |
+
+**Real-gameplay validation** (`tests/scenarios/aneprof_full_parity_validate.json`,
+30s Hall idle on Cat S60 build `7dde220f...`):
+
+```
+alloc/free/realloc      :  10161 /    380 /      0  (chunk-tier balanced, unknown_frees=0)
+AS3 alloc/free          :  25970 /      0          (Phase 4a sampler firing w/ pc0/pc1)
+gc_cycle                :    108 events            (live_count/bytes populated from dpc->status)
+render_frame            :    198 frames
+  draw_calls            :   6528 (~33/frame)       (Phase 6 v1)
+  primitive_count       : 153006
+  clear_count           :    198 (1/frame)         (Phase 6 v2 — was 0 with dlsym)
+  set_texture_count     :   6749                   (Phase 6 v2)
+  texture_update_count  :    415                   (Phase 6 v2)
+  texture_create_count  :      2                   (Phase 6 v2)
+  texture_upload_bytes  :  115,740,000 (~110 MB)
+analyzer diagnostic     : "probable live allocations remain at stop"  (Windows-equivalent)
+```
+
+**Open follow-ups** (non-blocking):
+- ARMv7 build (`582a8f65...`) — FixedMalloc::Alloc / MMgc::Free / ChunkAlloc
+  offsets TBD; can't validate runtime per Cat S60-only test policy.
+- Per-class FixedAlloc::Free standalone — Adobe inlined on AArch64 build
+  (zero ldxr/stxr matches in MMgc area). Chunk-walk sweep on
+  proxy_MMgcFree functionally covers it (sub-ptrs reclaimed when their
+  chunk is reclaimed). Only relevant if a future Adobe SDK exposes the
+  per-class function.
+
 ## Test device policy — Cat S60 ONLY
 
 **MANDATORY:** all on-device validation MUST run on Cat S60 (AArch64,
