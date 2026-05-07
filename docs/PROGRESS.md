@@ -788,8 +788,8 @@ implementation the dynamic loader hands out, system-wide. `glDraw*`
 + `eglSwapBuffers` keep using the original `hookOne(libGLESv2.so,
 ...)` path since they bind correctly there. Compile clean.
 
-**RUNTIME VALIDATED 2026-05-06** via hall_idle_real on Cat S60:
-all 8 hooks install successfully, logcat banner:
+**RUNTIME PARTIALLY VALIDATED 2026-05-06** via hall_idle_real on
+Cat S60: all 8 hooks install successfully, logcat banner:
 ```
 AneRenderHook: install swap=0x55ba4ae230
 AneRenderHook: install drawArrays=0x55bada85a0 drawElements=0x55bb35cbd0
@@ -797,10 +797,46 @@ AneRenderHook: install clear=0x55b8be39b0
 AneRenderHook: install texImage2D=0x55bab39dc0 texSubImage2D=0x55bab73e00
 AneRenderHook: install bindTexture=0x55bad78da0 bindFramebuffer=0x55bb35cca0
 ```
-30s of Hall idle produced 193 render_frame events with the v2
-dlsym-resolved hooks active throughout. Phase 6 full parity now
-operational (v1 swap+draw + v2 clear/texImage2D/texSubImage2D/
-bindTexture/bindFramebuffer all bound).
+30s of Hall idle produced 196 render_frame events.
+
+**v1 hooks (eglSwap + drawArrays/drawElements) work.** Per the
+.aneprof binary parsed for render_frame fields:
+  draw_calls       : 6460   (33/frame avg)
+  primitive_count  : 151360
+
+**v2 dlsym hooks install but DON'T FIRE.** Per same parsed events:
+  texture_create_count       : 0
+  texture_create_bytes       : 0
+  texture_update_count       : 0
+  set_texture_count          : 0
+  render_target_change_count : 0
+  clear_count                : 0
+
+Hall has dynamic text labels (player name etc.) that render each
+frame — those typically go through glTexSubImage2D + glBindTexture
++ glClear. Zero hits for 196 frames means Adobe's render path on
+Cat S60 (Adreno) **doesn't actually call through the dlsym-resolved
+addresses we hooked**, despite the install succeeding at those
+addresses.
+
+**Probable root cause:** Adobe AIR resolves GLES function pointers
+via `eglGetProcAddress(name)` at boot, not `dlsym(RTLD_DEFAULT,
+name)`. On Adreno-backed devices these return DIFFERENT addresses
+— eglGetProcAddress hands out the vendor-specific implementation
+entry point (often inlined or in a different code page from the
+dlsym-resolved trampoline). Our hook patches the dlsym address but
+Adobe's cached eglGetProcAddress pointer never goes through it.
+
+**Path forward (deferred):** to reliably intercept, hook
+`eglGetProcAddress` itself with an always-on patch (analogous to
+AneDeferDrain) that records the names+addresses Adobe queries at
+boot. Then at profilerStart, hook those addresses directly via
+`shadowhook_hook_func_addr`. This is more invasive than the dlsym
+approach but is the only way to catch Adobe's actual call sites
+on Adreno. Tracked as future improvement; the v1 hooks already
+provide draw_calls + primitive_count which is the most useful
+render telemetry. Texture telemetry is a nice-to-have that lands
+when the eglGetProcAddress-based binding ships.
 
 **Phase 6 partial parity (2026-05-06).** `AndroidRenderHook` previously
 emitted `RenderFrame` events with `primitive_count`, `clear_count`,
