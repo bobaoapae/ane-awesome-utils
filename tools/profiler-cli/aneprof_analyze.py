@@ -2637,7 +2637,7 @@ def print_report(result: dict[str, Any], warnings: list[str], top: int, stack_fr
     if perf:
         print("\nPerformance suspects:")
         for item in perf:
-            reasons = ", ".join(item.get("reasons", [])[:2])
+            reasons = ", ".join(item.get("reasons", [])[:5])
             print(f"  [{item['kind']}] {item['name']} score={item.get('score', 0)} {reasons}")
 
     render_frames = result.get("render_frame_summary", {}).get("slow_frames", [])[:top]
