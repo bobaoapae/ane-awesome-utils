@@ -53,24 +53,65 @@ Tooling: `tools/ghidra-scripts/` contains the headless Java scripts used:
 
 ## Offsets
 
-### Phase 5 — `MMgc::FixedMalloc::Alloc` + `MMgc::GCHeap::Alloc`
+### Phase 5 — `MMgc::FixedMalloc::Alloc` + `MMgc::GCHeap::Alloc` + Free pair
 
-`AndroidDeepMemoryHook` shadowhooks the per-size-class fast path inside
-`FixedMalloc::Alloc` (free-list pop, no libc call) and the chunk-grow path
-in `GCHeap::Alloc`. Combined coverage on PVP 3x ARM64: **6.3M alloc events
-in 802MB capture, 547× more than GCHeap-only** — confirms the FixedMalloc
-fast path is the dominant runtime allocator inside MMgc.
+`AndroidDeepMemoryHook` shadowhooks four MMgc entry points: the per-size-class
+fast path inside `FixedMalloc::Alloc` (free-list pop, no libc call), the
+chunk-grow path in `GCHeap::Alloc`, the chunk-level allocator
+`FixedMalloc::ChunkAlloc`, and its dual `MMgc::Free`. Combined coverage on
+PVP 3x ARM64: **6.3M alloc events in 802MB capture, 547× more than
+GCHeap-only** — confirms the FixedMalloc fast path is the dominant runtime
+allocator inside MMgc.
 
-| Build-ID | `GCHeap::Alloc` | `FixedMalloc::Alloc` | Notes |
-|---|---|---|---|
-| `7dde220f...` (arm64-v8a) | `+0x89c42c` | `+0x8a11d8` | Both hooks active |
-| `582a8f65...` (armeabi-v7a) | `+0x5541cd` (Thumb +1) | n/a | FixedMalloc inlined into GCHeap callers; only GCHeap hook active |
+| Build-ID | `GCHeap::Alloc` | `FixedMalloc::Alloc` | `ChunkAlloc` | `MMgc::Free` | Notes |
+|---|---|---|---|---|---|
+| `7dde220f...` (arm64-v8a) | `+0x89c42c` | `+0x8a11d8` | `+0x8a15a4` | `+0x8a167c` | All 4 hooks active; chunk-walk sweep on Free |
+| `582a8f65...` (armeabi-v7a) | `+0x5541cd` (Thumb +1) | n/a | TBD | TBD | FixedMalloc inlined into GCHeap callers; only GCHeap hook active |
 
 ARMv7 toolchain inlined `FixedMalloc::Alloc` into the GCHeap callers — the
 size-class binner uses `__aeabi_uidivmod` for `/104` (entry stride) where
 ARM64 uses `madd`. Static RA can't isolate a clean entry. Coverage on
 ARMv7 is 10–30× lower than ARM64 in PVP captures — accepted tradeoff
 (documented in PROGRESS.md Iter N+19).
+
+#### `MMgc::Free` + `ChunkAlloc` pair (arm64-v8a)
+
+The pair at `+0x8a15a4` (Alloc) and `+0x8a167c` (Free) tracks
+**page-aligned chunks**, which is a different tier than the
+user-pointers `proxy_GCHeapAlloc` / `proxy_FixedAlloc` track. Without
+`proxy_ChunkAlloc` recording the chunk_base, Free events at `+0x8a167c`
+arrive with chunk-aligned ptrs that have no matching shard entry (off
+by header offset, e.g. user_ptr = chunk_base + 0x10 for size=64KB).
+With both hooks installed, the chunk_base lives in the shard map the
+Free queries → frees match cleanly.
+
+**RA method.** Empirical hit-count comparison via the
+`AndroidExperimentHook` framework: 16 candidate offsets in `+0x8a15a4
+.. +0x8a2ec8` (selected by `stp ..., [sp, #-N]!` function-entry scan)
+were light-installed concurrently and exercised by 64MB ByteArray
+churn. The Alloc/Free pair at `+0x8a15a4`/`+0x8a167c` was identified
+by **identical 59:59 hits** — the strongest signal in the candidate
+table. Disassembly confirmed the 2-arg signature `void(this, ptr)`
+and matching body shape (mutex-protected sub of size from total
+counter at `[this+0x1118]`, page-header lookup at `(ptr & ~0xfff) +
+0x22`).
+
+**Chunk-walk sweep.** Adobe inlined the per-class
+`MMgc::FixedAlloc::Free` on this AArch64 build — `grep ldxr|stxr`
+over `+0x890000..+0x8b0000` returns **zero** matches, so no atomic
+free-list operations remain as standalone functions to hook. To
+compensate, `proxy_MMgcFree` calls
+`dpc->record_free_chunk_sweep(chunk_base, chunk_size)` after the
+original. The sweep walks the 32 allocation shards, collects ptrs in
+`[chunk_base, chunk_base + chunk_size)`, and emits FreeIfTracked
+events for each — implicitly reclaiming the finer-tier user-pointers
+Phase 5's alloc proxies tracked within that chunk. Per chunk Free:
+~10000 entries scanned across 32 shards, asynchronous through the
+writer queue.
+
+This closes the `live_allocations` parity gap with Windows
+(`hook_mmgc_free` semantics) without the per-class Free hook that
+Adobe's AArch64 build inlined away.
 
 ### Phase 7a — `MMgc::GC::Collect` (observer + programmatic trigger)
 
@@ -94,9 +135,42 @@ singleton capture is the canonical solution.
 ### Phase 6 — EGL/GLES render hooks
 
 Not in `libCore.so`. `AndroidRenderHook` shadowhooks the Android system
-libraries — `libEGL.so:eglSwapBuffers` and `libGLESv2.so:glDrawArrays` /
-`glDrawElements`. Vendor-agnostic (works on Adreno, Mali, Xclipse).
-No build-id pinning needed; symbol resolution via `dlsym`.
+GLES libraries via two distinct binding strategies — both vendor-agnostic
+(work on Adreno, Mali, Xclipse). No `libCore.so` build-id pinning needed.
+
+**v1 — `shadowhook_hook_sym_name(libGLESv2.so, ...)`.** Patches the
+exported prologue of:
+
+- `libEGL.so:eglSwapBuffers` — frame boundary signal
+- `libGLESv2.so:glDrawArrays` / `glDrawElements` — draw_calls + primitive_count
+
+These bind correctly through the lib-exported trampoline because Adobe's
+draw call sites resolve them at the libGLESv2.so entry.
+
+**v2 — `eglGetProcAddress(sym)` + `shadowhook_hook_func_addr`.** Resolves
+the symbol via `eglGetProcAddress`, then patches the resulting address.
+Required for the texture/clear/bind family:
+
+- `glClear` — clear_count
+- `glTexImage2D` — texture_create_count + texture_create_bytes (level 0)
+- `glTexSubImage2D` — texture_update_count + texture_upload_bytes
+- `glBindTexture` — set_texture_count
+- `glBindFramebuffer` — render_target_change_count
+
+**Why eglGetProcAddress and not dlsym for v2?** Adobe AIR caches GLES
+function pointers at boot via `eglGetProcAddress`, which on
+vendor-specific implementations (Adreno on Cat S60, Mali on Galaxy J5,
+Xclipse on Galaxy S25) returns the vendor implementation entry point —
+**not** the libGLESv2.so trampoline that `dlsym(RTLD_DEFAULT, sym)`
+resolves. Empirical proof: a previous dlsym-based binding installed
+cleanly on Cat S60 but fired zero times during 196 frames of dynamic
+Hall rendering (texture_create=0, set_texture=0, clear_count=0). After
+switching to `eglGetProcAddress`, all v2 metrics began populating
+immediately on the same workload (198 clear / 6749 set_texture /
+415 tex_update / 115 MB upload across 198 frames).
+
+The v1 hooks (`glDraw*`, `eglSwapBuffers`) keep using
+`shadowhook_hook_sym_name` because they bind correctly there.
 
 ### Phase 3 — AS3 method walker (TLS-probe based)
 

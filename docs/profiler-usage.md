@@ -8,10 +8,25 @@ The deep implementation details remain in
 
 ## Scope
 
-The `.aneprof` backend is Windows-only today and targets AIR SDK `51.1.3.10`
-on x86 and x64. It does not require Scout, `.telemetry.cfg` or advanced
-telemetry. The old `.flmc` tools remain in the repository for legacy captures,
-but memory/performance work should use `.aneprof`.
+The `.aneprof` backend targets AIR SDK `51.1.3.10`. As of 2026-05-06 it
+supports:
+
+- **Windows x86** — full hooks (MMgc + render + AS3 sampler + reference graph)
+- **Windows x64** — full hooks (MMgc + render + AS3 sampler + reference graph)
+- **Android arm64-v8a** — full hooks (MMgc chunk-tier with chunk-walk sweep,
+  GLES2 v1+v2 render, AS3 sampler with pc0/pc1 attribution, GC observer +
+  programmatic trigger via `requestCollect`)
+- **Android armeabi-v7a** — Phase 5 partial (GCHeap-only; FixedMalloc/Free
+  inlined into callers per Adobe's ARMv7 toolchain), other phases full
+- **iOS** — Phase 1+2 alloc_tracer libc shadowhook only (no MMgc/render hooks)
+- **macOS** — Phase 1+2 alloc_tracer libc shadowhook only
+
+It does not require Scout, `.telemetry.cfg` or advanced telemetry. The old
+`.flmc` tools remain in the repository for legacy captures, but
+memory/performance work should use `.aneprof`.
+
+For Android-specific hook offsets and reverse-engineering details see
+[profiler-rva-android-51-1-3-10.md](profiler-rva-android-51-1-3-10.md).
 
 ## AS3 API
 

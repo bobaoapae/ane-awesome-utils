@@ -3,11 +3,18 @@
 Current profiler direction:
 
 - Primary backend is `.aneprof`, not Scout `.flmc`.
-- Windows x86 and x64 are supported on AIR SDK `51.1.3.10`.
-- Existing Scout/telemetry docs, scripts and RVA research remain in the repo as legacy analysis material.
-- The SDK DLLs should remain original; `fix_telemetry_mode_b` is not required by this backend.
+- **Windows x86/x64 and Android arm64-v8a + armeabi-v7a are all supported** on
+  AIR SDK `51.1.3.10`. The Android side reaches Windows-equivalent telemetry
+  granularity end-to-end (see "Android implementation" below). iOS support is
+  the alloc-tracer libc shadowhook only — no MMgc/render hooks yet.
+- Existing Scout/telemetry docs, scripts and RVA research remain in the repo
+  as legacy analysis material.
+- The SDK DLLs should remain original; `fix_telemetry_mode_b` is not required
+  by this backend.
 - For day-to-day capture commands, AS3 examples and CLI usage, start with
   `docs/profiler-usage.md`.
+- For libCore.so reverse-engineering details on Android, see
+  `docs/profiler-rva-android-51-1-3-10.md`.
 
 ## Public API
 
@@ -23,9 +30,16 @@ profilerGetStatus():Object
 `profilerStart` writes a native binary event stream to `path`. Recommended
 extension is `.aneprof`.
 
-`profilerRequestGc` is Windows-only and requests MMgc collection through AIR's
-native `needsCollection` flag. It replaces the old E2E reliance on `System.gc()`;
-see `docs/profiler-native-gc.md`.
+`profilerRequestGc` requests an MMgc collection.
+
+- **Windows**: writes AIR's native `needsCollection` flag (see
+  `docs/profiler-native-gc.md`).
+- **Android**: re-invokes the captured `MMgc::GC::Collect` directly via the
+  `AndroidGcHook`-stashed singleton pointer (the GC observer hook stashes
+  `this` from the first runtime collection and uses it as the programmatic
+  trigger entry point). No global pointer hunting needed.
+
+Both paths replace the old E2E reliance on `System.gc()`.
 
 Supported `profilerStart` options:
 
@@ -100,9 +114,9 @@ A custom compiler pass should add `--profile-probes`, emit a stable method
 table once, and inject balanced enter/exit calls around AS3 methods while
 preserving returns, throws, finally blocks, constructors and closures.
 
-## Memory Hooks
+## Memory Hooks — Windows
 
-Windows currently installs guarded detours for these AIR/MMgc entry points:
+Windows installs guarded detours for these AIR/MMgc entry points:
 
 | Hook | x64 RVA | x86 RVA |
 | --- | ---: | ---: |
@@ -117,6 +131,54 @@ It also patches the `Adobe AIR.dll` IAT entries for:
 | `Kernel32!HeapAlloc` | `0x00b04b70` | `0x008c2584` |
 | `Kernel32!HeapFree` | `0x00b04b68` | `0x008c2588` |
 | `Kernel32!HeapReAlloc` | `0x00b049c0` | `0x008c22f0` |
+
+## Memory Hooks — Android
+
+`AndroidDeepMemoryHook` shadowhooks four MMgc entry points in
+`libCore.so`. Offsets are pinned by GNU build-id (Android `libCore.so`
+ships stripped, so the pin is required); unknown build-ids fall back to
+a logged warning and disable the hook rather than wild-patching.
+
+| Hook | arm64-v8a (`7dde220f...`) | armeabi-v7a (`582a8f65...`) |
+| --- | ---: | ---: |
+| `GCHeap::Alloc` | `+0x89c42c` | `+0x5541cd` (Thumb +1) |
+| `FixedMalloc::Alloc` (size-class fast path) | `+0x8a11d8` | inlined into GCHeap callers — n/a |
+| `FixedMalloc::ChunkAlloc` (paired with Free) | `+0x8a15a4` | TBD |
+| `MMgc::Free` (chunk-level dual of ChunkAlloc) | `+0x8a167c` | TBD |
+
+**Chunk-Alloc/Free pairing (arm64-v8a).** The `+0x8a15a4` /
+`+0x8a167c` pair tracks page-aligned chunks rather than the
+user-pointers Phase 5's `proxy_GCHeapAlloc` and `proxy_FixedAlloc`
+return. Without the chunk-Alloc proxy in place, Free events at
+`+0x8a167c` arrive with chunk_base ptrs that have no matching shard
+entry (off by header offset). With it, the chunk_base is recorded in
+the same shard map the Free queries, so frees match cleanly.
+Validated 1:1 (59:59 hits) on 64MB ByteArray churn during RA via
+`tests/scenarios/_tmp_aneprof_task11_free_ra.json`.
+
+**Chunk-walk sweep on chunk reclaim.** Adobe inlined the per-class
+`FixedAlloc::Free` on this AArch64 build (`grep ldxr|stxr` over
+`+0x890000..+0x8b0000` returns zero matches — no atomic free-list
+operations remain as standalone functions to hook). To compensate,
+`proxy_MMgcFree` calls `dpc->record_free_chunk_sweep(chunk_base,
+chunk_size)` after the original. The sweep walks all 32 allocation
+shards, collects ptrs in `[chunk_base, chunk_base + chunk_size)`,
+and emits FreeIfTracked events for each — implicitly reclaiming the
+finer-tier user-pointers Phase 5's alloc proxies tracked within that
+chunk. The shard scans are O(N_total) per chunk Free (~10000 entries
+walked), bounded by per-shard mutex, asynchronous through the writer
+queue.
+
+**libc malloc family.** Phase 1+2 alloc_tracer shadowhooks
+`libc.so:malloc/calloc/realloc/free/mmap/munmap` via PLT/GOT patches
+on `libCore.so` callers. Reentrancy is guarded by RAII `t_in_tracer`
+moved to proxy entry with a size-filter-first ordering (NDK r28
+`__emutls_get_address` calls libc malloc on first thread_local touch
+— required to avoid recursion on small allocations).
+
+The chunk-tier MMgc::Free hook + chunk-walk sweep + libc free hook
+together cover every dealloc path the AS3 runtime takes, matching
+Windows `live_allocations` parity.
 
 ## CLI Diagnostics
 
@@ -211,12 +273,16 @@ by scanning allocation events whose timestamps fall inside that frame interval.
 
 ## Render Performance Hooks
 
-`profilerStart(..., { render: true })` enables optional Windows render
-instrumentation. This is intentionally disabled by default and has no active
-runtime hook until the first render-enabled capture. `profilerStop()` pauses
-render capture, clears the active controller and stops writing events
-immediately. The physical vtable restore is deferred to extension shutdown to
-avoid racing AIR's renderer while it still owns live D3D/DXGI objects.
+`profilerStart(..., { render: true })` enables optional render
+instrumentation. The hook is intentionally disabled by default and has no
+active runtime hook until the first render-enabled capture. `profilerStop()`
+pauses render capture, clears the active controller and stops writing
+events immediately.
+
+### Render Hooks — Windows
+
+The physical vtable restore is deferred to extension shutdown to avoid
+racing AIR's renderer while it still owns live D3D/DXGI objects.
 
 On AIR SDK `51.1.3.10`, the hook currently installs the stable Present paths:
 
@@ -226,6 +292,65 @@ On AIR SDK `51.1.3.10`, the hook currently installs the stable Present paths:
 - DXGI `Present` / `Present1`
 - D3D11 texture creation, `UpdateSubresource`, draw calls, render-target
   changes and clears, discovered from a dummy D3D11 device/context
+
+### Render Hooks — Android
+
+`AndroidRenderHook` shadowhooks the Android system GLES libraries via two
+distinct binding strategies, both gated by `profilerStart(..., {
+render: true })`:
+
+**v1 — `shadowhook_hook_sym_name(libGLESv2.so, ...)`.** Patches the
+exported prologue of:
+
+- `libEGL.so:eglSwapBuffers` — frame boundary signal (one
+  `render_frame` event per swap)
+- `libGLESv2.so:glDrawArrays` / `glDrawElements` — draw_calls counter
+  + primitive_count via the helper
+  `primitives_from_mode_count(mode, count)` (covers all GLES2 modes:
+  POINTS, LINES, LINE_STRIP, LINE_LOOP, TRIANGLES, TRIANGLE_STRIP,
+  TRIANGLE_FAN). These bind correctly through the lib-exported
+  trampoline because Adobe's draw call sites resolve them at the
+  `libGLESv2.so` entry.
+
+**v2 — `eglGetProcAddress(sym)` + `shadowhook_hook_func_addr`.**
+Resolves the symbol through `eglGetProcAddress` first, then patches
+the resulting address. This is required for:
+
+- `glClear` — clear_count
+- `glTexImage2D` — texture_create_count + texture_create_bytes
+  (level 0 only; pyramids are bookkeeping not allocations)
+- `glTexSubImage2D` — texture_update_count + texture_upload_bytes
+- `glBindTexture` — set_texture_count
+- `glBindFramebuffer` — render_target_change_count
+
+The byte-size helper `gles_bpp(format, type)` covers the common
+GLES2 cases (RGB/RGBA/LUMINANCE/LUMINANCE_ALPHA/ALPHA × UNSIGNED_BYTE
+/ FLOAT / HALF_FLOAT_OES, plus packed types `5_6_5/4_4_4_4/5_5_5_1`).
+Returns 0 for compressed (ETC2/ASTC) and unrecognized combinations —
+those textures are counted but not byte-sized.
+
+**Why eglGetProcAddress and not dlsym for the v2 hooks?** Adobe AIR
+caches GLES function pointers at boot via `eglGetProcAddress`, which
+on vendor-specific implementations (Adreno, Mali, Xclipse) returns
+the vendor implementation entry point, not the libGLESv2.so trampoline
+that `dlsym(RTLD_DEFAULT, sym)` resolves. Empirical validation on
+Cat S60 (Adreno) showed dlsym-resolved hooks installed cleanly but
+fired zero times during 196 frames of dynamic Hall rendering —
+Adobe's call sites bypassed them. Switching to eglGetProcAddress
+lands the hook on the same address Adobe's call sites cache, and
+all v2 metrics begin populating immediately.
+
+The v1 hooks (`glDraw*`, `eglSwapBuffers`) keep using
+`shadowhook_hook_sym_name(libGLESv2.so, ...)` because they bind
+correctly there; only the texture/clear/bind family needs the
+eglGetProcAddress path. Vendor-agnostic for both modes — works on
+Adreno, Mali, Xclipse without binding to per-vendor `.so` files.
+
+**Per-frame aggregation.** Each hook bumps a `thread_local` counter
+(`t_frame_clear_count`, `t_frame_texture_update_count`, etc.). On
+`eglSwapBuffers` the proxy snapshots all counters into a
+`render_frame` event payload, then resets them for the next frame.
+This matches the Windows D3D9 per-Present aggregation.
 
 The profiler writes one `render_frame` event per observed Present instead of
 one event per draw call. The event aggregates counters since the previous
@@ -295,12 +420,14 @@ Check `profilerGetStatus()` during a capture:
 
 ## Validation
 
-Use:
+### Generic capture validation
 
 ```powershell
 python tools\profiler-cli\aneprof_validate.py path\to\capture.aneprof
 python tools\profiler-cli\aneprof_analyze.py path\to\capture.aneprof --require-free-events
 ```
+
+### Windows E2E
 
 The E2E harness runs scenarios A/B/P/C/R/E/T/M/S/L for both architectures:
 
@@ -344,4 +471,55 @@ After packaging, verify the Windows DLL signatures with:
 
 ```powershell
 Get-AuthenticodeSignature AneBuild\windows-32\AneAwesomeUtilsWindows.dll,AneBuild\windows-64\AneAwesomeUtilsWindows.dll,AneBuild\windows-32\AwesomeAneUtils.dll,AneBuild\windows-64\AwesomeAneUtils.dll
+```
+
+### Android E2E
+
+The reference end-to-end Android capture is
+[`tests/scenarios/aneprof_full_parity_validate.json`](../../ddtank-client/tests/scenarios/aneprof_full_parity_validate.json)
+in the consumer repo. It boots the app on Cat S60 (AArch64,
+build-id `7dde220f...`), logs in via the `advanceLogin` helper,
+reaches the Hall, runs a 64MB pregc churn to ensure the GC singleton
+is captured before `profilerStart`, then captures 30s of real-gameplay
+Hall idle with the full hook stack active.
+
+Pull the dump from the device with `adb exec-out` (binary-clean — `adb
+shell cat` does CRLF translation on Windows hosts):
+
+```bash
+MSYS_NO_PATHCONV=1 adb -s 192.168.82.188:5555 exec-out \
+  "run-as br.com.redesurftank.android cat \
+   'br.com.redesurftank.android/Local Store/profiler-output/aneprof-full-parity.aneprof'" \
+  > aneprof-full-parity.aneprof
+```
+
+Expected metrics from a clean 30s capture (Cat S60 build
+`7dde220f...`, all hooks active, server SurfTank/1001):
+
+```
+alloc/free/realloc      :  ~10000 / ~400 / 0       (chunk-tier balanced, unknown_frees=0)
+AS3 alloc/free          :  ~25000 / 0              (Phase 4a sampler firing w/ pc0/pc1)
+gc_cycle                :  ~100 events             (live_count/bytes populated)
+render_frame            :  ~200 frames
+  draw_calls            :  ~6500 (~33/frame)       (Phase 6 v1)
+  primitive_count       :  ~150000
+  clear_count           :  ~200 (1/frame)          (Phase 6 v2 — eglGetProcAddress)
+  set_texture_count     :  ~6500
+  texture_update_count  :  ~400
+  texture_create_count  :  >=2
+  texture_upload_bytes  :  >100 MB
+analyzer diagnostic     : "probable live allocations remain at stop"
+```
+
+Zero-overhead-when-off invariant validation runs without calling
+`profilerStart` and asserts logcat is silent for all profiler tags
+(`AneRenderHook`, `AneAs3SamplerHook`, `AneGcHook`, `AneDeepMemHook`,
+`AneAs3ObjectHook`, `AneAs3RefGraphHook`, `AneAllocTracer`):
+
+```bash
+ANDROID_SERIAL=192.168.82.188:5555 \
+  dotnet run --project tools/AirBuildTool -- \
+    --test tests/scenarios/_tmp_aneprof_phase4a_off_overhead.json \
+    --target android --test-module loadingAirAndroid/loadingAirAndroidDebug \
+    --device 192.168.82.188:5555 --port 7965
 ```
