@@ -398,6 +398,53 @@ std::uint64_t DeepProfilerController::tracked_allocation_size(void* ptr) const {
     return it == shard.entries.end() ? 0 : it->second.size;
 }
 
+std::size_t DeepProfilerController::record_free_chunk_sweep(void* chunk_base,
+                                                              std::uint64_t chunk_size) {
+    if (!cfg_.memory_enabled) return 0;
+    if (chunk_base == nullptr || chunk_size == 0) return 0;
+    if (state_.load(std::memory_order_acquire) != State::Recording) return 0;
+
+    const auto lo = reinterpret_cast<std::uintptr_t>(chunk_base);
+    const auto hi = lo + chunk_size;
+    if (hi <= lo) return 0;  // overflow / wraparound guard
+
+    // Collect ptrs of tracked entries in [lo, hi) under each shard's lock.
+    // Don't erase here — that's the writer thread's job via FreeIfTracked.
+    // Doing it ourselves would race the writer's view of payload.old_size
+    // and leave entries unattributed in the .aneprof.
+    std::vector<std::uintptr_t> ptrs;
+    ptrs.reserve(64);
+    for (auto& shard : allocation_shards_) {
+        std::lock_guard<std::mutex> alloc_lock(shard.mu);
+        for (const auto& kv : shard.entries) {
+            if (kv.first >= lo && kv.first < hi) {
+                ptrs.push_back(kv.first);
+            }
+        }
+    }
+
+    // Enqueue a Free event per collected ptr. Writer-thread
+    // update_allocation_tracking will look up each ptr, take the size from
+    // the alloc record, emit the Free event, and erase the entry. If a
+    // race causes the entry to be removed before the writer processes it
+    // (other thread freed it via record_free_if_tracked), FreeIfTracked
+    // policy silently drops — no double-counting.
+    const auto ts = now_ns();
+    const auto tid = thread_id();
+    const auto method = current_method_id();
+    for (std::uintptr_t p : ptrs) {
+        aneprof::AllocationEvent payload{};
+        payload.ptr = p;
+        payload.method_id = method;
+        enqueue_allocation_event(aneprof::EventType::Free,
+                                 payload,
+                                 ts,
+                                 tid,
+                                 PendingWritePolicy::FreeIfTracked);
+    }
+    return ptrs.size();
+}
+
 bool DeepProfilerController::record_as3_alloc(std::uint64_t sample_id,
                                               const std::string& type_name,
                                               std::uint64_t size,

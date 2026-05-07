@@ -93,6 +93,14 @@ public:
     bool record_free_if_tracked(void* ptr);
     bool record_realloc_if_tracked(void* old_ptr, void* new_ptr, std::uint64_t new_size);
     std::uint64_t tracked_allocation_size(void* ptr) const;
+    // Chunk-walk free sweep: when a chunk is reclaimed via MMgc::Free, the
+    // sub-allocations it contained (tracked at finer tier by GCHeap::Alloc /
+    // FixedMalloc::Alloc proxies) are also implicitly freed. Walks the
+    // allocation shards, finds every entry with ptr in [chunk_base,
+    // chunk_base + chunk_size), enqueues Free events with FreeIfTracked
+    // semantics so the analyzer sees a balanced alloc/free stream. Returns
+    // the count of swept entries (for diagnostics).
+    std::size_t record_free_chunk_sweep(void* chunk_base, std::uint64_t chunk_size);
     bool record_as3_alloc(std::uint64_t sample_id,
                           const std::string& type_name,
                           std::uint64_t size,
