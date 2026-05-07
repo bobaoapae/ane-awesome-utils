@@ -32,6 +32,8 @@ struct BuildIdMatch {
     const char*   build_id_hex;          // hex string, no separators
     std::uintptr_t gcheap_alloc_offset;  // GCHeap::Alloc entry (slow path, calls malloc)
     std::uintptr_t fixed_alloc_offset;   // FixedMalloc::Alloc entry (fast path, free lists)
+    std::uintptr_t mmgc_free_offset;     // MMgc large-chunk Free dual of fixed_alloc_offset's
+                                         // alloc partner (signature `void(this, ptr)`).
 };
 
 // AArch64 build-id 7dde220f62c90358cfc2cb082f5ce63ab0cd3966
@@ -40,17 +42,25 @@ struct BuildIdMatch {
 //                                     each size class has a 104-byte allocator entry
 //                                     with free list + mutex; entry table indexed by
 //                                     `((size+7)>>3)` → byte at .rodata 0xf42982)
-//   Both functions call MMgc internals; together they cover ~all AS3 allocations.
+//   MMgc::Free:           +0x8a167c (2-arg `(this, ptr)`; pthread_mutex_lock around
+//                                     `[this+0x1118] -= ptr_size>>12`; identified via
+//                                     experiment-hook RA scenario `_tmp_aneprof_task11_free_ra`
+//                                     — paired 1:1 with large-Alloc at +0x8a15a4 (59:59 hits
+//                                     during 8-cycle 8MB ByteArray churn 2026-05-06).)
+//   These three functions call MMgc internals; together they cover ~all AS3 allocations.
 //   GCHeap path is for raw chunk allocs (>2KB or arena-grow); FixedMalloc fast path
-//   handles the typical small-object slicing within chunks invisible to libc.
+//   handles the typical small-object slicing within chunks invisible to libc; MMgc::Free
+//   reclaims large-chunk allocations and is the dual of GCHeap::Alloc / FixedMalloc::Alloc
+//   for the per-shard `live_allocations` accounting that DPC tracks.
 //
 // ARMv7 build-id 582a8f65b8dcb741e5eb869ccf9526137270d99e
 //   GCHeap::Alloc:        +0x5541cd (Thumb)
 //   FixedMalloc::Alloc:   TBD (next iter)
+//   MMgc::Free:           TBD (next iter)
 //   Structural match with ARM64 verified for GCHeap (see git log of this file).
 static constexpr BuildIdMatch kKnownBuilds[] = {
-    {"7dde220f62c90358cfc2cb082f5ce63ab0cd3966", 0x89c42c, 0x8a11d8},
-    {"582a8f65b8dcb741e5eb869ccf9526137270d99e", 0x5541cd, 0},  // FixedMalloc TBD
+    {"7dde220f62c90358cfc2cb082f5ce63ab0cd3966", 0x89c42c, 0x8a11d8, 0x8a167c},
+    {"582a8f65b8dcb741e5eb869ccf9526137270d99e", 0x5541cd, 0, 0},  // FixedMalloc + Free TBD
 };
 
 // GCHeap::Alloc signature: void* GCHeap::Alloc(size_t size, int flags);
@@ -60,6 +70,10 @@ typedef void* (*GCHeapAlloc_t)(std::size_t size, int flags);
 // FixedMalloc::Alloc signature: void* FixedMalloc::Alloc(this, size_t size, int flags);
 // AAPCS64: x0 = this, x1 = size, x2 = flags, return in x0.
 typedef void* (*FixedAlloc_t)(void* self, std::size_t size, int flags);
+
+// MMgc::Free signature: void MMgc::Free(this, void* ptr);
+// AAPCS64: x0 = this (allocator/heap), x1 = ptr, no return value.
+typedef void (*MMgcFree_t)(void* self, void* ptr);
 
 // ----- State -----
 
@@ -78,8 +92,11 @@ static thread_local bool t_in_deep_hook = false;
 
 static void* g_stub_gcheap_alloc      = nullptr;
 static void* g_stub_fixed_alloc       = nullptr;
+static void* g_stub_mmgc_free         = nullptr;
 static GCHeapAlloc_t g_orig_gcheap_alloc = nullptr;
 static FixedAlloc_t  g_orig_fixed_alloc  = nullptr;
+static MMgcFree_t    g_orig_mmgc_free    = nullptr;
+static std::atomic<std::uint64_t> g_diag_free_calls{0};
 
 // ----- libCore.so + build-id discovery -----
 
@@ -144,8 +161,10 @@ static const BuildIdMatch* findEntryForBuildId(const std::uint8_t* bytes, std::s
     buildIdToHex(bytes, len, hex);
     for (const auto& m : kKnownBuilds) {
         if (std::strcmp(hex, m.build_id_hex) == 0) {
-            LOGI("build-id matched: %s → gcheap=0x%lx fixed=0x%lx", hex,
-                 (unsigned long)m.gcheap_alloc_offset, (unsigned long)m.fixed_alloc_offset);
+            LOGI("build-id matched: %s → gcheap=0x%lx fixed=0x%lx free=0x%lx", hex,
+                 (unsigned long)m.gcheap_alloc_offset,
+                 (unsigned long)m.fixed_alloc_offset,
+                 (unsigned long)m.mmgc_free_offset);
             return &m;
         }
     }
@@ -220,6 +239,30 @@ static void* proxy_FixedAlloc(void* self, std::size_t size, int flags) {
     }
     t_in_deep_hook = false;
     return p;
+}
+
+// MMgc::Free proxy — dual of FixedMalloc::Alloc / GCHeap::Alloc, reclaims a
+// previously-allocated chunk. Matches the Windows `hook_mmgc_free`
+// semantics (`record_free_if_tracked` keeps DPC's per-shard allocation map
+// balanced so `live_allocations` reflects truly leaked allocations rather
+// than monotonically growing churn-and-reuse traffic). Re-entry guard is
+// shared with the alloc proxies so a record_free_if_tracked path that
+// itself triggers a libc free won't recurse here.
+static void proxy_MMgcFree(void* self, void* ptr) {
+    if (t_in_deep_hook) {
+        if (g_orig_mmgc_free) g_orig_mmgc_free(self, ptr);
+        return;
+    }
+    t_in_deep_hook = true;
+    g_diag_free_calls.fetch_add(1, std::memory_order_relaxed);
+    if (g_orig_mmgc_free) g_orig_mmgc_free(self, ptr);
+    if (ptr != nullptr && g_active.load(std::memory_order_acquire)) {
+        DeepProfilerController* dpc = g_controller.load(std::memory_order_acquire);
+        if (dpc != nullptr) {
+            dpc->record_free_if_tracked(ptr);
+        }
+    }
+    t_in_deep_hook = false;
 }
 
 } // namespace
@@ -303,6 +346,33 @@ bool AndroidDeepMemoryHook::install(DeepProfilerController* controller) {
              "GCHeap::Alloc only");
     }
 
+    // Install MMgc::Free hook (dual of the alloc proxies). Required for
+    // `live_allocations` parity with Windows — without it, every Phase 5
+    // alloc adds an entry to the per-shard map but matching frees are
+    // never recorded, so the live counter grows monotonically and masks
+    // real leaks under the noise of churn-and-reuse.
+    if (m->mmgc_free_offset != 0) {
+        std::uintptr_t free_addr = info.base + m->mmgc_free_offset;
+        g_stub_mmgc_free = shadowhook_hook_func_addr(
+            reinterpret_cast<void*>(free_addr),
+            reinterpret_cast<void*>(&proxy_MMgcFree),
+            reinterpret_cast<void**>(&g_orig_mmgc_free));
+        if (g_stub_mmgc_free == nullptr) {
+            int err = shadowhook_get_errno();
+            LOGW("install: MMgc::Free hook FAILED at 0x%lx: errno=%d %s — "
+                 "continuing without free tracking (live_allocations will "
+                 "grow unboundedly)", (unsigned long)free_addr, err,
+                 shadowhook_to_errmsg(err));
+        } else {
+            LOGI("install: MMgc::Free hook OK (target=0x%lx, stub=%p) — "
+                 "live_allocations parity with Windows enabled",
+                 (unsigned long)free_addr, g_stub_mmgc_free);
+        }
+    } else {
+        LOGI("install: MMgc::Free offset not known for this arch — "
+             "live_allocations will grow monotonically");
+    }
+
     g_active.store(true, std::memory_order_release);
     installed_ = true;
     return true;
@@ -318,8 +388,13 @@ void AndroidDeepMemoryHook::uninstall() {
         shadowhook_unhook(g_stub_fixed_alloc);
         g_stub_fixed_alloc = nullptr;
     }
+    if (g_stub_mmgc_free) {
+        shadowhook_unhook(g_stub_mmgc_free);
+        g_stub_mmgc_free = nullptr;
+    }
     g_orig_gcheap_alloc = nullptr;
     g_orig_fixed_alloc = nullptr;
+    g_orig_mmgc_free = nullptr;
     g_controller.store(nullptr, std::memory_order_release);
     installed_ = false;
 }

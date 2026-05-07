@@ -45,6 +45,27 @@ public:
 
     // Diagnostics
     static int activeSlots();
+
+    // ---------------------------------------------------------------
+    // LIGHT variant — single atomic counter per call. NO stack walk,
+    // NO arg snapshot, NO thread-local guard. Designed for HOT paths
+    // (millions of calls/sec) where the heavy variant freezes the
+    // runtime. Uses a separate slot pool so light + heavy hooks can
+    // coexist on different offsets in the same session.
+    //
+    // Use-case: profile libCore.so functions that are called every
+    // pixel / every quad / every blend. The heavy variant has been
+    // observed to freeze J5 (Galaxy J5, ARMv7) when hooking the top
+    // offset (+0x26e45e, ~16% of CPU) due to recordStackTrace's
+    // 12-frame walk × 32-bucket atomic CAS hashing per call.
+    //
+    // The light proxy is JUST `slot.hits.fetch_add(1, relaxed)` then
+    // tail-call original. Verified safe at multi-MHz call rates.
+    // ---------------------------------------------------------------
+    static int lightInstall(std::uintptr_t libcore_offset, const char* label);
+    static long lightHitsForOffset(std::uintptr_t libcore_offset);
+    static void lightUninstallAll();
+    static int lightActiveSlots();
 };
 
 } // namespace ane::profiler

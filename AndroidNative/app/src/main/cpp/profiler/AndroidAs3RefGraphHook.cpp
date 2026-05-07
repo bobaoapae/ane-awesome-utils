@@ -146,15 +146,18 @@ static void proxy_addEventListener(void* self, void* type, void* listener,
 
     DeepProfilerController* dpc = g_controller.load(std::memory_order_acquire);
     if (dpc != nullptr && self != nullptr && listener != nullptr) {
-        char marker_value[256];
-        std::snprintf(marker_value, sizeof(marker_value),
-                      "{\"owner\":\"0x%llx\",\"dependent\":\"0x%llx\","
-                      "\"kind\":\"EventListener\",\"useCapture\":%ld,"
-                      "\"useWeakRef\":%ld}",
-                      (unsigned long long)reinterpret_cast<std::uintptr_t>(self),
-                      (unsigned long long)reinterpret_cast<std::uintptr_t>(listener),
-                      useCapture & 0xff, useWeakRef & 0xff);
-        dpc->marker("as3_ref_add", marker_value);
+        // Emit typed As3ReferenceEx event (EventType=15) for full Windows
+        // parity. owner=EventDispatcher, dependent=listener Function, kind=
+        // EventListener, label="weak"/"strong" via useWeakRef flag. Analyzer
+        // uses these edges to reconstruct the AS3 reference graph and detect
+        // retain cycles + dangling listeners.
+        const char* label = (useWeakRef & 0xff) ? "weak" : "strong";
+        dpc->record_as3_reference_ex(
+            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(self)),
+            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(listener)),
+            aneprof::As3ReferenceKind::EventListener,
+            std::string(label),
+            false /*inferred*/);
     }
 
     if (g_orig_addEventListener)

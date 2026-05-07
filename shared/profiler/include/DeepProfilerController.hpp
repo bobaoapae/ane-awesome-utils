@@ -13,7 +13,7 @@
 #include <condition_variable>
 #include <array>
 #include <cstdint>
-#include <fstream>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -97,6 +97,13 @@ public:
                           const std::string& type_name,
                           std::uint64_t size,
                           const std::string& stack);
+    // Hot-path variant: takes raw pointers + lengths to avoid two std::string
+    // constructions on the per-event path (~150-300 ns/event saved on the
+    // Phase 4a sampler proxy where 12k+ allocs/30s are typical).
+    bool record_as3_alloc_raw(std::uint64_t sample_id,
+                              const char* type_name, std::size_t type_name_len,
+                              std::uint64_t size,
+                              const char* stack, std::size_t stack_len);
     bool record_as3_free(std::uint64_t sample_id,
                          const std::string& type_name,
                          std::uint64_t size);
@@ -155,7 +162,12 @@ public:
     std::uint32_t current_method_id() const;
 
 private:
-    static constexpr std::size_t kInlineRecordBytes = 128;
+    // 256 bytes inline buffer fits all common event records without heap
+    // allocation. Markers (esp. as3_alloc_sampler with name + JSON payload)
+    // are typically 110-150 bytes; staying inline avoids vector::resize
+    // calling libc malloc, which is hooked by alloc_tracer and triggers
+    // re-entrancy that has caused 2-byte file misalignments under load.
+    static constexpr std::size_t kInlineRecordBytes = 256;
     static constexpr std::size_t kWriterQueueCapacity = 262144;
     static constexpr std::size_t kFileBufferBytes = 8 * 1024 * 1024;
     static constexpr std::size_t kAllocationShardCount = 256;
@@ -246,7 +258,11 @@ private:
 
     Config cfg_;
     std::atomic<State> state_{State::Idle};
-    std::ofstream file_;
+    // Native FILE* avoids libc++ basic_filebuf + pubsetbuf, which produced
+    // unaccounted stray bytes in event captures (see PROGRESS.md gap notes).
+    // setvbuf with our own buffer keeps syscall count low without delegating
+    // buffer management to filebuf.
+    std::FILE* file_ = nullptr;
     std::vector<char> file_buffer_;
     mutable std::mutex lifecycle_mu_;
     mutable std::mutex file_mu_;

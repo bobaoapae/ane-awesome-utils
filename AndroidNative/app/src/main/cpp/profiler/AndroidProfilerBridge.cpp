@@ -27,6 +27,10 @@
 
 #include <jni.h>
 #include <android/log.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <link.h>
+#include <cstring>
 #include "AndroidRuntimeHook.hpp"
 #include "AndroidRenderHook.hpp"
 #include "AndroidDeepMemoryHook.hpp"
@@ -332,8 +336,16 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStartDeep(
     // Phase 7a: install GC observer hook on libCore.so:MMgc::GC::Collect.
     // Emits one GcCycle event per Collect() call so the analyzer can correlate
     // alloc/free deltas around GC cycles. Build-id-pinned, no-op on unknown.
+    //
+    // If `profilerWarmupGcObserver` was called earlier (singleton already
+    // captured), REUSE the existing hook — install() is idempotent and
+    // upgrades the controller. This is critical: replacing g_gc_hook with
+    // a new instance destroys the warmup state and forces a re-hook of
+    // an already-patched function (shadowhook double-hook = corruption).
     if (cfg.memory_enabled) {
-        g_gc_hook = std::make_unique<ane::profiler::AndroidGcHook>();
+        if (!g_gc_hook) {
+            g_gc_hook = std::make_unique<ane::profiler::AndroidGcHook>();
+        }
         if (!g_gc_hook->install(g_deep_ctrl.get())) {
             LOGW("nativeStartDeep: GC observer hook install failed — GcCycle events disabled");
             g_gc_hook.reset();
@@ -372,9 +384,54 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeStartDeep(
     }
 
     if (jAs3Sampling != JNI_FALSE) {
-        LOGW("nativeStartDeep: as3Sampling requested but Android AS3 method "
-             "walker / IMemorySampler hook is not yet implemented (Phase 3+4 "
-             "TBD). Continuing without AS3 stack annotation.");
+        // Phase 4a productive — install IMemorySampler::recordAllocationSample
+        // hook (resolved via gc_this+0x10 → AvmCore+0x68 → vftable[12]). Hook
+        // proxy walks Traits to resolve class name + captures 2-frame native
+        // stack (LR + saved-FP+8) for alloc-site attribution. Cost when
+        // capture inactive: zero (single g_active.load early-return).
+        //
+        // EAGER-ONLY install: succeeds when GC singleton was already captured
+        // by AneGcHook (i.e., a Collect cycle fired before profilerStart).
+        // For warm apps with normal AS3 activity prior to profilerStart this
+        // is the typical case. For cold-start scenarios (profilerStart called
+        // immediately after launch), eager fails — we skip Phase 4a and
+        // rely on Phase 4c for typed-alloc tracking.
+        //
+        // No polling-thread fallback: shadowhook's prologue patch is not
+        // safe against concurrent calls to the patched function under
+        // heavy churn → SIGSEGV from half-patched prologue.
+        if (g_as3_sampler_hook) {
+            g_as3_sampler_hook->uninstall();
+            g_as3_sampler_hook.reset();
+        }
+        g_as3_sampler_hook = std::make_unique<ane::profiler::AndroidAs3SamplerHook>();
+        if (g_as3_sampler_hook->install(g_deep_ctrl.get())) {
+            LOGI("nativeStartDeep: AS3 sampler hook installed (Phase 4a, eager)");
+        } else {
+            // Eager install failed — GC singleton not captured at startDeep.
+            //
+            // We do NOT do polling-thread auto-install: shadowhook's prologue
+            // patch is not safe against concurrent calls to the patched
+            // function. When AVM activity is high (e.g., during AS3 churn),
+            // the install can race with `recordAllocationSample` calls and
+            // SIGSEGV the process from a half-patched function.
+            //
+            // Caller MUST request install explicitly via
+            // `profilerAs3SamplerInstall()` JNI from a quiet window:
+            //   1. Wait for at least one natural GC (or call requestGc())
+            //   2. Briefly pause AS3-driven allocations (no churn)
+            //   3. Call profilerAs3SamplerInstall()
+            //
+            // Phase 4c (typed-alloc resolver) is already installed and
+            // captures all AS3 allocs without needing this hook — Phase 4a
+            // (with pc0/pc1 attribution) is an additive enhancement, not a
+            // requirement for parity. Hook obj kept around for explicit
+            // install request later.
+            LOGW("nativeStartDeep: AS3 sampler eager install failed (GC "
+                 "singleton not yet captured). Phase 4c remains active. "
+                 "Call profilerAs3SamplerInstall() explicitly in a quiet "
+                 "window (no AS3 allocation churn) for pc0/pc1 attribution.");
+        }
     }
 
     LOGI("nativeStartDeep: ok output=%s timing=%d memory=%d snapshots=%d "
@@ -601,6 +658,39 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeRequestGc(
     return g_gc_hook->requestCollect() ? JNI_TRUE : JNI_FALSE;
 }
 
+// Warmup helper — install GcHook EARLY (at app boot) so natural startup
+// GCs are observed and the GC singleton is captured BEFORE the user
+// calls profilerStartDeep. With singleton already captured, profilerStart's
+// eager Phase 4a install succeeds (otherwise it skips Phase 4a and only
+// Phase 4c is active).
+//
+// Idempotent: safe to call multiple times. Re-entry just upgrades the
+// controller (currently null until profilerStartDeep wires DPC).
+//
+// Cost when called early: 1 shadowhook patch (4 bytes) on
+// MMgc::GC::Collect prologue. The proxy is gated on `g_active.load`
+// AND `g_controller.load() != nullptr` for event recording — until
+// profilerStartDeep, GC events are NOT recorded; only the singleton is
+// captured. Net cost: ~5ns/GC cycle (rare event), zero per-alloc.
+JNIEXPORT jboolean JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeWarmupGcObserver(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (!g_gc_hook) {
+        g_gc_hook = std::make_unique<ane::profiler::AndroidGcHook>();
+    }
+    // Pass nullptr controller — singleton capture path doesn't need DPC.
+    // Once profilerStartDeep is called, it'll re-install (idempotent) and
+    // wire the controller.
+    bool ok = g_gc_hook->install(nullptr);
+    if (!ok) {
+        LOGW("nativeWarmupGcObserver: GcHook install failed (libCore.so not "
+             "loaded yet, or unknown build-id)");
+        g_gc_hook.reset();
+    }
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 // RA helper — dump AvmCore via the GC observer hook (gc+0x10 = AvmCore*).
 // Used to take labeled snapshots before/after `flash.sampler.startSampling()`
 // so we can diff in logcat and identify the m_sampler offset.
@@ -699,6 +789,85 @@ Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeExperimentHookUninstallA
         JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> lk(g_mu);
     ane::profiler::AndroidExperimentHook::uninstallAll();
+}
+
+// LIGHT variant — single atomic counter, no stack walk. Use for hot
+// libCore.so offsets where the heavy variant freezes the runtime due
+// to per-call overhead × millions of calls/sec. Verified safe at
+// multi-MHz call rates on J5 (Galaxy J5, ARMv7).
+JNIEXPORT jint JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeExperimentHookLightInstall(
+        JNIEnv* env, jclass, jlong jOffset, jstring jLabel) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    std::string label = jLabel ? jstrToCpp(env, jLabel) : std::string("?");
+    return ane::profiler::AndroidExperimentHook::lightInstall(
+        static_cast<std::uintptr_t>(jOffset), label.c_str());
+}
+
+JNIEXPORT jlong JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeExperimentHookLightHits(
+        JNIEnv* env, jclass, jlong jOffset) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return static_cast<jlong>(
+        ane::profiler::AndroidExperimentHook::lightHitsForOffset(
+            static_cast<std::uintptr_t>(jOffset)));
+}
+
+JNIEXPORT void JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeExperimentHookLightUninstallAll(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    ane::profiler::AndroidExperimentHook::lightUninstallAll();
+}
+
+// RA helper: compute the LIBCORE.SO RELATIVE OFFSET of
+// recordAllocationSample (Adobe IMemorySampler vtable[12]) by walking
+// from the captured GC singleton: gc_this+0x10 = AvmCore,
+// AvmCore+0x68 = Sampler*, *(sampler) = vtable, vtable[+12*8] = fn.
+// Returns OFFSET (subtractof libCore base) so result is portable to
+// experimentHookInstall which expects offsets, not absolute addrs.
+JNIEXPORT jlong JNICALL
+Java_br_com_redesurftank_aneawesomeutils_Profiler_nativeGetSamplerRecordAllocAddr(
+        JNIEnv* env, jclass) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    extern void* getCapturedGcSingleton();
+    void* gc = getCapturedGcSingleton();
+    if (gc == nullptr) return 0;
+
+    auto safeRead = [](std::uintptr_t addr, std::uintptr_t& out) -> bool {
+        if (addr < 0x1000 || (addr & 7)) return false;
+        long ps = sysconf(_SC_PAGESIZE);
+        std::uintptr_t page = addr & ~(static_cast<std::uintptr_t>(ps) - 1);
+        unsigned char vec = 0;
+        if (mincore(reinterpret_cast<void*>(page), ps, &vec) != 0) return false;
+        if (!(vec & 1)) return false;
+        out = *reinterpret_cast<volatile std::uintptr_t*>(addr);
+        return true;
+    };
+
+    std::uintptr_t avmcore = 0, sampler = 0, vtable = 0, fn = 0;
+    if (!safeRead(reinterpret_cast<std::uintptr_t>(gc) + 0x10, avmcore)) return 0;
+    if (!safeRead(avmcore + 0x68, sampler)) return 0;
+    if (!safeRead(sampler, vtable)) return 0;
+    if (!safeRead(vtable + 12 * 8, fn)) return 0;
+
+    // Compute libCore base via dl_iterate_phdr — same logic as other hooks.
+    struct LibcoreFinder {
+        std::uintptr_t base = 0;
+        static int cb(struct dl_phdr_info* info, size_t, void* data) {
+            const char* name = info->dlpi_name;
+            if (!name) return 0;
+            const char* slash = strrchr(name, '/');
+            const char* base = slash ? slash + 1 : name;
+            if (strcmp(base, "libCore.so") != 0) return 0;
+            reinterpret_cast<LibcoreFinder*>(data)->base =
+                static_cast<std::uintptr_t>(info->dlpi_addr);
+            return 1;
+        }
+    } finder;
+    dl_iterate_phdr(LibcoreFinder::cb, &finder);
+    if (finder.base == 0 || fn < finder.base) return 0;
+    return static_cast<jlong>(fn - finder.base);
 }
 
 } // extern "C"

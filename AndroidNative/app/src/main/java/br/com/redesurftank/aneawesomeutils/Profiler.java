@@ -150,6 +150,28 @@ public final class Profiler {
     }
 
     /**
+     * Warmup helper — install the GC observer hook EARLY (at app boot) so
+     * natural startup GCs are observed and the GC singleton is captured
+     * BEFORE the user calls profilerStart with as3ObjectSampling=true.
+     *
+     * Without this warmup, profilerStart's eager Phase 4a sampler hook
+     * install fails (singleton not yet captured), and pc0/pc1 attribution
+     * is unavailable for the session — only Phase 4c typed-alloc events
+     * are emitted.
+     *
+     * Idempotent: safe to call multiple times. Cost when active: ~5ns
+     * per natural GC cycle (rare). Per-alloc cost: zero.
+     *
+     * Recommended call site: very early in AS3 boot, e.g., from the
+     * Loading.as init flow or first frame after app shows. Returns true
+     * on successful hook install; false if libCore.so isn't loaded yet
+     * or the build-id isn't recognized (re-call later in that case).
+     */
+    public static boolean warmupGcObserver() {
+        return nativeWarmupGcObserver();
+    }
+
+    /**
      * RA helper — dump AvmCore (recovered via gc_this+0x10 from the captured
      * GC singleton) with a labeled prefix. Used during Phase 4a sampler RA
      * to take pre/post snapshots around {@code flash.sampler.startSampling()}.
@@ -212,6 +234,29 @@ public final class Profiler {
         nativeExperimentHookUninstallAll();
     }
 
+    /**
+     * LIGHT variant — single atomic counter per call. NO stack walk,
+     * NO arg snapshot. For HOT libCore.so functions where the heavy
+     * variant freezes the runtime (J5 Galaxy ARMv7 hooked +0x26e45e
+     * with the heavy variant → AS3 timer-driven WebSocket timed out
+     * → "Connection closed" because hook overhead × millions of
+     * calls/sec stalled the AS3 main loop).
+     *
+     * Slot pool is separate from the heavy hook — light + heavy can
+     * coexist on different offsets in the same session.
+     */
+    public static int experimentHookLightInstall(long libcoreOffset, String label) {
+        return nativeExperimentHookLightInstall(libcoreOffset, label);
+    }
+
+    public static long experimentHookLightHits(long libcoreOffset) {
+        return nativeExperimentHookLightHits(libcoreOffset);
+    }
+
+    public static void experimentHookLightUninstallAll() {
+        nativeExperimentHookLightUninstallAll();
+    }
+
     private static native int     nativeStart(String outputPath, String headerJson, int telemetryPort);
     private static native int     nativeStop();
     private static native String  nativeGetStatus();
@@ -232,6 +277,7 @@ public final class Profiler {
                                                      int allocationCount, long allocationBytes,
                                                      String label);
     private static native boolean nativeRequestGc();
+    private static native boolean nativeWarmupGcObserver();
     private static native boolean nativeDumpAvmCore(String label);
     private static native boolean nativeSamplerHookInstall();
     private static native boolean nativeSamplerHookUninstall();
@@ -240,6 +286,20 @@ public final class Profiler {
     private static native int     nativeExperimentHookInstall(long offset, String label);
     private static native long    nativeExperimentHookHits(long offset);
     private static native void    nativeExperimentHookUninstallAll();
+    private static native int     nativeExperimentHookLightInstall(long offset, String label);
+    private static native long    nativeExperimentHookLightHits(long offset);
+    private static native void    nativeExperimentHookLightUninstallAll();
+
+    /**
+     * RA helper — returns absolute address of recordAllocationSample
+     * (Adobe IMemorySampler vtable[12]) computed via captured GC singleton.
+     * Returns 0 if GC not yet captured. Use as `experimentHookInstall`
+     * target to capture stack traces of every AS3 alloc.
+     */
+    public static long getSamplerRecordAllocAddr() {
+        return nativeGetSamplerRecordAllocAddr();
+    }
+    private static native long    nativeGetSamplerRecordAllocAddr();
 
     private Profiler() {}
 }

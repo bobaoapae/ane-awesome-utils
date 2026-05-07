@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <ctime>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <thread>
@@ -15,12 +16,6 @@ thread_local std::vector<std::uint32_t> t_method_stack;
 
 std::string default_header_json() {
     return R"({"format":"aneprof","formatVersion":1,"backend":"deep-native","platform":"windows","airSdk":"51.1.3.10","wireProtocol":"aneprof-events"})";
-}
-
-template <typename T>
-bool write_pod(std::ofstream& out, const T& value) {
-    out.write(reinterpret_cast<const char*>(&value), static_cast<std::streamsize>(sizeof(T)));
-    return static_cast<bool>(out);
 }
 
 template <typename T>
@@ -132,22 +127,23 @@ bool DeepProfilerController::start(const Config& cfg) {
     }
 
     file_buffer_.assign(kFileBufferBytes, 0);
-    file_.rdbuf()->pubsetbuf(file_buffer_.data(),
-                             static_cast<std::streamsize>(file_buffer_.size()));
-    file_.open(cfg_.output_path, std::ios::binary | std::ios::trunc);
-    if (!file_.is_open()) {
+    file_ = std::fopen(cfg_.output_path.c_str(), "wb");
+    if (file_ == nullptr) {
         state_.store(State::Error, std::memory_order_release);
         return false;
     }
+    // Full buffering with our own 8MB region. setvbuf with _IOFBF must be
+    // called immediately after fopen and before any other I/O.
+    std::setvbuf(file_, file_buffer_.data(), _IOFBF, file_buffer_.size());
 
     const auto started_utc = static_cast<std::uint64_t>(std::time(nullptr));
     const auto header = aneprof::make_header_bytes(
         static_cast<std::uint32_t>(cfg_.header_json.size()), started_utc);
-    file_.write(reinterpret_cast<const char*>(header.data()),
-                static_cast<std::streamsize>(header.size()));
-    file_.write(cfg_.header_json.data(), static_cast<std::streamsize>(cfg_.header_json.size()));
-    if (!file_) {
-        file_.close();
+    if (std::fwrite(header.data(), 1, header.size(), file_) != header.size() ||
+        std::fwrite(cfg_.header_json.data(), 1, cfg_.header_json.size(), file_)
+            != cfg_.header_json.size()) {
+        std::fclose(file_);
+        file_ = nullptr;
         state_.store(State::Error, std::memory_order_release);
         return false;
     }
@@ -194,7 +190,7 @@ bool DeepProfilerController::stop() {
 
     const auto [live_count, live_bytes] = live_allocation_totals();
 
-    if (file_.is_open()) {
+    if (file_ != nullptr) {
         const auto footer = aneprof::make_footer_bytes(
             events_.load(std::memory_order_relaxed),
             dropped_.load(std::memory_order_relaxed),
@@ -202,10 +198,10 @@ bool DeepProfilerController::stop() {
             static_cast<std::uint64_t>(std::time(nullptr)),
             live_count,
             live_bytes);
-        file_.write(reinterpret_cast<const char*>(footer.data()),
-                    static_cast<std::streamsize>(footer.size()));
-        file_.flush();
-        file_.close();
+        std::fwrite(footer.data(), 1, footer.size(), file_);
+        std::fflush(file_);
+        std::fclose(file_);
+        file_ = nullptr;
     }
     writer_queue_.reset();
     writer_enqueue_pos_.store(0, std::memory_order_relaxed);
@@ -406,25 +402,49 @@ bool DeepProfilerController::record_as3_alloc(std::uint64_t sample_id,
                                               const std::string& type_name,
                                               std::uint64_t size,
                                               const std::string& stack) {
+    return record_as3_alloc_raw(sample_id,
+                                type_name.data(), type_name.size(),
+                                size,
+                                stack.data(), stack.size());
+}
+
+namespace {
+// Per-thread reusable scratch buffer for record_as3_alloc_raw. Avoids the
+// per-event vector heap alloc on the Phase 4a hot path. Capacity grows but
+// never shrinks; the working set is bounded by max(name_len + stack_len)
+// across all sampler events on the thread (typically <128 B).
+thread_local std::vector<std::uint8_t> t_as3_alloc_scratch;
+}  // namespace
+
+bool DeepProfilerController::record_as3_alloc_raw(std::uint64_t sample_id,
+                                                  const char* type_name,
+                                                  std::size_t type_name_len,
+                                                  std::uint64_t size,
+                                                  const char* stack,
+                                                  std::size_t stack_len) {
     if (state_.load(std::memory_order_acquire) != State::Recording) return false;
 
     aneprof::As3ObjectEvent fixed{};
     fixed.sample_id = sample_id;
     fixed.size = size;
-    fixed.type_name_len = static_cast<std::uint32_t>(type_name.size());
-    fixed.stack_len = static_cast<std::uint32_t>(stack.size());
+    fixed.type_name_len = static_cast<std::uint32_t>(type_name_len);
+    fixed.stack_len = static_cast<std::uint32_t>(stack_len);
 
-    std::vector<std::uint8_t> payload(sizeof(fixed) + type_name.size() + stack.size());
-    std::memcpy(payload.data(), &fixed, sizeof(fixed));
-    if (!type_name.empty()) {
-        std::memcpy(payload.data() + sizeof(fixed), type_name.data(), type_name.size());
+    const std::size_t total = sizeof(fixed) + type_name_len + stack_len;
+    if (t_as3_alloc_scratch.size() < total) {
+        t_as3_alloc_scratch.resize(total);
     }
-    if (!stack.empty()) {
-        std::memcpy(payload.data() + sizeof(fixed) + type_name.size(), stack.data(), stack.size());
+    std::uint8_t* dst = t_as3_alloc_scratch.data();
+    std::memcpy(dst, &fixed, sizeof(fixed));
+    if (type_name_len != 0 && type_name != nullptr) {
+        std::memcpy(dst + sizeof(fixed), type_name, type_name_len);
+    }
+    if (stack_len != 0 && stack != nullptr) {
+        std::memcpy(dst + sizeof(fixed) + type_name_len, stack, stack_len);
     }
     return write_event(aneprof::EventType::As3Alloc,
-                       payload.data(),
-                       static_cast<std::uint32_t>(payload.size()));
+                       dst,
+                       static_cast<std::uint32_t>(total));
 }
 
 bool DeepProfilerController::record_as3_free(std::uint64_t sample_id,
@@ -997,9 +1017,9 @@ void DeepProfilerController::writer_thread_main() {
 
         if (event.record_size == 0) continue;
         if (!prepare_event_for_write(event)) continue;
-        file_.write(reinterpret_cast<const char*>(event.data()),
-                    static_cast<std::streamsize>(event.record_size));
-        if (!file_) {
+        if (file_ == nullptr) continue;
+        const auto wrote = std::fwrite(event.data(), 1, event.record_size, file_);
+        if (wrote != event.record_size) {
             state_.store(State::Error, std::memory_order_release);
             dropped_.fetch_add(1, std::memory_order_relaxed);
             continue;

@@ -325,26 +325,19 @@ static void drainThreadMain() {
                 bool resolved = resolveClassName(obj, name_buf, sizeof(name_buf));
                 if (resolved) {
                     g_diag_names_resolved.fetch_add(1, std::memory_order_relaxed);
-                    // Emit As3Alloc with class name as label/payload.
-                    // Note: aneprof currently uses As3ObjectEvent {sample_id, size,
-                    // type_name_len, stack_len} + variable label. We synthesize a
-                    // unique sample_id from ptr to allow downstream dedup.
-                    aneprof::As3ObjectEvent ev{};
-                    ev.sample_id = static_cast<std::uint64_t>(obj);
-                    ev.size = entry.size;
-                    ev.type_name_len = static_cast<std::uint32_t>(std::strlen(name_buf));
-                    ev.stack_len = 0;
-                    // The DPC's As3 emission path needs the event + name bytes
-                    // appended. For now, emit via a generic marker — actual
-                    // As3Alloc EventType emission requires DPC method we'll wire
-                    // up next iteration once API surface is confirmed.
-                    char marker_value[160];
-                    std::snprintf(marker_value, sizeof(marker_value),
-                                  "{\"class\":\"%s\",\"size\":%llu,\"ptr\":\"0x%llx\"}",
-                                  name_buf,
-                                  (unsigned long long)entry.size,
-                                  (unsigned long long)obj);
-                    dpc->marker("as3_alloc", marker_value);
+                    // Emit a typed As3Alloc event (EventType 12) matching the
+                    // Windows-side `WindowsAs3ObjectHook::record_as3_alloc` payload
+                    // shape, so the analyzer can read both platforms with the
+                    // same parser. sample_id = ptr (unique per alloc, lets the
+                    // analyzer correlate with the eventual As3Free).
+                    // No native stack from this drain path (the proxy that
+                    // queued this entry doesn't capture frame[N>1]); Phase 4a's
+                    // sampler hook is the source of pc0/pc1 attribution and
+                    // emits its own As3Alloc events with stack metadata.
+                    dpc->record_as3_alloc_raw(static_cast<std::uint64_t>(obj),
+                                              name_buf, std::strlen(name_buf),
+                                              static_cast<std::uint64_t>(entry.size),
+                                              nullptr, 0);
                 } else {
                     g_diag_names_unresolved.fetch_add(1, std::memory_order_relaxed);
                 }

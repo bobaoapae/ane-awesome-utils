@@ -392,24 +392,30 @@ static void proxy_GCCollect(void* gc_this) {
         LOGW("GC singleton changed: %p -> %p (multi-GC?)", prev, gc_this);
     }
 
+    DeepProfilerController* dpc = g_controller.load(std::memory_order_acquire);
+    DeepProfilerController::Status before{};
+    if (dpc != nullptr) before = dpc->status();
+
     const std::uint64_t t0 = nowNs();
     g_orig_collect(gc_this);
     const std::uint64_t t1 = nowNs();
+    (void)t1;
 
-    DeepProfilerController* dpc = g_controller.load(std::memory_order_acquire);
     if (dpc != nullptr) {
-        // Heap stats unavailable without RA on `GC::GetTotalGCBytes` (TBD —
-        // would let us populate before/after live counts/bytes properly).
-        // For now: emit GcCycle with timing-only payload — analyzer infers
-        // pressure from alloc/free event deltas around the cycle window.
-        // gc_id = start timestamp (cheap monotonic id).
+        // Mirror Windows ProfilerAneBindings::profiler_request_gc: read
+        // before/after live counters from DPC's own allocation tracking and
+        // emit them on the GcCycle event. The values are bounded by Phase 5's
+        // alloc-side tracking (free-side hook still missing — task #11) so
+        // `before` will trend higher than reality; that's the same approximation
+        // Windows uses. gc_id = start timestamp (cheap monotonic id).
+        const DeepProfilerController::Status after = dpc->status();
         dpc->record_gc_cycle(
             /* gc_id            */ t0,
             /* kind             */ aneprof::GcCycleKind::NativeObserved,
-            /* before_live_count*/ 0,
-            /* before_live_bytes*/ 0,
-            /* after_live_count */ 0,
-            /* after_live_bytes */ 0,
+            /* before_live_count*/ before.live_allocations,
+            /* before_live_bytes*/ before.live_bytes,
+            /* after_live_count */ after.live_allocations,
+            /* after_live_bytes */ after.live_bytes,
             /* label            */ std::string(),
             /* flags            */ 0);
     }
@@ -423,8 +429,16 @@ AndroidGcHook::~AndroidGcHook() {
 }
 
 bool AndroidGcHook::install(DeepProfilerController* controller) {
-    if (installed_) return true;
-    if (controller == nullptr) return false;
+    // Controller may be null for warmup-only install: shadowhook + singleton
+    // capture without DPC event recording. Caller can later upgrade via
+    // setController(). Proxy guards `if (dpc != nullptr)` so null is safe.
+    if (installed_) {
+        // Already installed — just upgrade the controller if requested.
+        if (controller != nullptr) {
+            g_controller.store(controller, std::memory_order_release);
+        }
+        return true;
+    }
 
     LibcoreInfo info{};
     dl_iterate_phdr(phdrCallback, &info);

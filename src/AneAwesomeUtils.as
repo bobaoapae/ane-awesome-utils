@@ -1247,6 +1247,28 @@ public class AneAwesomeUtils {
     }
 
     /**
+     * Android-only: install GC observer hook EARLY (at app boot) so natural
+     * startup GCs are observed and the GC singleton is captured BEFORE
+     * profilerStart is called. Without this, profilerStart's eager Phase 4a
+     * sampler-hook install fails (singleton not yet captured) and pc0/pc1
+     * attribution is unavailable for the session — only Phase 4c typed-alloc
+     * events are emitted (still useful for leak detection via class names).
+     *
+     * Idempotent. Cost when active: ~5ns per natural GC cycle (rare); zero
+     * per AS3 allocation.
+     *
+     * Recommended call site: very early in AS3 boot, e.g., from the Loading
+     * init flow or first frame after app shows. Returns true on successful
+     * hook install; false if libCore.so isn't loaded yet (re-call later).
+     * Always returns true on Windows/Mac/iOS (no-op).
+     */
+    public function profilerWarmupGcObserver():Boolean {
+        if (!_successInit) return false;
+        if (!IsAndroid()) return true;  // no-op on non-Android
+        return _extContext.call("awesomeUtils_profilerWarmupGcObserver") as Boolean;
+    }
+
+    /**
      * RA-only helper. Dumps AvmCore* (recovered from the captured GC
      * singleton at gc+0x10) to logcat tag AneGcHook. Used during Phase 4a
      * sampler RA: take a snapshot before flash.sampler.startSampling() and
@@ -1318,6 +1340,44 @@ public class AneAwesomeUtils {
         if (!_successInit) return false;
         if (!IsAndroid()) return false;
         return _extContext.call("awesomeUtils_profilerExperimentHookUninstallAll") as Boolean;
+    }
+
+    /**
+     * LIGHT experiment hook — counter only, NO stack walk. For HOT
+     * libCore.so functions where the heavy variant freezes the runtime
+     * (Galaxy J5 ARMv7 hooked +0x26e45e with the heavy variant → AS3
+     * timer-driven WebSocket timed out → "Connection closed" because
+     * hook overhead × millions of calls/sec stalled the AS3 main loop).
+     *
+     * Slot pool is separate from the heavy hook — light + heavy can
+     * coexist on different offsets in the same session.
+     */
+    public function profilerExperimentHookLightInstall(offset:Number, label:String):int {
+        if (!_successInit) return -1;
+        if (!IsAndroid()) return -1;
+        return int(_extContext.call("awesomeUtils_profilerExperimentHookLightInstall", offset, label));
+    }
+
+    public function profilerExperimentHookLightHits(offset:Number):Number {
+        if (!_successInit) return -1;
+        if (!IsAndroid()) return -1;
+        return Number(_extContext.call("awesomeUtils_profilerExperimentHookLightHits", offset));
+    }
+
+    public function profilerExperimentHookLightUninstallAll():Boolean {
+        if (!_successInit) return false;
+        if (!IsAndroid()) return false;
+        return _extContext.call("awesomeUtils_profilerExperimentHookLightUninstallAll") as Boolean;
+    }
+
+    /**
+     * RA helper — returns absolute address of recordAllocationSample
+     * (Adobe IMemorySampler vtable[12]). 0 if GC not captured yet.
+     */
+    public function profilerGetSamplerRecordAllocAddr():Number {
+        if (!_successInit) return 0;
+        if (!IsAndroid()) return 0;
+        return Number(_extContext.call("awesomeUtils_profilerGetSamplerRecordAllocAddr"));
     }
 
     public function profilerRecordFrame(frameIndex:Number,

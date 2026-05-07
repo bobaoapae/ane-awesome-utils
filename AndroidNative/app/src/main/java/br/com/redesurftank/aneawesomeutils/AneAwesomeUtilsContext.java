@@ -194,6 +194,7 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(ProfilerRegisterMethodTable.KEY, new ProfilerRegisterMethodTable());
         functionMap.put(ProfilerRecordFrame.KEY, new ProfilerRecordFrame());
         functionMap.put(ProfilerRequestGc.KEY, new ProfilerRequestGc());
+        functionMap.put(ProfilerWarmupGcObserver.KEY, new ProfilerWarmupGcObserver());
         functionMap.put(ProfilerDumpAvmCore.KEY, new ProfilerDumpAvmCore());
         functionMap.put(ProfilerSamplerHookInstall.KEY, new ProfilerSamplerHookInstall());
         functionMap.put(ProfilerSamplerHookUninstall.KEY, new ProfilerSamplerHookUninstall());
@@ -202,6 +203,10 @@ public class AneAwesomeUtilsContext extends FREContext {
         functionMap.put(ProfilerExperimentHookInstall.KEY, new ProfilerExperimentHookInstall());
         functionMap.put(ProfilerExperimentHookHits.KEY, new ProfilerExperimentHookHits());
         functionMap.put(ProfilerExperimentHookUninstallAll.KEY, new ProfilerExperimentHookUninstallAll());
+        functionMap.put(ProfilerExperimentHookLightInstall.KEY, new ProfilerExperimentHookLightInstall());
+        functionMap.put(ProfilerExperimentHookLightHits.KEY, new ProfilerExperimentHookLightHits());
+        functionMap.put(ProfilerExperimentHookLightUninstallAll.KEY, new ProfilerExperimentHookLightUninstallAll());
+        functionMap.put(ProfilerGetSamplerRecordAllocAddr.KEY, new ProfilerGetSamplerRecordAllocAddr());
 
         return Collections.unmodifiableMap(functionMap);
     }
@@ -599,10 +604,35 @@ public class AneAwesomeUtilsContext extends FREContext {
         AneAwesomeUtilsLogging.i(TAG, "Connection resources released");
     }
 
+    /** Per-process in-memory cookie store — lets a successful login on one host
+     * propagate session cookies to subsequent asset/API requests on the same
+     * host. Without this, OkHttp drops Set-Cookie headers and each asset load
+     * starts unauthenticated, which on Cloudflare-fronted sites with bot
+     * challenges causes HTTP 403 responses.
+     *
+     * Custom impl (not okhttp-urlconnection's JavaNetCookieJar) so we don't
+     * need an extra Maven dependency. Stores cookies keyed by host. */
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.List<okhttp3.Cookie>> COOKIE_JAR_STORE =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static final okhttp3.CookieJar SHARED_COOKIE_JAR = new okhttp3.CookieJar() {
+        @Override
+        public void saveFromResponse(@NonNull okhttp3.HttpUrl url, @NonNull java.util.List<okhttp3.Cookie> cookies) {
+            COOKIE_JAR_STORE.put(url.host(), cookies);
+        }
+        @NonNull
+        @Override
+        public java.util.List<okhttp3.Cookie> loadForRequest(@NonNull okhttp3.HttpUrl url) {
+            java.util.List<okhttp3.Cookie> stored = COOKIE_JAR_STORE.get(url.host());
+            return stored != null ? stored : java.util.Collections.emptyList();
+        }
+    };
+
     OkHttpClient buildClient() {
         OkHttpClient.Builder builder = new OkHttpClient.Builder()
                 .fastFallback(true)
                 .retryOnConnectionFailure(true)
+                .cookieJar(SHARED_COOKIE_JAR)
                 .dns(new Dns() {
                     @NonNull
                     @Override
@@ -664,7 +694,21 @@ public class AneAwesomeUtilsContext extends FREContext {
                 .writeTimeout(_writeTimeout, TimeUnit.SECONDS)
                 .addInterceptor(chain -> {
                     Request originalRequest = chain.request();
-                    Request requestWithUserAgent = originalRequest.newBuilder().header("User-Agent", originalRequest.header("User-Agent") + " NativeLoader/1.0").build();
+                    String origUa = originalRequest.header("User-Agent");
+                    String ua;
+                    // Workaround: questtest.redesurftank.com.br's WAF/upstream returns
+                    // HTTP 502 for almost all User-Agent values (Mozilla, AIR, okhttp,
+                    // Dalvik, etc.) but allows `curl/*` and `Java/*`. Use a curl UA
+                    // ONLY for this specific host. Other hosts (including the rest
+                    // of redesurftank.com.br such as /_cdn/widgets/) get the
+                    // standard appended UA — those endpoints reject curl/* UAs.
+                    String host = originalRequest.url().host();
+                    if (host.equals("questtest.redesurftank.com.br")) {
+                        ua = "curl/7.68.0 NativeLoader/1.0";
+                    } else {
+                        ua = (origUa != null ? origUa : "") + " NativeLoader/1.0";
+                    }
+                    Request requestWithUserAgent = originalRequest.newBuilder().header("User-Agent", ua).build();
                     return chain.proceed(requestWithUserAgent);
                 });
 
@@ -2357,6 +2401,34 @@ public class AneAwesomeUtilsContext extends FREContext {
     }
 
     /**
+     * {@code awesomeUtils_profilerWarmupGcObserver():Boolean}
+     *
+     * <p>Install the GC observer hook EARLY (at app boot) so natural startup
+     * GCs are observed and the GC singleton is captured BEFORE
+     * {@code profilerStartDeep} is called. With singleton already captured,
+     * the eager Phase 4a sampler-hook install (inside profilerStartDeep)
+     * succeeds, enabling pc0/pc1 attribution. Without this warmup, only
+     * Phase 4c typed-alloc events are emitted (still leak-suspect-able via
+     * class names, but no PC attribution).
+     *
+     * <p>Idempotent. Cost when active: ~5ns per natural GC cycle (rare);
+     * zero per AS3 alloc.
+     */
+    public static class ProfilerWarmupGcObserver implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerWarmupGcObserver";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                boolean ok = Profiler.warmupGcObserver();
+                return FREObject.newObject(ok);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "profilerWarmupGcObserver failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /**
      * Phase 4a RA — install diagnostic hook on every non-null sampler
      * vftable slot. Per-slot hit counts logged at uninstall.
      */
@@ -2439,6 +2511,20 @@ public class AneAwesomeUtilsContext extends FREContext {
         }
     }
 
+    public static class ProfilerGetSamplerRecordAllocAddr implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerGetSamplerRecordAllocAddr";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                long addr = Profiler.getSamplerRecordAllocAddr();
+                return FREObject.newObject((double) addr);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "getSamplerRecordAllocAddr failed", e);
+                try { return FREObject.newObject(0.0); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
     public static class ProfilerExperimentHookUninstallAll implements FREFunction {
         public static final String KEY = "awesomeUtils_profilerExperimentHookUninstallAll";
         @Override
@@ -2448,6 +2534,57 @@ public class AneAwesomeUtilsContext extends FREContext {
                 return FREObject.newObject(true);
             } catch (Exception e) {
                 AneAwesomeUtilsLogging.e(TAG, "experimentHookUninstallAll failed", e);
+                try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    /** LIGHT experiment hook variant — counter only, safe for hot paths. */
+    public static class ProfilerExperimentHookLightInstall implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerExperimentHookLightInstall";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                long offset = (args != null && args.length >= 1 && args[0] != null)
+                    ? (long) args[0].getAsDouble() : 0;
+                String label = "?";
+                if (args != null && args.length >= 2 && args[1] != null) {
+                    label = args[1].getAsString();
+                }
+                int slot = Profiler.experimentHookLightInstall(offset, label);
+                return FREObject.newObject(slot);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "experimentHookLightInstall failed", e);
+                try { return FREObject.newObject(-1); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerExperimentHookLightHits implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerExperimentHookLightHits";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                long offset = (args != null && args.length >= 1 && args[0] != null)
+                    ? (long) args[0].getAsDouble() : 0;
+                long hits = Profiler.experimentHookLightHits(offset);
+                return FREObject.newObject((double) hits);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "experimentHookLightHits failed", e);
+                try { return FREObject.newObject(-1.0); } catch (Exception ex) { return null; }
+            }
+        }
+    }
+
+    public static class ProfilerExperimentHookLightUninstallAll implements FREFunction {
+        public static final String KEY = "awesomeUtils_profilerExperimentHookLightUninstallAll";
+        @Override
+        public FREObject call(FREContext context, FREObject[] args) {
+            try {
+                Profiler.experimentHookLightUninstallAll();
+                return FREObject.newObject(true);
+            } catch (Exception e) {
+                AneAwesomeUtilsLogging.e(TAG, "experimentHookLightUninstallAll failed", e);
                 try { return FREObject.newObject(false); } catch (Exception ex) { return null; }
             }
         }
