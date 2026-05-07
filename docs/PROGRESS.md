@@ -959,23 +959,41 @@ Two paths remain to close the live_allocations parity:
    tracked set in one go — closing the parity gap without RA-ing
    per-class Free.
 
-**Validation tried (2026-05-06):** Hypothesis that
-`record_free_if_tracked(ptr + 0x10)` would match
-GCHeap::Alloc-returned user-pointers (chunk_base + 0x10 header,
-observed in LOGI for size=64KB returning 0x7f627f6010) was tested.
-Result: **STILL 0 free events in .aneprof** — the chunks freed
-during the 4-sec recording window weren't allocated during the
-same window (long-lived chunks reclaimed by GC). hall_idle_real
-30s window gave the same result: alloc=10110, free=0. This rules
-out simple pointer normalization as a fix; the chunks Adobe's
-MMgc reclaims via `+0x8a167c` have minute-scale lifetimes, not
-seconds.
+**RESOLVED 2026-05-06 via option 1 (proxy_ChunkAlloc).** Added
+`proxy_ChunkAlloc` at `+0x8a15a4` (the 1:1 paired Alloc dual of
+the +0x8a167c Free, signature `void*(this, size, flags)`).
+Tracking the page-aligned chunk_base it returns means subsequent
+frees at +0x8a167c hit matching shard entries. Validated via
+`_tmp_aneprof_task11_free_validate.json` (4-sec recording window
+during 64MB ByteArray churn):
 
-Tracked as follow-up. Current commit lands chunk-level Free as a
-real-but-partial fix; it doesn't break anything and produces
-correct output when chunks are both allocated AND freed via the
-chunk-level path within a recording window — option 3 above
-(chunk-walk sweep) is the path forward without further RA.
+| Metric | Before (chunk-Free only) | After (chunk-Alloc + chunk-Free) |
+|---|---|---|
+| alloc events | 405 | 461 |
+| free events | **0** | **34** |
+| live allocations | 405 | 427 (= 461 - 34) |
+| unknown frees | 0 | 0 (all matched) |
+
+The 34 frees are the chunks both allocated AND freed during the
+recording window — exactly what we want. live_allocations is no
+longer monotonic at the chunk tier. Logcat confirms install:
+```
+AneDeepMemHook: install: ChunkAlloc hook OK (target=...stub=...)
+AneDeepMemHook: install: MMgc::Free hook OK (target=...stub=...)
+```
+
+**Remaining smaller-tier gap:** Phase 5's `proxy_GCHeapAlloc` and
+`proxy_FixedAlloc` track user-pointers at finer granularity. Their
+Free duals (per-class FixedAlloc::Free) still aren't located, so
+those tracked entries continue to grow monotonically until DPC
+sees the chunk Free that contains them. For most workloads
+chunk-tier coverage is sufficient since chunk reclamation is what
+truly bounds the heap; per-object live_allocations parity would
+require either further per-class Free RA (Adobe likely inlines on
+this build per `grep ldxr|stxr` returning zero matches) or the
+chunk-walk sweep approach (option 3 above) extending each chunk
+Free to delete all shard entries within `[chunk_base, chunk_base
++ chunk_size)`. Tracked as future improvement.
 
 **ON-overhead win — `safeReadPtr` page cache (2026-05-06, applied).**
 The Phase 4a hot path was making 7 `mincore()` syscalls per event
