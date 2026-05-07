@@ -311,25 +311,45 @@ static void* hookOne(const char* lib, const char* sym, void* proxy, void** orig)
     return stub;
 }
 
-// hookOneAddr — resolve symbol via dlsym(RTLD_DEFAULT, ...) and patch the
-// resulting address. Catches the actual implementation that the dynamic
-// loader hands out, which on Adreno-backed Android devices may live in
-// `libGLESv2_adreno.so` rather than `libGLESv2.so`. Adobe's GLES call sites
-// cache function pointers from `dlsym` at boot, so patching the lib-exported
-// stub via shadowhook_hook_sym_name doesn't intercept those calls (the
-// cached pointer skips the patched prologue). Hooking the resolved address
-// directly is the same path Adobe's calls go through.
+// hookOneAddr — resolve symbol the SAME way Adobe AIR does (via
+// `eglGetProcAddress`) and patch the resulting address. Adobe caches
+// function pointers from eglGetProcAddress at boot; on Adreno-backed
+// devices that returns vendor-implementation entry points different
+// from both `libGLESv2.so`'s prologue AND `dlsym(RTLD_DEFAULT, ...)`.
+// Empirically (hall_idle_real on Cat S60 build 2026-05-06): hooking
+// the dlsym-resolved address installed cleanly but never fired
+// (texture_create=0, set_texture=0, clear_count=0 across 196 frames
+// of dynamic Hall rendering). eglGetProcAddress hands out the actual
+// pointer Adobe's call sites went through.
+typedef void* (*EglGetProcAddress_t)(const char*);
+
 static void* hookOneAddr(const char* sym, void* proxy, void** orig) {
-    void* addr = dlsym(RTLD_DEFAULT, sym);
+    static EglGetProcAddress_t g_egl_get = nullptr;
+    if (g_egl_get == nullptr) {
+        g_egl_get = reinterpret_cast<EglGetProcAddress_t>(
+            dlsym(RTLD_DEFAULT, "eglGetProcAddress"));
+        if (g_egl_get == nullptr) {
+            LOGE("dlsym(RTLD_DEFAULT, eglGetProcAddress) returned null");
+            return nullptr;
+        }
+    }
+    void* addr = g_egl_get(sym);
     if (addr == nullptr) {
-        LOGE("dlsym(RTLD_DEFAULT, %s) returned null", sym);
-        return nullptr;
+        // Fall back to dlsym if eglGetProcAddress doesn't know the symbol.
+        // This is rare for core GLES2 names but happens for vendor extensions.
+        addr = dlsym(RTLD_DEFAULT, sym);
+        if (addr == nullptr) {
+            LOGE("eglGetProcAddress(%s) and dlsym fallback both null", sym);
+            return nullptr;
+        }
     }
     void* stub = shadowhook_hook_func_addr(addr, proxy, orig);
     if (stub == nullptr) {
         LOGE("shadowhook_hook_func_addr(%s @ %p) failed: errno=%d %s",
              sym, addr, shadowhook_get_errno(),
              shadowhook_to_errmsg(shadowhook_get_errno()));
+    } else {
+        LOGI("hookOneAddr(%s) → addr=%p stub=%p", sym, addr, stub);
     }
     return stub;
 }

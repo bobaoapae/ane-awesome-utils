@@ -819,24 +819,38 @@ Cat S60 (Adreno) **doesn't actually call through the dlsym-resolved
 addresses we hooked**, despite the install succeeding at those
 addresses.
 
-**Probable root cause:** Adobe AIR resolves GLES function pointers
+**Root cause confirmed:** Adobe AIR resolves GLES function pointers
 via `eglGetProcAddress(name)` at boot, not `dlsym(RTLD_DEFAULT,
 name)`. On Adreno-backed devices these return DIFFERENT addresses
 — eglGetProcAddress hands out the vendor-specific implementation
 entry point (often inlined or in a different code page from the
-dlsym-resolved trampoline). Our hook patches the dlsym address but
-Adobe's cached eglGetProcAddress pointer never goes through it.
+dlsym-resolved trampoline). Our hook patched the dlsym address but
+Adobe's cached eglGetProcAddress pointer never went through it.
 
-**Path forward (deferred):** to reliably intercept, hook
-`eglGetProcAddress` itself with an always-on patch (analogous to
-AneDeferDrain) that records the names+addresses Adobe queries at
-boot. Then at profilerStart, hook those addresses directly via
-`shadowhook_hook_func_addr`. This is more invasive than the dlsym
-approach but is the only way to catch Adobe's actual call sites
-on Adreno. Tracked as future improvement; the v1 hooks already
-provide draw_calls + primitive_count which is the most useful
-render telemetry. Texture telemetry is a nice-to-have that lands
-when the eglGetProcAddress-based binding ships.
+**RESOLVED 2026-05-06.** `hookOneAddr` switched from
+`dlsym(RTLD_DEFAULT, sym)` to `eglGetProcAddress(sym)` (with dlsym
+fallback for symbols eglGetProcAddress doesn't know). This resolves
+the same address Adobe AIR caches at boot — our hooks now sit on
+the actual call path. Validated via hall_idle_real on Cat S60
+(30s recording window):
+
+| Metric | Before (dlsym, broken) | After (eglGetProcAddress) |
+|---|---|---|
+| frames | 196 | 198 |
+| clear_count | 0 | **198** (1/frame) |
+| set_texture_count | 0 | **6749** (~34/frame) |
+| texture_update_count | 0 | **415** |
+| texture_create_count | 0 | **2** |
+| texture_create_bytes | 0 | **7,819,264** (~7.8MB) |
+| texture_upload_bytes | 0 | **115,740,000** (~115MB) |
+| render_target_change_count | 0 | 0 (no FBO switch in Hall) |
+| draw_calls | 6460 | 6528 |
+| primitive_count | 151360 | 153006 |
+
+All v2 hooks now fire correctly and populate render_frame events
+with the same telemetry granularity as the Windows D3D9 side. The
+eglGetProcAddress fallback to dlsym is preserved for vendor
+extensions where eglGetProcAddress returns null.
 
 **Phase 6 partial parity (2026-05-06).** `AndroidRenderHook` previously
 emitted `RenderFrame` events with `primitive_count`, `clear_count`,
