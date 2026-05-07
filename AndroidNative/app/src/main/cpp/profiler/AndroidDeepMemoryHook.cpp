@@ -300,16 +300,19 @@ static void proxy_MMgcFree(void* self, void* ptr) {
     if (ptr != nullptr && g_active.load(std::memory_order_acquire)) {
         DeepProfilerController* dpc = g_controller.load(std::memory_order_acquire);
         if (dpc != nullptr) {
-            // Look up the chunk size BEFORE record_free_if_tracked erases the
-            // entry. If it's a tracked chunk, sweep all sub-allocations within
-            // [chunk_base, chunk_base + chunk_size) — those finer-tier entries
-            // came from proxy_GCHeapAlloc / proxy_FixedAlloc tracking user
-            // pointers within this chunk; once the chunk itself is reclaimed
-            // they're implicitly freed too.
+            // If this is a tracked chunk, sweep [chunk_base, chunk_base +
+            // chunk_size) — the sweep emits Free events for the chunk itself
+            // AND any finer-tier sub-allocations that proxy_GCHeapAlloc /
+            // proxy_FixedAlloc tracked within. If it's NOT a tracked chunk,
+            // fall back to single-pointer record_free_if_tracked (which will
+            // silently drop if the ptr isn't in the map). This avoids the
+            // wasted writer-queue entry from emitting Free for chunk_base
+            // twice (once via record_free_if_tracked, once by the sweep).
             std::uint64_t chunk_size = dpc->tracked_allocation_size(ptr);
-            dpc->record_free_if_tracked(ptr);
             if (chunk_size > 0) {
                 dpc->record_free_chunk_sweep(ptr, chunk_size);
+            } else {
+                dpc->record_free_if_tracked(ptr);
             }
         }
     }
