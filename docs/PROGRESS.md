@@ -947,10 +947,35 @@ Two paths remain to close the live_allocations parity:
    (+0x89c42c) as the anchor and seeking offsets that fire 1:1
    under churn.
 
+3. **Chunk-walk free sweep** (recommended): when proxy_MMgcFree
+   fires for a chunk_base, walk our allocation shard maps and
+   remove ALL entries with ptrs in `[chunk_base, chunk_base+size)`.
+   Requires intercepting the size returned by helper
+   `+0x8a1744` (called by `+0x8a167c` to get the chunk byte size).
+   The Free body computes `(size+0xfff) >> 12` for page count and
+   subtracts from `[this+0x1118]`; this size is also exactly what
+   we'd need to sweep our shard map. Implementing this means each
+   chunk reclamation correctly drops ALL its allocs from the
+   tracked set in one go — closing the parity gap without RA-ing
+   per-class Free.
+
+**Validation tried (2026-05-06):** Hypothesis that
+`record_free_if_tracked(ptr + 0x10)` would match
+GCHeap::Alloc-returned user-pointers (chunk_base + 0x10 header,
+observed in LOGI for size=64KB returning 0x7f627f6010) was tested.
+Result: **STILL 0 free events in .aneprof** — the chunks freed
+during the 4-sec recording window weren't allocated during the
+same window (long-lived chunks reclaimed by GC). hall_idle_real
+30s window gave the same result: alloc=10110, free=0. This rules
+out simple pointer normalization as a fix; the chunks Adobe's
+MMgc reclaims via `+0x8a167c` have minute-scale lifetimes, not
+seconds.
+
 Tracked as follow-up. Current commit lands chunk-level Free as a
 real-but-partial fix; it doesn't break anything and produces
 correct output when chunks are both allocated AND freed via the
-chunk-level path within a recording window.
+chunk-level path within a recording window — option 3 above
+(chunk-walk sweep) is the path forward without further RA.
 
 **ON-overhead win — `safeReadPtr` page cache (2026-05-06, applied).**
 The Phase 4a hot path was making 7 `mincore()` syscalls per event
